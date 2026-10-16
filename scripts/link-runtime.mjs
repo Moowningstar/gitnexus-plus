@@ -60,10 +60,26 @@ function findRuntimeRoot() {
   return null;
 }
 
+/**
+ * Whether this run is the project's own checkout rather than an installed copy.
+ *
+ * `postinstall` runs on **every** install, including when this package is a
+ * dependency inside someone else's tree. Linking the host's runtime packages into
+ * that tree is not ours to do, and a reviewer reading a plugin for "surprising
+ * install-time behaviour" would be right to flag a postinstall that walks PATH,
+ * probes for a DSH installation and rewrites `node_modules`. Installed copies live
+ * under `node_modules/`, so that is the test.
+ */
+function isOwnCheckout() {
+  return !/(^|[\\/])node_modules([\\/]|$)/.test(process.cwd());
+}
+
 function main() {
+  if (!isOwnCheckout()) return;
+
   const runtime = findRuntimeRoot();
   if (runtime === null) {
-    // Expected on a consumer install: the packages are real dependencies there.
+    // Expected on a machine without DSH: nothing to link from.
     return;
   }
 

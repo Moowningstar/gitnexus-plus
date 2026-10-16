@@ -1,0 +1,29 @@
+Fix the two things a community listing reviews for
+
+The awesome-dsh-plugin contributing guide makes both of these explicit
+review criteria, and the published 0.1.0 fails both.
+
+`postinstall` no longer runs outside this project's own checkout. It exists
+to relink the DSH runtime packages after `npm install` prunes them, which is
+a development-repo problem; as a dependency it walked PATH, probed for a DSH
+installation and wrote junctions into someone else's `node_modules`. The
+guide lists "surprising install-time behaviour" as something a reviewer
+looks for, and that is exactly what this was. Installed copies live under
+`node_modules/`, so that is the guard.
+
+`peerDependencies` now declare the packages this plugin actually imports at
+runtime. The previous set had this backwards: it declared `@deepseek-ai/cordis`,
+which is imported as a *type* and erased at build time, and omitted
+`@deepseek-ai/dsh-tools` and `@deepseek-ai/schemastery`, which are real
+runtime imports. `@deepseek-ai/dsh-client-ui-primitives` is deliberately still
+absent — the client half reaches it through the loader's own `require`, not
+through Node resolution, so a peer entry would declare an edge never followed.
+
+The dsh-tools range carries an explicit prerelease branch
+(`>=0.2.0-rc.2 <0.3.0-0`) rather than the broad-looking `>=0.2.0-rc.2 <0.3.0`.
+node-semver only admits a prerelease into a range when a comparator shares its
+exact major.minor.patch tuple *and* itself carries a prerelease tag, so the
+latter silently excludes every 0.2.0-* build — the failure mode the guide
+documents. Verified with semver itself rather than reasoned about: it matches
+0.2.0-rc.2, 0.2.0-rc.5, 0.2.0 and 0.2.5, and excludes 0.2.0-rc.1, 0.3.0-rc.1
+and 0.1.0-rc.6.
