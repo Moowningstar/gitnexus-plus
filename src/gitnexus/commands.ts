@@ -50,6 +50,10 @@ export interface MaintenanceCommand {
 
 export interface MaintenanceOptions {
   platform?: NodeJS.Platform;
+  /**
+   * Add `--skip-fts`. Off by default, and that default is load-bearing — see the
+   * measurement in {@link maintenanceCommands}.
+   */
   skipFts?: boolean;
   memoryOff?: boolean;
   gitnexusHome?: string | null;
@@ -68,13 +72,30 @@ interface ResolvedOptions {
  *
  * Pure, because the exact text is the deliverable — a reviewer should be able to
  * assert on it without spawning anything.
+ *
+ * WHY `--skip-fts` IS NOT A DEFAULT
+ * ---------------------------------
+ * It was one, on the reasoning that the FTS extension installs out-of-process and a
+ * confined process denies that (`spawn EPERM`). Measured on a 39-file repository,
+ * that reasoning is wrong in the case that matters:
+ *
+ *   index has FTS + `--skip-fts`   179.22 s   full DB wipe + bulk COPY
+ *   index has FTS, no flag           8.57 s   FTS fails to load, degrades cleanly
+ *   index has no FTS + `--skip-fts`  8.25 s   changed=0, 39 rows preserved
+ *   same, warm                       6.56 s
+ *
+ * Disabling a search index the store already has forces GitNexus to rebuild the
+ * whole graph store, which is the exact opposite of incremental — a 21x penalty on
+ * the one transition an operator is most likely to hit. Letting FTS fail on its own
+ * costs nothing: it prints a warning and indexes anyway.
+ *
+ * The flag remains available for the case it was written for, where the extension
+ * file is *absent* and the install itself is what fails.
  */
 export function maintenanceCommands(repoPath: string, options: MaintenanceOptions = {}): MaintenanceCommand[] {
   const resolved: ResolvedOptions = {
     platform: options.platform ?? process.platform,
-    // Both default ON: the values measured to work inside a confined process. A
-    // caller that is not sandboxed opts out explicitly.
-    skipFts: options.skipFts !== false,
+    skipFts: options.skipFts === true,
     memoryOff: options.memoryOff !== false,
     gitnexusHome: options.gitnexusHome ?? null,
   };
@@ -112,7 +133,9 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
       argv: line([]),
       shell: envPrefix() + line([]),
       destructive: false,
-      caveat: skipFts ? '不含关键词搜索（FTS）；需要时再单独执行 --repair-fts。' : null,
+      caveat: skipFts
+        ? '--skip-fts 会让一个已有 FTS 的索引清库重建（实测 179s vs 8.5s），非必要不要加。'
+        : '增量刷新在稳态下是秒级（小仓库实测约 7s，日志会写 changed/added/deleted）——不需要为了"刷新"而加 --force。',
     },
     {
       mode: 'full',

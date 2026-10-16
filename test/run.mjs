@@ -428,8 +428,20 @@ async function commandTests() {
   check('posix syntax differs', posix[0].shell.startsWith("GITNEXUS_MEMORY='off'"), posix[0].shell);
   check('posix includes GITNEXUS_HOME when set', posix[0].shell.includes("GITNEXUS_HOME='/tmp/gh'"), posix[0].shell);
 
+  // `--skip-fts` is OFF by default, and that default is a measured decision rather
+  // than a style choice: disabling a search index the store already has forces a full
+  // graph-store rebuild (179.22 s against 8.57 s on a 39-file repository), which is
+  // the opposite of incremental. The flag survives for the case it was written for —
+  // an environment where the extension cannot even be installed.
+  check(
+    'the default commands omit --skip-fts',
+    win.every((c) => !c.argv.includes('--skip-fts')),
+    win.map((c) => c.argv).join(' | '),
+  );
+  check('--skip-fts is still available on request', maintenanceCommands('/x', { skipFts: true })[0].argv.includes('--skip-fts'));
+
   const noFts = maintenanceCommands('/x', { platform: 'linux', skipFts: false });
-  check('--skip-fts can be turned off', !noFts[0].argv.includes('--skip-fts'), noFts[0].argv);
+  check('passing skipFts: false explicitly is the same as the default', !noFts[0].argv.includes('--skip-fts'), noFts[0].argv);
 
   const single = maintenanceCommands("/home/o'brien/x", { platform: 'linux' });
   check('single quotes in a path are escaped', single[0].argv.includes("'\\''"), single[0].argv);
