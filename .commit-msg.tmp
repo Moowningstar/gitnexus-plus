@@ -1,0 +1,28 @@
+Rewrite in TypeScript; read-only coverage panel for GitNexus indexes
+
+Reports what a GitNexus index left out: files skipped by the size cap,
+oversized generated/minified output that inflates a language share, and
+files a fresh scan would select but the index does not cover.
+
+Three surfaces over one engine: a `gitnexus_coverage` tool for the model,
+a loopback HTTP route, and a right-sidebar panel.
+
+The panel is project-scoped, not registry-driven — it answers for the
+project the session's workspace points at, so a fresh clone or a second
+working tree is still reportable.
+
+Maintenance is handed over, not executed. The plugin spawns no processes:
+it prints the exact `gitnexus analyze` command, and running it goes through
+DSH's own approval path. A plugin that spawns bypasses that path, so nothing
+would ask the operator whether a thirty-minute write was intended.
+
+Migrated from JS+JSDoc to TypeScript under `strict`, because implicit `any`
+is a silent failure — it does not error, it just stops the checker working
+exactly where it was needed. The migration surfaced defects no runtime path
+had reported, including a documented field (`shareOfScanned`) that no code
+path ever assigned, a `generatedHint` documented as a string that is really
+a boolean, and a tool output schema the DSH DSL rejects at load time.
+
+Two compile targets, no bundler: the host half emits ESM plus declarations
+to lib/, and the browser half is one self-contained module compiled to
+CommonJS and text-wrapped into the client loader's factory artifact.

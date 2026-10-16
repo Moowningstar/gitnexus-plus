@@ -1,0 +1,15 @@
+# Normalise line endings in the repository, and check out with LF everywhere.
+#
+# Without this, Git warns on every add that LF will become CRLF on the next
+# checkout, and a Windows contributor ends up committing CRLF while a Linux one
+# commits LF — so the same file shows as fully rewritten whenever it crosses
+# platforms, and `git blame` stops being useful.
+* text=auto eol=lf
+
+# Lockfiles are generated; a manual conflict resolution in one is always wrong.
+package-lock.json -diff linguist-generated
+
+# The research notes and the plan document are prose. Marking them keeps GitHub's
+# language statistics from counting them as the bulk of the repository.
+research/*.md linguist-documentation
+*.md linguist-documentation

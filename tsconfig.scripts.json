@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+
+    // The build scripts stay `.mjs` — a bootstrap script must not depend on the build
+    // it bootstraps, so they cannot be compiled — but they are still **checked**.
+    // Leaving them unchecked would reintroduce exactly the implicit-`any` liability
+    // this migration exists to remove, just in a smaller corner.
+    "allowJs": true,
+    "checkJs": true,
+
+    // `noUnusedLocals`/`noUnusedParameters` off here: these are small procedural
+    // scripts where an unused catch binding or an intentionally-ignored parameter is
+    // ordinary, and the interesting failures are type errors, not tidiness.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["scripts/**/*.mjs", "types/**/*.d.ts"]
+}

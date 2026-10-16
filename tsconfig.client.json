@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "lib": ["ES2022", "DOM"],
+
+    "outDir": "build/client",
+    "rootDir": "src/client",
+
+    // Off deliberately. `import * as React from 'react'` then compiles to a bare
+    // `const React = require("react")`, which is exactly what the loader factory
+    // expects and adds no helper preamble to the wrapped artifact. With interop on,
+    // tsc injects `__importStar` and the bundle grows boilerplate that the wrapping
+    // step then has to carry into every page load.
+    "esModuleInterop": false,
+    "allowSyntheticDefaultImports": false,
+
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "removeComments": false
+  },
+  "include": ["src/client/**/*.ts", "types/**/*.d.ts"]
+}

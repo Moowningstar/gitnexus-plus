@@ -1,0 +1,61 @@
+{
+  "name": "dsh-gitnexus-plus",
+  "version": "0.1.0",
+  "description": "DSH plugin: visualize a GitNexus project index and update it incrementally, with large-file / index-coverage monitoring.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-gitnexus-coverage": "./lib/bin/gitnexus-coverage.js"
+  },
+  "files": [
+    "lib",
+    "scripts/link-runtime.mjs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.host.json && node scripts/build-client.mjs",
+    "prepare": "npm run build",
+    "postinstall": "node scripts/link-runtime.mjs",
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.scripts.json && tsc -p tsconfig.client.json",
+    "coverage": "node lib/bin/gitnexus-coverage.js",
+    "test": "npm run build && node test/run.mjs && node test/plugin.mjs && node test/client.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}

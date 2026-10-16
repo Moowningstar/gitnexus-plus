@@ -1,0 +1,18 @@
+# Build output. Both are fully generated — `lib/` by tsc, `build/` by the client
+# compile — so nothing hand-written lives here and nothing here is worth a diff.
+# `npm run prepare` regenerates them on install and before publish.
+lib/
+build/
+
+# Dependencies. The DSH runtime packages are linked in from an existing DSH install
+# by `scripts/link-runtime.mjs` (wired to `postinstall`), so this tree is machine
+# state, not project state.
+node_modules/
+
+# Local server logs from running the web profile against this checkout.
+web-out.txt
+web-err.txt
+*.log
+
+# Pack artifacts.
+*.tgz

@@ -1,0 +1,18 @@
+# dsh-gitnexus-plus — bundle layer.
+#
+# Applied when a profile lists this package in `dsh.profile.bundles`. The row id
+# is what a profile-level patch targets to change this plugin's config, so it is
+# deliberately stable and matched by `name`.
+- insert:
+    - id: gitnexus-plus
+      name: dsh-gitnexus-plus
+      config:
+        # Cap for *reporting* only. The index's own recorded cap wins when present,
+        # because judging an index by a threshold it was not built with would
+        # misreport covered files as skipped.
+        scanDefaultCapKb: 512
+        # Sampling budget for the minified heuristic: how many oversized files to
+        # probe by reading their head. Bounded because a repository may hold
+        # hundreds of skipped bundles and this is a heuristic, not a verdict.
+        minifiedSampleLimit: 40
+        serveRoutes: true
