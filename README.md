@@ -99,11 +99,19 @@ In DSH the plugin exposes:
 - **panel** — a right-sidebar tab type `gitnexus`, opened from the sidebar's **+** →
   guide page ("GitNexus 索引")
 
-The route is read-only and accepts only directories that are already GitNexus
+The coverage route is read-only and accepts only directories that are already GitNexus
 indexes, so it cannot be turned into a filesystem probe; it is additionally
 restricted to loopback peers because a third-party DSH route is unauthenticated by
-default on a bare `dsh web` profile. **The plugin has no mutating route** — see
-below.
+default on a bare `dsh web` profile.
+
+There is now a **second** route, `/api/gitnexus/analyze`, and it is the only one that
+can change anything. It answers `POST` to start an incremental refresh, `GET` to report
+where that got to, and `DELETE` to stop it. It is a separate module from the coverage
+route so the read-only half keeps a method policy that cannot mutate — the shared guard
+takes the accepted methods from the route rather than hard-coding one set for both. The
+mutating verbs additionally pass the write guard, which refuses cross-origin requests;
+loopback alone is not enough, because any page the operator visits can reach
+`127.0.0.1`. See **Maintenance** below for what it will and will not do.
 
 ## TypeScript, and why the build looks the way it does
 
@@ -211,41 +219,72 @@ The workspace comes from the slot's session-scoped props (`useWorkspaces` matche
 by `sessionId`); the host route accepts any directory **that is already a GitNexus
 index**, which is the bound that keeps it from being a filesystem probe.
 
-## Maintenance: the commands are handed over, not executed
+## Maintenance: the refresh runs here, the escape hatches do not
 
-Two actions the read-only panel cannot resolve on its own:
+Two situations the read-only half cannot resolve on its own:
 
-- **初始化索引** — the project has no index yet.
+- **初始化索引 / 增量刷新** — the index is missing or behind HEAD. This one the plugin
+  runs for you.
 - **强制全量重构** — the incremental refresh has hung. GitNexus's update path is not
-  reliably terminating, and when it wedges a full rebuild is the only way out.
+  reliably terminating, and when it wedges a full rebuild is the only way out. Handed
+  over as text.
 
-The panel shows the exact command for each, with a copy button, and **does not run
-them**. It never spawns a process. An earlier revision did expose these as buttons
-that executed directly, and that was wrong for a reason that has nothing to do with
-convenience: a plugin that spawns processes bypasses the host's permission system.
-Nothing would ask the operator whether a thirty-minute write against their working
-tree was intended, and nothing would leave an audit trail of the escalation.
-Handing over the command keeps the decision — and the approval — on the path the
-product already audits.
+**增量刷新 runs through the host's shell executor.** An earlier revision handed over
+every command as text, justified by "a plugin that spawns processes bypasses the
+permission system". That reasoning was wrong, and the correction is worth stating
+precisely:
 
-The commands are not a bare `gitnexus analyze`, because that does not work in every
-deployment:
+DSH's approval service governs **sandbox escalation** — widening the scope a session was
+granted. Its audit pair must be turn-enclosed, which is why `ApprovalService.request()`
+throws outside an open turn; a panel route has no turn, so it cannot ask. It also has
+nothing to ask about here: this command writes `.gitnexus/` **inside the workspace**,
+already within the granted scope.
+
+Confinement is not something a caller opts into. It is what `ctx.shell` *is* in a given
+deployment — `dsh-pwsh-local` exposes the argv seam that `dsh-pwsh-sandbox` wraps
+through `ctx.sandbox.confine`. So routing through the executor gives this plugin exactly
+the isolation your own shell commands get.
+
+What the plugin commits to, and what is tested:
+
+- **It never sets `sandboxPolicy`.** Requesting one would be this plugin choosing its
+  own confinement — escalation, asked for through a door that cannot ask. A denial comes
+  back as `denied` and **is never retried wider**.
+- **One run per repository.** Two concurrent `analyze` processes contend for the same
+  store, and the second reports a failure that says nothing about the repository.
+- **`--index-only` always.** Without it `analyze` rewrites `AGENTS.md`, `CLAUDE.md` and
+  the agent skill files in your tree — a far larger change than "refresh the index".
+- **A confirmation before it starts**, stating the exact command, what it touches and
+  how long it takes.
+- **Cancellable**, with a ten-minute ceiling by default (`analyzeTimeoutMs`).
+
+The full rebuild still has no button, because the host route does not implement
+`--force`. A button that quietly ran something other than its label would be worse than
+no button.
+
+The commands handed over are not a bare `gitnexus analyze`, because that does not work
+in every deployment:
 
 ```
 $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; \
-  gitnexus analyze --index-only --skip-fts '<project>'
+  gitnexus analyze --index-only '<project>'
 
 $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; \
-  gitnexus analyze --index-only --skip-fts --force '<project>'
+  gitnexus analyze --index-only --force '<project>'
 ```
 
 - `GITNEXUS_MEMORY=off` — the CLI otherwise re-spawns itself with a larger heap over
   piped stdio, which a confined sandbox denies (`spawn EPERM`).
 - `NODE_OPTIONS=--max-old-space-size=8192` — supplies the heap that respawn wanted.
-- `--skip-fts` — the FTS extension installs out-of-process and fails the same way.
 - `--index-only` — the default `analyze` also rewrites `AGENTS.md`, `CLAUDE.md` and
   agent skill files inside your repository. A maintenance action must not edit the
   working tree.
+
+`--skip-fts` is **no longer** part of either command. Measured on a 39-file repository,
+disabling a search index the store already has forces a full graph-store rebuild —
+179.22 s against 8.57 s, a 21× penalty on the transition an operator is most likely to
+hit, and the opposite of incremental. Letting FTS fail on its own costs nothing: it
+prints a warning and indexes anyway.
 
 The panel prints these rationales next to the commands, so they do not look
 arbitrary. `src/gitnexus/commands.js` is pure and asserted verbatim by tests.
@@ -269,17 +308,28 @@ because this package declares `dsh.bundle`.
   dependencies and never imports `gitnexus`; it reads an index another tool produced
   and, when it can, deep-imports the upstream scan primitives at runtime. That design
   keeps it a pure observer, but it makes "the operator has no GitNexus" a reachable
-  state that nothing currently checks. The engine degrades correctly — `scan.ts` falls
-  back to its own walker and reports `primitives: 'fallback'`, and the built-in size
-  caps apply — but **the panel does not yet say so**, and on a project with no index it
-  still hands over `gitnexus analyze …`, which fails with `command not found` on a
-  machine that has no GitNexus. `src/gitnexus/toolchain.ts` implements the three-state
-  probe (`ready` / `library-only` / `absent`, separating "the library tree exists" from
-  "a CLI is on PATH", because they gate different promises); it is not yet wired into
-  the report. Until it is, treat the fallback as silent: a report that reuses GitNexus's
-  own scan rules and one that fell back to an approximation are not distinguished in
-  the panel, and the fallback walker deliberately does **not** implement upstream's
-  ignore rules faithfully, so its uncovered-file count can carry false positives.
+  state. `src/gitnexus/toolchain.ts` implements a three-state probe (`ready` /
+  `library-only` / `absent`, separating "the library tree exists" from "a CLI is on
+  PATH", because they gate different promises), and the refresh runner now consults it
+  **before spawning anything**: with no CLI it reports `unavailable` and tells the
+  operator to install one, rather than starting a process that cannot work. The engine
+  also degrades correctly on its own — `scan.ts` falls back to its own walker and
+  reports `primitives: 'fallback'`, and the built-in size caps apply.
+- **A report that reused GitNexus's scan rules and one that fell back to an
+  approximation are still not distinguished in the panel.** The probe's verdict is not
+  yet carried into `CoverageReport`, so the fallback is silent: the built-in walker
+  deliberately does **not** implement upstream's ignore rules faithfully, and its
+  uncovered-file count can therefore carry false positives.
+- **The refresh runs outside the conversation, and that has a real consequence.** A
+  command started from the panel goes through `ctx.shell` and is confined exactly as
+  your own shell commands are, but it is **not** a tool call: it writes no
+  `approval/asked` + `approval/decided` pair into the session log, and it does not
+  appear in the transcript. That pair could not be written even if it were wanted —
+  `ApprovalService.request()` requires an open turn and throws without one, which is
+  also why there is nothing to approve: the command does not escalate. The audit record
+  is the run state the panel holds, which is per-process and is not persisted. If you
+  want a refresh on the conversation's record, run the handed-over command in the
+  session instead; that path is unchanged.
 - **Walk cost scales with file count.** ~29 000 files takes ~1.4 s warm, ~13 s on a
   cold filesystem cache. The host half caches reports for 15 s; a panel that polls
   faster than that gains nothing.
