@@ -261,6 +261,69 @@ interface ClientMaintenance {
   rationale?: string[];
 }
 
+/**
+ * A refresh the panel started, as the host reports it.
+ *
+ * `state` is a union rather than a boolean because the interesting outcomes are the
+ * ones that are neither success nor failure: `denied` means the sandbox refused and
+ * this plugin will not escalate, `unavailable` means the deployment has no shell or no
+ * GitNexus — an operator acts on those differently from a crash.
+ */
+interface ClientAnalyzeRun {
+  state: 'unavailable' | 'running' | 'done' | 'failed' | 'timed-out' | 'cancelled' | 'denied';
+  command: string;
+  startedAt: number;
+  finishedAt: number | null;
+  exitCode: number | null;
+  message: string | null;
+  output: string;
+}
+
+/**
+ * How a run's state reads at a glance.
+ *
+ * Typed to the primitive's own union rather than `string`, so a state added to
+ * `ClientAnalyzeRun` without a mapping here fails to compile instead of rendering a
+ * dot the primitive silently falls back on.
+ */
+function runStateTone(state: ClientAnalyzeRun['state']): primitives.StateDotState {
+  switch (state) {
+    case 'done':
+      return 'done';
+    case 'running':
+      // The primitive spells this `ongoing`; the host calls it `running`.
+      return 'ongoing';
+    case 'cancelled':
+      return 'idle';
+    // Not errors: the sandbox did its job, and the operator's next step is to run the
+    // command themselves rather than to investigate a failure.
+    case 'denied':
+    case 'unavailable':
+      return 'warning';
+    default:
+      return 'error';
+  }
+}
+
+function runStateLabel(state: ClientAnalyzeRun['state']): string {
+  switch (state) {
+    case 'unavailable':
+      return '无法执行';
+    case 'running':
+      return '刷新中';
+    case 'done':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'timed-out':
+      return '超时终止';
+    case 'cancelled':
+      return '已取消';
+    case 'denied':
+      return '沙箱拒绝';
+  }
+}
+
 /** Which context props the slot actually supplied. */
 interface ContextDiagnostic {
   present: string[];
@@ -1471,15 +1534,43 @@ function contextDiagnostic(props: SlotProps): ContextDiagnostic {
  *
  * @param {{maintenance: any, projectPath: string | null, indexed: boolean}} props
  */
-function MaintenanceSection({ maintenance, projectPath, indexed }: { maintenance: ClientMaintenance; projectPath: string | null; indexed: boolean }) {
+function MaintenanceSection({
+  maintenance,
+  projectPath,
+  indexed,
+  run,
+  runError,
+  now,
+  onStartRun,
+  onCancelRun,
+}: {
+  maintenance: ClientMaintenance;
+  projectPath: string | null;
+  indexed: boolean;
+  run: ClientAnalyzeRun | null;
+  runError: string | null;
+  now: number;
+  onStartRun: () => void;
+  onCancelRun: () => void;
+}) {
   // `projectPath` is part of the prop set for the header, which builds the commands
   // from it; the body does not read it.
   void projectPath;
   const [copied, setCopied] = React.useState<string | null>(null);
+  const [confirming, setConfirming] = React.useState(false);
   const commands = Array.isArray(maintenance?.commands) ? maintenance.commands : [];
   if (commands.length === 0) return null;
 
   const applicable = indexed ? 'full' : 'init';
+  // Normalised rather than trusted. The declared type says `ClientAnalyzeRun | null`,
+  // but a React element built without the prop arrives as `undefined` — which is
+  // exactly what happened the first time this component was rendered by a caller that
+  // predated the prop. `run === null` alone crashed on it.
+  const activeRun = run ?? null;
+  const running = activeRun?.state === 'running';
+  const at = typeof now === 'number' ? now : Date.now();
+  const elapsed =
+    activeRun === null ? 0 : Math.max(0, Math.round(((activeRun.finishedAt ?? at) - activeRun.startedAt) / 1000));
 
   const copy = (command: ClientMaintenanceCommand): void => {
     const write =
@@ -1501,7 +1592,69 @@ function MaintenanceSection({ maintenance, projectPath, indexed }: { maintenance
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '4px' } },
-    h('div', { style: MUTED }, '在会话中执行（沙箱与提权由 DSH 处理）'),
+    // The old line said "复制后到会话执行". That stopped being the whole story once the
+    // plugin could start the run itself, so the sentence says which parts it runs and
+    // which it only hands over.
+    h(
+      'div',
+      { style: MUTED },
+      '增量刷新可直接执行（走 DSH 的 shell 执行器，沙箱与其它命令一致，本插件不申请扩权）；其余命令复制后到会话执行。',
+    ),
+
+    // The run sits above the commands rather than under one of them: the host holds a
+    // single run per repository, and nesting it would imply the two variants have
+    // separate ones.
+    activeRun === null
+      ? null
+      : h(
+          'div',
+          {
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '4px',
+              padding: '6px 8px',
+              border: HAIRLINE,
+              borderRadius: '6px',
+              background: SOFT_BG,
+            },
+          },
+          h(
+            'div',
+            { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            h(StateDot, { state: runStateTone(activeRun.state) }),
+            h('span', { style: { fontWeight: 600 } }, runStateLabel(activeRun.state)),
+            h('span', { style: MUTED }, activeRun.state === 'running' ? `已运行 ${elapsed}s` : `${elapsed}s`),
+            h('span', { style: { flex: 1 } }),
+            running
+              ? h(Button, { variant: 'ghost', onClick: onCancelRun }, '取消')
+              : h(Button, { variant: 'ghost', onClick: onStartRun }, '再次执行'),
+          ),
+          activeRun.message === null ? null : h('div', { style: MUTED }, activeRun.message),
+          // The output is the evidence. A run that reports success with a warning in
+          // its log is a different outcome from one that does not, and hiding the text
+          // would leave the panel's own verdict as the only thing to check.
+          activeRun.output === ''
+            ? null
+            : h(
+                'pre',
+                {
+                  style: {
+                    ...styles.mono,
+                    margin: 0,
+                    whiteSpace: 'pre-wrap',
+                    maxHeight: '9em',
+                    overflow: 'auto',
+                  },
+                },
+                activeRun.output,
+              ),
+        ),
+
+    runError === null
+      ? null
+      : h('div', { style: { ...MUTED, color: 'var(--dsw-color-danger, inherit)' } }, runError),
+
     commands.map((command) =>
       h(
         'div',
@@ -1523,6 +1676,16 @@ function MaintenanceSection({ maintenance, projectPath, indexed }: { maintenance
           command.mode === applicable ? h(Tag, { tone: 'solid' }, '当前适用') : null,
           command.destructive ? h(Tag, { tone: 'outline' }, '破坏性') : null,
           h('span', { style: { flex: 1 } }),
+          // Only the incremental command gets a button, and only because it is the one
+          // the host route implements. A button on `--force` would quietly run
+          // something other than what its label says.
+          command.mode === 'init'
+            ? h(
+                Button,
+                { variant: 'ghost', disabled: running, onClick: () => setConfirming(true) },
+                running ? '运行中' : '执行增量刷新',
+              )
+            : null,
           h(
             Button,
             { variant: 'ghost', onClick: () => copy(command) },
@@ -1558,6 +1721,38 @@ function MaintenanceSection({ maintenance, projectPath, indexed }: { maintenance
             maintenance.rationale.map((note, index) => h('div', { key: index }, `· ${note}`)),
           )
         : null,
+
+    // The confirmation. It states the command, what it touches, and how long it takes:
+    // "增量刷新" alone does not tell an operator that a process is about to run against
+    // their working tree, or that this is seconds rather than minutes.
+    h(
+      primitives.RiskConfirmation,
+      {
+        open: confirming,
+        title: '执行增量刷新？',
+        onCancel: () => setConfirming(false),
+        onConfirm: () => {
+          setConfirming(false);
+          onStartRun();
+        },
+      },
+      h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('div', null, '将在项目目录下运行：'),
+        h(
+          'code',
+          { style: { ...styles.mono, display: 'block', wordBreak: 'break-all', userSelect: 'all' } },
+          commands.find((c) => c.mode === 'init')?.shell ?? 'gitnexus analyze --index-only',
+        ),
+        h(
+          'div',
+          { style: MUTED },
+          '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
+            '小仓库实测约 7 秒。命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致，本插件不申请扩权。',
+        ),
+      ),
+    ),
   );
 }
 
@@ -1590,7 +1785,14 @@ interface CoverageViewProps {
   error: string | null;
   /** When the report was read from the host, ISO. */
   readAt: string | null;
+  /** The refresh run, or null when nothing has been started in this host. */
+  run: ClientAnalyzeRun | null;
+  runError: string | null;
+  /** Advances once a second while a run is in flight, so elapsed time moves. */
+  now: number;
   onRefresh: () => void;
+  onStartRun: () => void;
+  onCancelRun: () => void;
 }
 
 function CoverageView({
@@ -1601,7 +1803,12 @@ function CoverageView({
   busy,
   error,
   readAt,
+  run,
+  runError,
+  now,
   onRefresh,
+  onStartRun,
+  onCancelRun,
 }: CoverageViewProps) {
   // Whether an index exists decides which maintenance command is applicable. When
   // the project could not even be identified there is nothing to claim, so it is
@@ -1687,7 +1894,7 @@ function CoverageView({
               title: '维护命令',
               meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed: false }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, now, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -1718,7 +1925,7 @@ function CoverageView({
               title: '初始化索引',
               meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, now, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -1970,7 +2177,7 @@ function CoverageView({
               `${maintenance.commands?.length ?? 0} 条 · 复制后到会话执行（沙箱与提权由 DSH 处理）`,
             ),
           },
-          h(MaintenanceSection, { maintenance, projectPath, indexed }),
+          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, now, onStartRun, onCancelRun }),
         ),
   );
 }
@@ -1997,6 +2204,77 @@ function CoveragePanel(props: SlotProps) {
   const [readAt, setReadAt] = React.useState<string | null>(null);
   // Only a manual refresh bypasses the host's cache; the initial load does not.
   const wantsFresh = reloadToken > 0;
+
+  // The refresh run, and the tick that makes its elapsed time advance. `run` is null
+  // until something is started in this host's lifetime — a state the card renders as
+  // "not run yet" rather than as a failure.
+  const [run, setRun] = React.useState<ClientAnalyzeRun | null>(null);
+  const [runError, setRunError] = React.useState<string | null>(null);
+  const [tick, setTick] = React.useState(0);
+  const running = run?.state === 'running';
+
+  /**
+   * Poll while a run is in flight.
+   *
+   * Deliberately not an always-on interval: a panel left open on an idle project should
+   * make no requests at all, and the host keeps one run per repository, so a missed
+   * poll costs nothing but a second.
+   */
+  React.useEffect(() => {
+    if (projectPath === null || !running) return undefined;
+    let cancelled = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const res = await fetch(routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}`));
+        const body = await res.json().catch(() => null);
+        if (cancelled || !body?.ok) return;
+        const next: ClientAnalyzeRun | null = body.run ?? null;
+        setRun(next);
+        // A finished run changed the index, so the report on screen is now a reading of
+        // the previous one. This is the whole reason the run was started.
+        if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
+      } catch {
+        /* a dropped poll is not worth surfacing; the next one reports the state */
+      }
+    };
+    const id = setInterval(() => {
+      setTick((n) => n + 1);
+      void poll();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [projectPath, running]);
+
+  const startRun = React.useCallback(async (): Promise<void> => {
+    if (projectPath === null) return;
+    setRunError(null);
+    try {
+      const res = await fetch(routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}`), {
+        method: 'POST',
+      });
+      const body = await res.json().catch(() => null);
+      if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
+      setRun(body.run ?? null);
+      setTick(0);
+    } catch (cause) {
+      setRunError(String((cause as Error)?.message ?? cause));
+    }
+  }, [projectPath]);
+
+  const cancelRun = React.useCallback(async (): Promise<void> => {
+    if (projectPath === null) return;
+    try {
+      const res = await fetch(routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}`), {
+        method: 'DELETE',
+      });
+      const body = await res.json().catch(() => null);
+      if (body?.ok) setRun(body.run ?? null);
+    } catch (cause) {
+      setRunError(String((cause as Error)?.message ?? cause));
+    }
+  }, [projectPath]);
 
   React.useEffect(() => {
     if (projectPath === null) return undefined;
@@ -2044,7 +2322,15 @@ function CoveragePanel(props: SlotProps) {
     busy,
     error,
     readAt,
+    run,
+    runError,
+    // `tick` is read here rather than inside the card, so elapsed seconds re-render
+    // even when the host reports nothing new — a run with no output for a minute
+    // otherwise looks frozen.
+    now: Date.now() + tick * 0,
     onRefresh: () => setReloadToken((n) => n + 1),
+    onStartRun: () => void startRun(),
+    onCancelRun: () => void cancelRun(),
   });
 }
 
