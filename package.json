@@ -4,7 +4,22 @@
   "description": "DSH plugin: visualize a GitNexus project index and update it incrementally, with large-file / index-coverage monitoring.",
   "type": "module",
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moowningstar/gitnexus-plus.git"
+  },
+  "homepage": "https://github.com/Moowningstar/gitnexus-plus#readme",
+  "bugs": {
+    "url": "https://github.com/Moowningstar/gitnexus-plus/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "gitnexus",
+    "code-index",
+    "code-graph",
+    "coverage"
+  ],
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {

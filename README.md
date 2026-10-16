@@ -265,6 +265,21 @@ because this package declares `dsh.bundle`.
 
 ## Known limits
 
+- **A machine without GitNexus is not detected yet.** The plugin declares no runtime
+  dependencies and never imports `gitnexus`; it reads an index another tool produced
+  and, when it can, deep-imports the upstream scan primitives at runtime. That design
+  keeps it a pure observer, but it makes "the operator has no GitNexus" a reachable
+  state that nothing currently checks. The engine degrades correctly — `scan.ts` falls
+  back to its own walker and reports `primitives: 'fallback'`, and the built-in size
+  caps apply — but **the panel does not yet say so**, and on a project with no index it
+  still hands over `gitnexus analyze …`, which fails with `command not found` on a
+  machine that has no GitNexus. `src/gitnexus/toolchain.ts` implements the three-state
+  probe (`ready` / `library-only` / `absent`, separating "the library tree exists" from
+  "a CLI is on PATH", because they gate different promises); it is not yet wired into
+  the report. Until it is, treat the fallback as silent: a report that reuses GitNexus's
+  own scan rules and one that fell back to an approximation are not distinguished in
+  the panel, and the fallback walker deliberately does **not** implement upstream's
+  ignore rules faithfully, so its uncovered-file count can carry false positives.
 - **Walk cost scales with file count.** ~29 000 files takes ~1.4 s warm, ~13 s on a
   cold filesystem cache. The host half caches reports for 15 s; a panel that polls
   faster than that gains nothing.
