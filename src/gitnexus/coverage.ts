@@ -256,12 +256,16 @@ export interface GraphQuality {
 }
 
 /**
- * One entry of the manifest's `capabilities` block: whether a query surface is live
- * and, when it is not, why.
+ * One entry of the manifest's `capabilities` block: whether a query surface is live,
+ * which implementation backs it, and why it is not live when it is not.
  */
 export interface CapabilityEntry {
   status?: string;
   skipReason?: string;
+  /** The implementation behind the surface, e.g. `ladybugdb`, `ladybugdb-fts`. */
+  provider?: string;
+  /** Anything else the manifest records, preserved rather than dropped. */
+  [key: string]: unknown;
 }
 
 /**
@@ -272,6 +276,15 @@ export interface CapabilityEntry {
  * here would move the failure from "a missing field renders as undefined" to "a
  * malformed manifest crashes the panel", which is the wrong trade for data this
  * plugin does not control.
+ *
+ * WHAT THE NARROWING IS AND IS NOT FOR
+ * ------------------------------------
+ * Its job is to make the JSON safe to *read*, not to decide which fields exist. A
+ * first version listed the two fields it expected and rebuilt each entry from just
+ * those, which silently dropped `provider` — a field the panel renders, and the
+ * reason it showed `unknown` for two surfaces that were available. So the original
+ * entry is spread first and only the validated fields are overwritten: something
+ * this plugin has not heard of yet survives, instead of being deleted by a checklist.
  */
 export function readCapabilities(raw: Record<string, unknown> | null | undefined): Record<string, CapabilityEntry> {
   const out: Record<string, CapabilityEntry> = {};
@@ -280,8 +293,10 @@ export function readCapabilities(raw: Record<string, unknown> | null | undefined
     if (value === null || typeof value !== 'object') continue;
     const entry = value as Record<string, unknown>;
     out[key] = {
+      ...entry,
       status: typeof entry.status === 'string' ? entry.status : undefined,
       skipReason: typeof entry.skipReason === 'string' ? entry.skipReason : undefined,
+      provider: typeof entry.provider === 'string' ? entry.provider : undefined,
     };
   }
   return out;

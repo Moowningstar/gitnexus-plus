@@ -1,0 +1,23 @@
+Stop the manifest narrowing from deleting fields it was not told about
+
+`readCapabilities` rebuilt each capability entry from a list of the fields it
+expected — `status` and `skipReason` — which silently dropped `provider`. The
+panel renders that field, so two surfaces that were available showed
+`unknown` as their provider.
+
+The narrowing's job is to make untrusted JSON safe to read, not to decide
+which fields exist. It now spreads the original entry and overwrites only the
+fields that need validating, so a key this plugin has never heard of survives
+instead of being removed by a checklist. Verified against a real manifest:
+`provider` comes back as `ladybugdb` / `ladybugdb-fts` / `ladybugdb-vector`,
+and `exactScanLimit`, which nothing here reads, is still present.
+
+This is a migration regression, not an old bug: the JS version passed the block
+through whole, and the web-profile panel showed the providers correctly before
+the rewrite. It was found by looking at the panel in the desktop profile, not
+by reading the code — the same way the ahead/behind bug in format.ts was found,
+and the second time in a row that deploying and using the thing caught what
+review had not.
+
+Eight tests cover it, including the field-preservation case that would have
+failed before this change.

@@ -331,6 +331,40 @@ async function routeTests() {
   check('disposer clears the registration', registered.length === 0);
 }
 
+async function capabilityTests() {
+  section('manifest narrowing (fields a checklist would drop)');
+  const { readCapabilities, readGraphQuality } = await import('../lib/gitnexus/coverage.js');
+
+  // The shape GitNexus actually writes, read off a real `.gitnexus/gitnexus.json`.
+  const raw = {
+    graph: { provider: 'ladybugdb', status: 'available' },
+    fts: { provider: 'ladybugdb-fts', status: 'available' },
+    vectorSearch: { provider: 'ladybugdb-vector', status: 'unavailable', exactScanLimit: 10000 },
+  };
+
+  const caps = readCapabilities(raw);
+  // The regression this guards: a narrowing that rebuilt each entry from a list of
+  // expected fields dropped `provider`, and the panel rendered `unknown` for two
+  // surfaces that were available. It was found by looking at the panel, not the code.
+  check('provider survives the narrowing', caps.graph?.provider === 'ladybugdb', JSON.stringify(caps.graph));
+  check('the unavailable surface keeps its status', caps.vectorSearch?.status === 'unavailable');
+  check(
+    'a field this plugin does not read is preserved, not deleted',
+    caps.vectorSearch?.exactScanLimit === 10000,
+    JSON.stringify(caps.vectorSearch),
+  );
+  check('a non-object entry is skipped rather than crashing', Object.keys(readCapabilities({ bad: 'nope' })).length === 0);
+  check('an absent block yields an empty record, not null', Object.keys(readCapabilities(undefined)).length === 0);
+
+  check(
+    'a missing block is null, so "not recorded" stays distinct from "zero"',
+    readGraphQuality(undefined) === null,
+  );
+  const quality = readGraphQuality({ totalSites: 5, counts: { map: 3, junk: 'x' } });
+  check('graph quality counts keep only numbers', quality?.counts.map === 3 && quality.counts.junk === undefined);
+  check('graph quality total is read', quality?.totalSites === 5);
+}
+
 async function stalenessTests() {
   section('staleness classification (the condition that was once inverted)');
   const { classifyStaleness } = await import('../lib/gitnexus/git.js');
@@ -549,6 +583,7 @@ await regressionTests();
 await crossCheckTests();
 await routeTests();
 await stalenessTests();
+await capabilityTests();
 await commandTests();
 await formatTests();
 await realRepoSmoke();
