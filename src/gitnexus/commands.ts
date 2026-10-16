@@ -135,7 +135,10 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
       destructive: false,
       caveat: skipFts
         ? '--skip-fts 会让一个已有 FTS 的索引清库重建（实测 179s vs 8.5s），非必要不要加。'
-        : '增量刷新在稳态下是秒级（小仓库实测约 7s，日志会写 changed/added/deleted）——不需要为了"刷新"而加 --force。',
+        : // The measured range, not the best case. An earlier wording said "秒级（约 7s）"
+          // on the strength of a no-change run; five changed files on the same repository
+          // took 171 s. Understating this is how an operator concludes the button hung.
+          '耗时随改动量增长：无改动约 7s，5 个文件实测约 171s。日志会写 changed/added/deleted。',
     },
     {
       mode: 'full',

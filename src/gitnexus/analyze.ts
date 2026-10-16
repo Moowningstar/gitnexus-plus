@@ -110,6 +110,13 @@ export interface AnalyzeRunnerOptions {
   /** How much output this module keeps for the panel. */
   tailLimit?: number;
   toolchain?: ToolchainOptions;
+  /**
+   * Pass `GITNEXUS_MEMORY=off` and the heap override, exactly as the handed-over
+   * commands do. On by default: the CLI re-spawns itself over piped stdio without it,
+   * which a confined process denies.
+   */
+  memoryOff?: boolean;
+  heapMb?: number;
   now?: () => number;
 }
 
@@ -137,6 +144,52 @@ const DEFAULT_TAIL_LIMIT = 4 * 1024;
  */
 function quoteFor(shell: 'win32' | 'posix', value: string): string {
   return shell === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Build the command line, as the shell will read it.
+ *
+ * TWO THINGS HERE WERE WRONG ON THE FIRST ATTEMPT, AND TOGETHER THEY MADE THE BUTTON
+ * DO NOTHING VISIBLE — a run started, finished, and the index never changed.
+ *
+ * 1. PowerShell needs the call operator before a quoted path.
+ *    `'C:\...\gitnexus.cmd' analyze` is not a command: the single-quoted string is a
+ *    string *literal*, and the parser dies on the next token. Measured:
+ *    "表达式或语句中包含意外的标记" for the whole statement. The paste-able text in
+ *    `commands.ts` never hit this because it names a bare `gitnexus` and lets PATH
+ *    resolve it — a difference that exists only because this path is absolute.
+ *
+ * 2. The environment prefix is not optional. `GITNEXUS_MEMORY=off` stops the CLI
+ *    re-spawning itself over piped stdio, which a confined process denies. Dropping it
+ *    because the command "looked simpler" reintroduces exactly the failure the
+ *    maintenance text was written to avoid.
+ *
+ * Exported so the shape can be asserted without a shell.
+ */
+export function analyzeCommandLine(
+  shimPath: string,
+  repoPath: string,
+  options: { flavor?: 'win32' | 'posix'; memoryOff?: boolean; heapMb?: number } = {},
+): string {
+  const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
+  const memoryOff = options.memoryOff !== false;
+  const heapMb = options.heapMb ?? 8192;
+
+  const args = `analyze --index-only ${quoteFor(flavor, repoPath)}`;
+  // On Windows the shim is a `.cmd` or `.ps1` reached by absolute path, so it needs
+  // `&`. On POSIX an absolute path in command position is already a command.
+  const invocation =
+    flavor === 'win32'
+      ? `& ${quoteFor(flavor, shimPath)} ${args}`
+      : `${quoteFor(flavor, shimPath)} ${args}`;
+  const heap = quoteFor(flavor, `--max-old-space-size=${heapMb}`);
+
+  if (flavor === 'win32') {
+    const prefix = memoryOff ? `$env:GITNEXUS_MEMORY='off'; ` : '';
+    return `${prefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
+  }
+  const prefix = memoryOff ? `GITNEXUS_MEMORY='off' ` : '';
+  return `${prefix}NODE_OPTIONS=${heap} ${invocation}`;
 }
 
 /**
@@ -232,7 +285,11 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     // `--index-only` is not negotiable here: without it `analyze` rewrites AGENTS.md,
     // CLAUDE.md and the agent skill files inside the repository, which is a much larger
     // change than "refresh the index" and not what the button says it does.
-    const command = `${quoteFor(shellFlavor, cli.shimPath)} analyze --index-only ${quoteFor(shellFlavor, key)}`;
+    const command = analyzeCommandLine(cli.shimPath, key, {
+      flavor: shellFlavor,
+      memoryOff: options.memoryOff,
+      heapMb: options.heapMb,
+    });
 
     const controller = new AbortController();
     inFlight.set(key, controller);

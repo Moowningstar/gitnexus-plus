@@ -43,9 +43,27 @@ function section(title) {
   console.log(`\n\u001b[1m${title}\u001b[0m`);
 }
 
+/**
+ * Where fixtures are built.
+ *
+ * Inside the repository, not `os.tmpdir()`. A confined DSH process may write only
+ * within its workspace, so a fixture under `%TEMP%` fails with `EPERM: mkdir` — which
+ * is expected confinement rather than a broken ACL, and it made the whole suite
+ * unrunnable in the environment the plugin is developed in.
+ *
+ * `test/run.mjs` is executed directly rather than imported, so `import.meta.dirname` is
+ * this file's own directory and the fixture lands beside the tests.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function fixturePath(name) {
+  return path.join(import.meta.dirname, '.fixtures', `${name}-${process.pid}`);
+}
+
 /** Build a repository containing one of each case the engine must distinguish. */
 async function buildFixture() {
-  const root = path.join(os.tmpdir(), `gitnexus-coverage-fixture-${process.pid}`);
+  const root = fixturePath('coverage');
   await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(path.join(root, 'src'), { recursive: true });
   await fs.mkdir(path.join(root, 'node_modules', 'junk'), { recursive: true });
@@ -212,7 +230,7 @@ async function regressionTests() {
   // Bug 1 (found on material-ui): an index written by an older release has
   // `meta.json` and NO `gitnexus.json`. Reading only the new name reported a
   // perfectly good 28 536-file index as "not indexed".
-  const root = path.join(os.tmpdir(), `gitnexus-legacy-fixture-${process.pid}`);
+  const root = fixturePath('legacy');
   await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
   await fs.mkdir(path.join(root, 'src'), { recursive: true });
@@ -333,7 +351,7 @@ async function routeTests() {
   const sysdir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent('C:\\Windows\\System32'));
   check('a directory with no index is refused', sysdir.status === 404 && sysdir.body?.code === 'not-indexed', 'status=' + sysdir.status + ' code=' + sysdir.body?.code);
 
-  const tempDir = path.join(os.tmpdir(), 'gitnexus-noindex-' + process.pid);
+  const tempDir = fixturePath('noindex');
   await fs.mkdir(tempDir, { recursive: true });
   const plainDir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(tempDir));
   check('an existing but unindexed directory is refused too', plainDir.status === 404 && plainDir.body?.code === 'not-indexed', 'status=' + plainDir.status);
@@ -386,7 +404,29 @@ async function capabilityTests() {
 
 async function analyzeTests() {
   section('analyze runner (the one mutating capability)');
-  const { createAnalyzeRunner } = await import('../lib/gitnexus/analyze.js');
+  const { createAnalyzeRunner, analyzeCommandLine } = await import('../lib/gitnexus/analyze.js');
+
+  // The bug that made the button appear to do nothing. A quoted path without a call
+  // operator is a string *literal* to PowerShell, so the whole statement is a parse
+  // error and the command never runs — measured against the real shim: without `&` it
+  // reports "unexpected token", with it, the version prints.
+  const winLine = analyzeCommandLine('C:\\tools\\gitnexus.cmd', 'D:\\repo', { flavor: 'win32' });
+  check('a Windows command uses the call operator', winLine.includes("& 'C:\\tools\\gitnexus.cmd'"), winLine);
+  check('the call operator precedes the shim, not the args', /&\s'[^']*gitnexus\.cmd'\sanalyze/.test(winLine), winLine);
+  check('--index-only is in the built command', winLine.includes('analyze --index-only'));
+  check('the repository is quoted', winLine.includes("'D:\\repo'"));
+  // Dropping the prefix reintroduces the respawn-over-piped-stdio failure the
+  // maintenance text exists to avoid.
+  check('GITNEXUS_MEMORY=off is kept', winLine.includes("$env:GITNEXUS_MEMORY='off'"), winLine);
+  check('the heap override is kept', winLine.includes("$env:NODE_OPTIONS='--max-old-space-size=8192'"), winLine);
+
+  const posixLine = analyzeCommandLine('/usr/local/bin/gitnexus', '/home/u/repo', { flavor: 'posix' });
+  check(
+    'POSIX needs no call operator, because an absolute path is already a command',
+    !posixLine.includes('& ') && posixLine.includes("'/usr/local/bin/gitnexus' analyze"),
+    posixLine,
+  );
+  check('POSIX uses assignment prefixes', posixLine.startsWith("GITNEXUS_MEMORY='off' NODE_OPTIONS="), posixLine);
 
   let captured = null;
   /**
@@ -616,7 +656,7 @@ async function binaryTests() {
   // was reported as "single-line 鈮?399 230 584 chars". The number was absurd and
   // the conclusion was worse —it told the reader that 97 % of the repository's
   // skipped bytes were compressed *source* rather than 3D models.
-  const root = path.join(os.tmpdir(), `gitnexus-binary-fixture-${process.pid}`);
+  const root = fixturePath('binary');
   await fs.rm(root, { recursive: true, force: true });
   await fs.mkdir(path.join(root, 'assets'), { recursive: true });
   await fs.mkdir(path.join(root, 'dist'), { recursive: true });

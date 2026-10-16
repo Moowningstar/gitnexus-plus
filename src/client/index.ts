@@ -1737,7 +1737,9 @@ function MaintenanceSection({
         (commands.find((c) => c.mode === 'init')?.shell ?? 'gitnexus analyze --index-only') +
         '\n\n' +
         '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
-        '小仓库实测约 7 秒。命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
+        '耗时取决于改动量：无改动时约 7 秒，改动几个文件时实测可到 3 分钟，' +
+        '大仓库的全量重建可能更久（上限 10 分钟，可随时取消）。' +
+        '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
       acknowledgeLabel: '我了解这会运行一个进程并写入 .gitnexus/',
       cancelLabel: '取消',
       confirmLabel: '执行',
