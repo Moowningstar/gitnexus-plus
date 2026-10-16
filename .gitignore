@@ -16,3 +16,12 @@ web-err.txt
 
 # Pack artifacts.
 *.tgz
+
+# Scratch files. `commit-msg-tmp.txt` is written to pass a multi-paragraph commit
+# message to `git commit -F` — PowerShell has no heredoc — and got itself committed
+# twice because `git add -A` runs before `git commit -F` reads it. Ignoring the
+# pattern is more reliable than remembering the ordering.
+commit-msg-tmp.txt
+.commit-msg.txt
+.commit-msg.tmp
+*.tmp
