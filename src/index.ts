@@ -101,14 +101,23 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const CACHE_TTL_MS = 15_000;
 
   /**
+   * Resolve a coverage report, from cache when it is recent enough.
+   *
    * Scan results are pure functions of the working tree, so a short TTL removes the
-   * repeated cost of a 28k-file walk without ever showing a stale verdict to a
-   * caller who just changed something.
+   * repeated cost of a 28k-file walk without ever showing a stale verdict to a caller
+   * who just changed something.
+   *
+   * `fresh` bypasses the TTL. A manual refresh is an explicit instruction from a
+   * person who believes the numbers may have moved, and answering it with a cached
+   * copy makes the control look broken — which is exactly how it was reported. A
+   * background poll is the case the TTL exists for; a click is not.
    */
-  const coverageFor = async (repoPath: string): Promise<CoverageReport> => {
+  const coverageFor = async (repoPath: string, options: { fresh?: boolean } = {}): Promise<CoverageReport> => {
     const key = String(repoPath);
-    const hit = cache.get(key);
-    if (hit !== undefined && Date.now() - hit.at < CACHE_TTL_MS) return hit.report;
+    if (options.fresh !== true) {
+      const hit = cache.get(key);
+      if (hit !== undefined && Date.now() - hit.at < CACHE_TTL_MS) return hit.report;
+    }
     const report = await analyzeCoverage(key, {
       minifiedSampleLimit: config.minifiedSampleLimit,
     });
@@ -193,7 +202,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     ctx.inject(['webServer'], (svcCtx) => {
       const disposers = [
         mountCoverageRoute(svcCtx.webServer, {
-          get: (repoPath) => coverageFor(repoPath),
+          get: (repoPath, options) => coverageFor(repoPath, options),
           maintenance: (repoPath) => maintenanceFor(repoPath),
         }),
       ];

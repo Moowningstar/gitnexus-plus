@@ -33,7 +33,11 @@ import type { MaintenanceInfo } from '../index.js';
  * install: the engine arrives as two functions, and a test supplies stubs.
  */
 export interface CoverageRouteDeps {
-  get: (repoPath: string) => Promise<CoverageReport>;
+  /**
+   * `fresh` asks the engine to skip its short-lived cache. A manual refresh carries
+   * it; a background poll does not, which is the case the cache exists for.
+   */
+  get: (repoPath: string, options?: { fresh?: boolean }) => Promise<CoverageReport>;
   maintenance?: (repoPath: string) => MaintenanceInfo;
 }
 
@@ -69,11 +73,17 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
 
     if (answerHead(req, res)) return;
 
-    const report = await deps.get(absRepo);
+    // `refresh=1` comes from the panel's manual refresh control. A background poll
+    // omits it and gets the cached copy, which is what the TTL is for.
+    const fresh = url.searchParams.get('refresh') === '1';
+    const report = await deps.get(absRepo, { fresh });
     // The maintenance commands ride along with the report because they are
     // config-derived and only meaningful next to the index they would rebuild.
     const maintenance = typeof deps.maintenance === 'function' ? deps.maintenance(absRepo) : null;
-    sendJson(res, 200, { ok: true, report, maintenance });
+    // `readAt` is what makes a refresh visible: without it two reads of an unchanged
+    // repository are byte-identical on screen, so the control looks inert even when
+    // it did exactly what it was asked.
+    sendJson(res, 200, { ok: true, report, maintenance, readAt: new Date().toISOString() });
   });
 
   return webServer.register({ kind: 'prefix', path: '/api/gitnexus/coverage', handler });

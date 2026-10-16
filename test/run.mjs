@@ -280,8 +280,13 @@ async function routeTests() {
     return;
   }
 
+  /** Every `{ fresh }` the route asked the engine for, so the cache bypass is asserted. */
+  const freshnessRequests = [];
   const dispose = mountCoverageRoute(shimServer, {
-    get: async (repoPath) => ({ stub: true, repoPath, totals: { large: 0 } }),
+    get: async (repoPath, options) => {
+      freshnessRequests.push(options?.fresh === true);
+      return { stub: true, repoPath, totals: { large: 0 } };
+    },
     maintenance: (repoPath) => ({ commands: [{ mode: 'init', shell: "gitnexus analyze '" + repoPath + "'" }], rationale: [] }),
   });
   check('route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/coverage');
@@ -305,6 +310,20 @@ async function routeTests() {
   const ok = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path));
   check('indexed directory allowed', ok.status === 200 && ok.body?.ok === true, 'status=' + ok.status);
   check('maintenance commands ride along with the report', Array.isArray(ok.body?.maintenance?.commands));
+
+  // A manual refresh has to be able to bypass the engine's short-lived cache, or the
+  // control appears inert: two reads of an unchanged repository are otherwise
+  // identical. `readAt` is what makes the second read visibly different on screen.
+  check('a plain read does not ask for a cache bypass', freshnessRequests[0] === false, JSON.stringify(freshnessRequests));
+  const refreshed = await hit(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path) + '&refresh=1',
+  );
+  check('refresh=1 asks the engine to skip its cache', freshnessRequests[1] === true, JSON.stringify(freshnessRequests));
+  check(
+    'the response carries when it was read',
+    typeof refreshed.body?.readAt === 'string' && !Number.isNaN(Date.parse(refreshed.body.readAt)),
+    String(refreshed.body?.readAt),
+  );
 
   const missing = await hit('/api/gitnexus/coverage');
   check('missing repo param rejected', missing.status === 400 && missing.body?.code === 'missing-repo', 'status=' + missing.status);

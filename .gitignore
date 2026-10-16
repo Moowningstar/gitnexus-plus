@@ -25,3 +25,4 @@ commit-msg-tmp.txt
 .commit-msg.txt
 .commit-msg.tmp
 *.tmp
+scratch-commit-msg.txt

@@ -530,9 +530,14 @@ function stalenessView(staleness: ClientStaleness | undefined): { state: DotStat
       return { state: 'done', text: `current · HEAD ${head} 与索引一致${dirty}` };
     case 'behind': {
       const ahead = staleness.aheadBehind?.ahead ?? 0;
+      // Says where the action lives, not that one is available nearby. The previous
+      // wording — "可直接增量刷新" — sat directly under the panel's refresh button and
+      // read as an instruction to press it, while that control only re-reads the
+      // report and never touches the index. Pointing at the maintenance commands
+      // costs one clause and stops the panel promising something it does not do.
       return {
         state: 'warning',
-        text: `behind · 索引落后 ${ahead} 个提交（${indexed} → ${head}），可直接增量刷新${dirty}`,
+        text: `behind · 索引落后 ${ahead} 个提交（${indexed} → ${head}）· 重建见下方「维护命令」${dirty}`,
       };
     }
     case 'diverged': {
@@ -1583,6 +1588,8 @@ interface CoverageViewProps {
   context: ContextDiagnostic | null;
   busy: boolean;
   error: string | null;
+  /** When the report was read from the host, ISO. */
+  readAt: string | null;
   onRefresh: () => void;
 }
 
@@ -1593,6 +1600,7 @@ function CoverageView({
   context,
   busy,
   error,
+  readAt,
   onRefresh,
 }: CoverageViewProps) {
   // Whether an index exists decides which maintenance command is applicable. When
@@ -1614,9 +1622,18 @@ function CoverageView({
           h(PathLabel, { path: projectPath }),
         ),
     h('span', { style: { flex: 1 } }),
+    // The label states the scope. "刷新" alone next to a staleness warning reads as
+    // "rebuild the index", which this control has never done and — by design, since
+    // the plugin spawns nothing — cannot do.
     h(
       Button,
-      { variant: 'ghost', onClick: onRefresh, disabled: busy, 'aria-label': '刷新' },
+      {
+        variant: 'ghost',
+        onClick: onRefresh,
+        disabled: busy,
+        title: '重新读取报告（不会重建索引；重建见下方「维护命令」）',
+        'aria-label': '重新读取报告',
+      },
       h(IconRefreshOutlineRegular, { size: 14 }),
     ),
   );
@@ -1733,7 +1750,10 @@ function CoverageView({
         'div',
         { style: MUTED },
         `${report.repo.indexedAt ?? '未知时间'} · ${report.repo.branch ?? 'unknown'}@${String(report.repo.lastCommit ?? '').slice(0, 8)}` +
-          ` · manifest ${report.repo.metaFile ?? '?'} · GitNexus ${analyzer.gitnexusVersion}`,
+          ` · manifest ${report.repo.metaFile ?? '?'} · GitNexus ${analyzer.gitnexusVersion}` +
+          // The read time is the only thing on screen a refresh can change when the
+          // repository has not moved, so without it the control reads as broken.
+          (readAt === null ? '' : ` · 读取于 ${String(readAt).slice(11, 19)}Z`),
       ),
       // Freshness against HEAD. The line above states the *indexed* commit, which
       // reads as current unless this one says otherwise.
@@ -1971,13 +1991,21 @@ function CoveragePanel(props: SlotProps) {
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [reloadToken, setReloadToken] = React.useState(0);
+  // When the report on screen was read. Without it a refresh of an unchanged
+  // repository produces a byte-identical panel, so the control looks inert even
+  // when it did precisely what it was asked to do.
+  const [readAt, setReadAt] = React.useState<string | null>(null);
+  // Only a manual refresh bypasses the host's cache; the initial load does not.
+  const wantsFresh = reloadToken > 0;
 
   React.useEffect(() => {
     if (projectPath === null) return undefined;
     const controller = new AbortController();
     setBusy(true);
     setError(null);
-    fetch(routeUrl(`/api/gitnexus/coverage?repo=${encodeURIComponent(projectPath)}`), {
+    const query =
+      `/api/gitnexus/coverage?repo=${encodeURIComponent(projectPath)}` + (wantsFresh ? '&refresh=1' : '');
+    fetch(routeUrl(query), {
       signal: controller.signal,
     })
       .then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
@@ -1988,11 +2016,13 @@ function CoveragePanel(props: SlotProps) {
         if (status === 404 && body?.code === 'not-indexed') {
           setReport({ repo: { indexed: false, path: projectPath } });
           setMaintenance(null);
+          setReadAt(body?.readAt ?? new Date().toISOString());
           return;
         }
         if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${status})`);
         setReport(body.report);
         setMaintenance(body.maintenance ?? null);
+        setReadAt(typeof body.readAt === 'string' ? body.readAt : new Date().toISOString());
       })
       .catch((cause) => {
         if (cause?.name !== 'AbortError') setError(String(cause?.message ?? cause));
@@ -2013,6 +2043,7 @@ function CoveragePanel(props: SlotProps) {
     context: projectPath === null ? contextDiagnostic(props) : null,
     busy,
     error,
+    readAt,
     onRefresh: () => setReloadToken((n) => n + 1),
   });
 }
