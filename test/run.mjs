@@ -384,6 +384,128 @@ async function capabilityTests() {
   check('graph quality total is read', quality?.totalSites === 5);
 }
 
+async function analyzeTests() {
+  section('analyze runner (the one mutating capability)');
+  const { createAnalyzeRunner } = await import('../lib/gitnexus/analyze.js');
+
+  let captured = null;
+  /**
+   * A stub faithful to the seam: `result()` settles, and honours an abort.
+   *
+   * Returns a whole runner-options object rather than the shell alone, because
+   * `createAnalyzeRunner` takes `{ shell, ... }` — returning the bare shell made every
+   * call site pass the wrong shape and fail on `options.shell.resolve` being undefined.
+   */
+  const stubShell = (result, delayMs = 0) => ({
+    shell: {
+      resolve: (req) => {
+        captured = req;
+        return req;
+      },
+      execute: async (spec) => ({
+        result: () =>
+          new Promise((resolve) => {
+            // A signal already aborted when `result()` is reached settles at once.
+            // Without this the stub models a race the real seam does not have: the
+            // README states that a cancellation arriving during preparation rejects
+            // `execute` outright, and the runner handles that too — but a test that
+            // only ever cancels *after* the handle exists would never exercise it.
+            if (spec.signal?.aborted === true) return resolve({ exitCode: null, aborted: true });
+            const finish = () => resolve(result);
+            if (delayMs === 0) return finish();
+            const t = setTimeout(finish, delayMs);
+            spec.signal?.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(t);
+                resolve({ exitCode: null, aborted: true });
+              },
+              { once: true },
+            );
+          }),
+        kill: () => true,
+      }),
+    },
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 40));
+
+  const done = createAnalyzeRunner(stubShell({ exitCode: 0, stdout: { text: 'indexed (7.2s)' } }));
+  done.start('D:/Project/x');
+  await settle();
+  check('exit 0 is a completed run', done.status('D:/Project/x')?.state === 'done');
+  check('output is kept for the panel', done.status('D:/Project/x')?.output.includes('7.2s'));
+
+  // The load-bearing assertion of the whole feature. Passing `sandboxPolicy` would be
+  // this plugin choosing its own confinement — the escalation the approval service
+  // exists to gate, requested through a door that cannot ask. Leaving it out takes the
+  // deployment's decision.
+  check(
+    'the runner never sets sandboxPolicy',
+    captured !== null && !Object.prototype.hasOwnProperty.call(captured, 'sandboxPolicy'),
+    JSON.stringify(Object.keys(captured ?? {})),
+  );
+  check('the run is killable at its deadline', captured?.onExpiry === 'kill');
+  // The runner resolves the path before using it, so the assertion has to resolve it
+  // the same way — comparing against the literal `D:/Project/x` tested the test's own
+  // separator preference, not the runner's behaviour.
+  check(
+    'the working directory is the resolved repository',
+    captured?.workdir === path.resolve('D:/Project/x'),
+    String(captured?.workdir),
+  );
+  check('a cancellation signal reaches the executor', captured?.signal instanceof AbortSignal);
+  check(
+    '--index-only is always passed',
+    done.status('D:/Project/x')?.command.includes('analyze --index-only') === true,
+    done.status('D:/Project/x')?.command,
+  );
+
+  const denied = createAnalyzeRunner(
+    stubShell({ exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } }),
+  );
+  denied.start('D:/Project/d');
+  await settle();
+  check('a sandbox refusal is reported as denied, not as a failure', denied.status('D:/Project/d')?.state === 'denied');
+  check(
+    'a denial says the plugin will not escalate',
+    denied.status('D:/Project/d')?.message?.includes('不会申请扩权') === true,
+  );
+
+  const timedOut = createAnalyzeRunner(stubShell({ exitCode: null, timedOut: true }));
+  timedOut.start('D:/Project/t');
+  await settle();
+  check('a deadline kill is reported as timed out', timedOut.status('D:/Project/t')?.state === 'timed-out');
+
+  const failed = createAnalyzeRunner(stubShell({ exitCode: 2, stderr: { text: 'boom' } }));
+  failed.start('D:/Project/f');
+  await settle();
+  check('a non-zero exit is a failure', failed.status('D:/Project/f')?.state === 'failed');
+
+  const absent = createAnalyzeRunner({ ...stubShell({ exitCode: 0 }), toolchain: { discover: false } });
+  absent.start('D:/Project/n');
+  check('no CLI is decided before anything is spawned', absent.status('D:/Project/n')?.state === 'unavailable');
+  check(
+    'the unavailable message names the install command',
+    absent.status('D:/Project/n')?.message?.includes('npm i -g gitnexus') === true,
+  );
+
+  // Two concurrent `analyze` processes would contend for the same store and the second
+  // would report a failure that says nothing about the repository.
+  const serial = createAnalyzeRunner(stubShell({ exitCode: 0 }, 150));
+  const first = serial.start('D:/Project/s');
+  const second = serial.start('D:/Project/s');
+  check('a second start returns the run already in flight', first.startedAt === second.startedAt);
+  check('cancel reports that it acted', serial.cancel('D:/Project/s') === true);
+  await settle();
+  check('a cancelled run settles as cancelled', serial.status('D:/Project/s')?.state === 'cancelled');
+  check('a cancelled run records when it finished', serial.status('D:/Project/s')?.finishedAt !== null);
+  check(
+    'a cancelled repository can be started again',
+    serial.start('D:/Project/s')?.state === 'running',
+  );
+  serial.dispose();
+}
+
 async function stalenessTests() {
   section('staleness classification (the condition that was once inverted)');
   const { classifyStaleness } = await import('../lib/gitnexus/git.js');
@@ -615,6 +737,7 @@ await crossCheckTests();
 await routeTests();
 await stalenessTests();
 await capabilityTests();
+await analyzeTests();
 await commandTests();
 await formatTests();
 await realRepoSmoke();

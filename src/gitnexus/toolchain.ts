@@ -35,20 +35,53 @@ import path from 'node:path';
 import { findGitnexusRoot, readGitnexusVersion } from './root.js';
 
 /**
- * Filenames a `gitnexus` CLI shim can have, in probe order.
+ * Filenames a `gitnexus` CLI shim can have, in probe order **per platform**.
  *
  * Written out rather than derived from `PATHEXT`, for the reason `root.ts` already
  * documents: under nvm-for-windows the shim is `gitnexus.ps1`, and `PATHEXT` does not
  * list `.ps1`, so extension-driven discovery silently finds nothing on exactly the
  * machines where the CLI is installed.
+ *
+ * ORDER IS PLATFORM-SPECIFIC, AND THAT IS THE WHOLE POINT
+ * ------------------------------------------------------
+ * npm writes three shims side by side: `gitnexus` (a `#!/bin/sh` script), `gitnexus.cmd`
+ * and `gitnexus.ps1`. The extensionless one is the POSIX entry point; on Windows it is
+ * inert. Measured on the reference machine:
+ *
+ *     gitnexus      -> no output, no exit status
+ *     gitnexus.ps1  -> 1.6.12, exit 0
+ *     gitnexus.cmd  -> 1.6.12, exit 0
+ *
+ * A single order listing the extensionless name first — which is the natural way to
+ * write it — therefore selects a shim that cannot run on Windows, and the `.ps1`
+ * fix above it never gets a chance to help. The runner would build a command around
+ * that path and report a failure that has nothing to do with the repository.
+ *
+ * `.cmd` leads on Windows because it is the one a batch *or* a PowerShell host can
+ * spawn; `.ps1` follows for installs that ship only that.
  */
-export const CLI_SHIM_NAMES: readonly string[] = [
-  'gitnexus',
+const WINDOWS_SHIM_NAMES: readonly string[] = [
   'gitnexus.cmd',
   'gitnexus.exe',
   'gitnexus.bat',
   'gitnexus.ps1',
+  'gitnexus',
 ];
+
+const POSIX_SHIM_NAMES: readonly string[] = ['gitnexus'];
+
+/** The probe order for a platform. Exported so a test can assert the ordering. */
+export function cliShimNames(platform: NodeJS.Platform = process.platform): readonly string[] {
+  return platform === 'win32' ? WINDOWS_SHIM_NAMES : POSIX_SHIM_NAMES;
+}
+
+/**
+ * The POSIX probe order, kept exported under its original name.
+ *
+ * Callers that need the real answer must use {@link cliShimNames}; this is the list
+ * for a platform where the extensionless shim is the correct one.
+ */
+export const CLI_SHIM_NAMES: readonly string[] = POSIX_SHIM_NAMES;
 
 export interface CliProbeFound {
   present: true;
@@ -89,8 +122,31 @@ export interface ToolchainStatus {
 export interface ToolchainOptions {
   env?: NodeJS.ProcessEnv;
   moduleUrl?: string;
+  /** Platform whose shim naming applies. Defaults to the running one. */
+  platform?: NodeJS.Platform;
   /** Skips discovery entirely, returning an `absent` verdict — for tests. */
   discover?: boolean;
+}
+
+/**
+ * The effective `PATH`, whatever the platform spells it.
+ *
+ * `process.env` is a case-insensitive proxy — `process.env.PATH` resolves on Windows
+ * even though the variable is stored as `Path`. **Spreading it into a plain object
+ * drops that**, so `{ ...process.env }.PATH` is `undefined` on the default Windows
+ * layout and the probe walks zero directories while reporting a plausible-looking
+ * miss. That is how this was found: the runner reported "no gitnexus" on a machine
+ * where `gitnexus` runs, with `probedDirs: 0` as the only clue.
+ *
+ * Caller-supplied values still win, checked in the same three spellings so an
+ * override cannot be lost the same way.
+ */
+function effectivePath(override: NodeJS.ProcessEnv | undefined): string {
+  const pick = (source: NodeJS.ProcessEnv | undefined): string | undefined => {
+    if (source === undefined) return undefined;
+    return source.PATH ?? source.Path ?? source.path;
+  };
+  return pick(override) ?? pick(process.env) ?? '';
 }
 
 /**
@@ -104,18 +160,17 @@ export interface ToolchainOptions {
 export function findGitnexusCli(options: ToolchainOptions = {}): CliProbeFound | CliProbeMissing {
   if (options.discover === false) return { present: false, probedDirs: 0 };
 
-  const env = { ...process.env, ...(options.env ?? {}) };
-  const entries = (env.PATH ?? '').split(path.delimiter).filter((dir) => dir !== '');
+  const entries = effectivePath(options.env).split(path.delimiter).filter((dir) => dir !== '');
 
   // An explicit override wins, so a machine with a non-standard layout — or a test —
   // can name the shim directly.
-  const override = env.GITNEXUS_CLI;
-  if (typeof override === 'string' && override !== '' && existsSync(override)) {
-    return { present: true, shimPath: override };
+  const explicit = options.env?.GITNEXUS_CLI ?? process.env.GITNEXUS_CLI;
+  if (typeof explicit === 'string' && explicit !== '' && existsSync(explicit)) {
+    return { present: true, shimPath: explicit };
   }
 
   for (const dir of entries) {
-    for (const name of CLI_SHIM_NAMES) {
+    for (const name of cliShimNames(options.platform ?? process.platform)) {
       const candidate = path.join(dir, name);
       try {
         if (existsSync(candidate)) return { present: true, shimPath: candidate };
