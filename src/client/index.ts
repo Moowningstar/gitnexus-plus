@@ -1558,6 +1558,9 @@ function MaintenanceSection({
   void projectPath;
   const [copied, setCopied] = React.useState<string | null>(null);
   const [confirming, setConfirming] = React.useState(false);
+  // `RiskConfirmation`'s checkbox is controlled, so the tick has to live here. Without
+  // this the box renders but never moves, which is how it looked the first time.
+  const [acknowledged, setAcknowledged] = React.useState(false);
   const commands = Array.isArray(maintenance?.commands) ? maintenance.commands : [];
   if (commands.length === 0) return null;
 
@@ -1722,37 +1725,37 @@ function MaintenanceSection({
           )
         : null,
 
-    // The confirmation. It states the command, what it touches, and how long it takes:
-    // "增量刷新" alone does not tell an operator that a process is about to run against
-    // their working tree, or that this is seconds rather than minutes.
-    h(
-      primitives.RiskConfirmation,
-      {
-        open: confirming,
-        title: '执行增量刷新？',
-        onCancel: () => setConfirming(false),
-        onConfirm: () => {
-          setConfirming(false);
-          onStartRun();
-        },
+    // The confirmation. Everything the operator needs before a process touches their
+    // working tree goes in `description`, because that is the prop the modal renders:
+    // an earlier revision passed this as children and the dialog opened with an empty
+    // body and two unlabelled buttons.
+    h(primitives.RiskConfirmation, {
+      open: confirming,
+      title: '执行增量刷新？',
+      description:
+        '将在项目目录下运行：\n\n' +
+        (commands.find((c) => c.mode === 'init')?.shell ?? 'gitnexus analyze --index-only') +
+        '\n\n' +
+        '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
+        '小仓库实测约 7 秒。命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
+      acknowledgeLabel: '我了解这会运行一个进程并写入 .gitnexus/',
+      cancelLabel: '取消',
+      confirmLabel: '执行',
+      closeLabel: '关闭',
+      // The checkbox is controlled, so it needs state of its own, and it is reset on
+      // close: the acknowledgement is per-action rather than remembered.
+      acknowledged,
+      onAcknowledgedChange: setAcknowledged,
+      onCancel: () => {
+        setConfirming(false);
+        setAcknowledged(false);
       },
-      h(
-        'div',
-        { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-        h('div', null, '将在项目目录下运行：'),
-        h(
-          'code',
-          { style: { ...styles.mono, display: 'block', wordBreak: 'break-all', userSelect: 'all' } },
-          commands.find((c) => c.mode === 'init')?.shell ?? 'gitnexus analyze --index-only',
-        ),
-        h(
-          'div',
-          { style: MUTED },
-          '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
-            '小仓库实测约 7 秒。命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致，本插件不申请扩权。',
-        ),
-      ),
-    ),
+      onConfirm: () => {
+        setConfirming(false);
+        setAcknowledged(false);
+        onStartRun();
+      },
+    }),
   );
 }
 

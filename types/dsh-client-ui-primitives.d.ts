@@ -133,11 +133,41 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     children?: ReactNode;
   }>;
 
+  /**
+   * A modal that gates an action behind an acknowledgement.
+   *
+   * READ OFF REAL CALL SITES, NOT GUESSED
+   * -------------------------------------
+   * An earlier revision declared only `title`, `children`, `onConfirm` and `onCancel`,
+   * inferred from a partial grep. It was wrong in every direction that shows:
+   * `description` is a **string prop, not children**, so the modal opened with an empty
+   * body; `acknowledgeLabel`, `cancelLabel` and `confirmLabel` were absent, so both
+   * buttons rendered blank; and the checkbox is **controlled** by `acknowledged`, so it
+   * rendered as an empty square. These packages ship no declarations, so a type written
+   * here is a guess until it is read off something that works — and this one had not
+   * been.
+   *
+   * Taken from `dsh-client-ui-commands` and `dsh-client-ui-permission-presets`, which
+   * agree on every name; the second adds `disabled`.
+   */
   export const RiskConfirmation: FunctionComponent<{
     open?: boolean;
-    onConfirm?: () => void;
-    onCancel?: () => void;
     title?: ReactNode;
+    /** The body. A string, not children — passing children renders nothing. */
+    description?: ReactNode;
+    /** Label for the checkbox that must be ticked before confirming. */
+    acknowledgeLabel?: ReactNode;
+    cancelLabel?: ReactNode;
+    /** Label for the dismiss control. */
+    closeLabel?: ReactNode;
+    confirmLabel?: ReactNode;
+    /** Controlled: the checkbox does not move unless this changes. */
+    acknowledged?: boolean;
+    /** Disables confirmation, e.g. while the gated action cannot proceed. */
+    disabled?: boolean;
+    onAcknowledgedChange?: (value: boolean) => void;
+    onCancel?: () => void;
+    onConfirm?: () => void;
     children?: ReactNode;
   }>;
 
