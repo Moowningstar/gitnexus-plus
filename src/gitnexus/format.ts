@@ -58,8 +58,14 @@ export function formatReport(report: CoverageReport, withLanguages = true): stri
     } else if (s.state === 'current') {
       lines.push(`  freshness current — HEAD ${short(s.headCommit)} matches the index${dirty}`);
     } else if (s.state === 'behind') {
+      // `ahead`, not `behind`. `rev-list --left-right --count <indexed>...<HEAD>`
+      // reports the index side first, so a linear fast-forward is `behind: 0` — the
+      // distance the index lags is `ahead`. Reading `.behind` here printed
+      // "index is 0 commit(s) behind" for an index that was one commit behind, which
+      // is how this was caught: the deployed plugin's own tool output said it.
+      const lag = s.aheadBehind?.ahead ?? '?';
       lines.push(
-        `  freshness BEHIND — index is ${s.aheadBehind?.behind ?? '?'} commit(s) behind ` +
+        `  freshness BEHIND — index is ${lag} commit(s) behind ` +
           `(${short(s.indexedCommit)} -> ${short(s.headCommit)})${dirty}`,
       );
     } else if (s.state === 'diverged') {
