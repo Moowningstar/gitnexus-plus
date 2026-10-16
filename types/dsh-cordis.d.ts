@@ -53,6 +53,16 @@ declare module '@deepseek-ai/cordis' {
       callback: (ctx: Context & Pick<Services, K>) => void,
     ): void;
 
+    /**
+     * Read an optional service by name, without waiting for it.
+     *
+     * The counterpart to `inject`: `shell` is mounted per profile, and `inject` would
+     * leave this plugin pending forever on a deployment that has none. Returns
+     * `unknown` rather than a typed service because these packages ship no
+     * declarations — the caller narrows, and says in one place what it checked.
+     */
+    get(name: string): unknown;
+
     /** Registers a teardown callback; the returned function runs on unload. */
     effect(callback: () => () => void, label?: string): void;
 

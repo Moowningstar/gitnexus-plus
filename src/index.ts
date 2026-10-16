@@ -1,9 +1,9 @@
 /**
- * dsh-gitnexus-plus — host half.
+ * dsh-gitnexus-plus 鈥?host half.
  *
  * Registers one read-only tool and one loopback HTTP route over the coverage
- * engine in `./gitnexus/`. Both answer the same question — "what did this index
- * leave out?" — for the two callers that need it: the model, and a browser half
+ * engine in `./gitnexus/`. Both answer the same question 鈥?"what did this index
+ * leave out?" 鈥?for the two callers that need it: the model, and a browser half
  * that will render it.
  *
  * Deliberately read-only. Nothing here triggers `analyze`, writes to `.gitnexus/`,
@@ -19,12 +19,28 @@ import { analyzeCoverage, type CoverageReport } from './gitnexus/coverage.js';
 import { formatReport } from './gitnexus/format.js';
 import { maintenanceCommands, commandRationale, type MaintenanceCommand } from './gitnexus/commands.js';
 import { mountCoverageRoute } from './routes/coverage.js';
+import { mountAnalyzeRoute } from './routes/analyze.js';
+import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
+
+/**
+ * Whether a service resolved from the context has the shape the runner needs.
+ *
+ * `ctx.get` is untyped here 鈥?the DSH packages ship no declarations, so the service
+ * arrives as `unknown`. Checking the two methods the runner actually calls is the
+ * narrowest claim that can be made: asserting the full `ctx.shell` contract from this
+ * side would be a guess, and a wrong guess fails at the first click rather than here.
+ */
+function isShellLike(value: unknown): value is ShellLike {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as { resolve?: unknown; execute?: unknown };
+  return typeof candidate.resolve === 'function' && typeof candidate.execute === 'function';
+}
 
 export const name = 'gitnexus-plus';
 
 /**
  * Only `tools` is required. `webServer` is reached through `ctx.inject` because a
- * headless profile has no HTTP carrier at all — naming it here would leave the
+ * headless profile has no HTTP carrier at all 鈥?naming it here would leave the
  * plugin permanently pending there, and the tool would never register.
  */
 export const inject = ['tools'] as const;
@@ -43,6 +59,15 @@ export interface PluginConfig {
   skipFts: boolean;
   memoryOff: boolean;
   analyzeHeapMb: number;
+  /**
+   * Wall-clock ceiling for a run this plugin starts.
+   *
+   * Ten minutes, because the escape hatch this panel offers is a full rebuild and
+   * those are measured in minutes on a large repository. Too short a ceiling turns
+   * the feature into "it always times out on the repos that need it most"; the run
+   * is cancellable, so the cost of it being generous is bounded by the operator.
+   */
+  analyzeTimeoutMs: number;
   gitnexusHome: string;
 }
 
@@ -53,6 +78,7 @@ export const Config = Schema.object({
   skipFts: Schema.boolean().default(true),
   memoryOff: Schema.boolean().default(true),
   analyzeHeapMb: Schema.natural().default(8192),
+  analyzeTimeoutMs: Schema.natural().default(600000),
   gitnexusHome: Schema.string().default(''),
 });
 
@@ -60,8 +86,8 @@ export const Config = Schema.object({
  * Compile-time proof that the schema and {@link PluginConfig} describe the same
  * object.
  *
- * These are two independent declarations of one contract — `Schema.object` infers a
- * shape, and `apply` is written against a hand-written interface — so without this
+ * These are two independent declarations of one contract 鈥?`Schema.object` infers a
+ * shape, and `apply` is written against a hand-written interface 鈥?so without this
  * they can drift, and the drift is silent: a config key added to the schema but not
  * the interface is simply unreadable from `apply`, and one added to the interface
  * but not the schema is `undefined` at runtime. The check is bidirectional, because
@@ -109,7 +135,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
    *
    * `fresh` bypasses the TTL. A manual refresh is an explicit instruction from a
    * person who believes the numbers may have moved, and answering it with a cached
-   * copy makes the control look broken — which is exactly how it was reported. A
+   * copy makes the control look broken 鈥?which is exactly how it was reported. A
    * background poll is the case the TTL exists for; a click is not.
    */
   const coverageFor = async (repoPath: string, options: { fresh?: boolean } = {}): Promise<CoverageReport> => {
@@ -168,7 +194,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           additionalProperties: true,
           properties: {
             // `required: true` per property, never `required: [...]`. The DSL's
-            // compiler rejects the array form outright — it collects these marks
+            // compiler rejects the array form outright 鈥?it collects these marks
             // into the JSON Schema `required` list itself.
             text: { type: 'string', required: true },
             indexed: { type: 'boolean', required: true },
@@ -191,7 +217,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       },
       presentCall: (args) => ({
         card: 'generic',
-        title: `GitNexus coverage · ${String(args.repo).split(/[\\/]/).pop()}`,
+        title: `GitNexus coverage 路 ${String(args.repo).split(/[\\/]/).pop()}`,
         kind: 'read',
       }),
     }),
@@ -200,14 +226,33 @@ export function apply(ctx: Context, config: PluginConfig): void {
   if (config.serveRoutes) {
     // Optional carrier: absent on headless profiles, so the tool above still works.
     ctx.inject(['webServer'], (svcCtx) => {
+      // Read through `ctx.get` rather than injecting, because `shell` is optional here
+      // and `inject` would make the whole route block wait for a service a headless
+      // deployment never provides. `null` is handed to the runner, which reports
+      // `unavailable` and tells the operator to run the command themselves 鈥?the
+      // read-only half of the panel keeps working either way.
+      const shellRaw: unknown = svcCtx.get('shell');
+      const analyze = createAnalyzeRunner({
+        shell: isShellLike(shellRaw) ? shellRaw : null,
+        timeoutMs: config.analyzeTimeoutMs,
+      });
+
       const disposers = [
         mountCoverageRoute(svcCtx.webServer, {
           get: (repoPath, options) => coverageFor(repoPath, options),
           maintenance: (repoPath) => maintenanceFor(repoPath),
         }),
+        mountAnalyzeRoute(svcCtx.webServer, {
+          start: (repoPath) => analyze.start(repoPath),
+          status: (repoPath) => analyze.status(repoPath),
+          cancel: (repoPath) => analyze.cancel(repoPath),
+        }),
       ];
       ctx.effect(() => () => {
         for (const dispose of disposers) dispose();
+        // Abort before clearing, so a run in flight is stopped rather than orphaned
+        // holding a handle onto a server that no longer exists.
+        analyze.dispose();
         cache.clear();
       }, 'gitnexus-plus: HTTP routes');
     });
@@ -215,7 +260,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 }
 
 /**
- * Human-readable rendering lives in `./gitnexus/format.js` — free of DSH imports
+ * Human-readable rendering lives in `./gitnexus/format.js` 鈥?free of DSH imports
  * so it can be tested without a host. Re-exported here for callers that already
  * hold the plugin module.
  */

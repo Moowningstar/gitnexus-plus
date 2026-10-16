@@ -94,7 +94,15 @@ export interface ShellLike {
 }
 
 export interface AnalyzeRunnerOptions {
-  shell: ShellLike;
+  /**
+   * The host's shell executor, or `null` when the deployment has none.
+   *
+   * `null` is a real composition rather than a test convenience: `ctx.shell` is mounted
+   * per profile, and a headless one need not have it. A runner that reported "failed"
+   * for a missing service would send the operator looking for a GitNexus problem that
+   * is really a deployment shape.
+   */
+  shell: ShellLike | null;
   /** Wall-clock ceiling for one run. Default 10 minutes — a full rebuild is minutes. */
   timeoutMs?: number;
   /** Captured-output ceiling handed to the executor. */
@@ -195,6 +203,18 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     // repository — so a second request reports the first rather than starting one.
     const running = runs.get(key);
     if (running !== undefined && running.state === 'running') return running;
+
+    if (shell === null) {
+      return finish(key, {
+        state: 'unavailable',
+        command: 'gitnexus analyze --index-only',
+        startedAt: now(),
+        output: '',
+        message:
+          '当前部署没有提供 shell 执行器（ctx.shell 未挂载），无法运行命令。' +
+          '请复制下面的命令在终端中执行。',
+      });
+    }
 
     const cli = findGitnexusCli(options.toolchain);
     if (!cli.present) {

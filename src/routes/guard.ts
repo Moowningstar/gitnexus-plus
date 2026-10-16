@@ -55,17 +55,27 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
 /**
  * Run the shared pre-checks, answering the request when one fails.
  *
+ * `methods` exists because the default set is the read-only one: the coverage route
+ * answers GET and HEAD and nothing else, and giving it POST would widen it by accident.
+ * A route that legitimately mutates passes its own set, so the method policy is stated
+ * at the route rather than inferred from what the guard happens to allow.
+ *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
- * @returns {boolean} `true` when the caller may continue handling the request
+ * @param methods the methods this route accepts
+ * @returns `true` when the caller may continue handling the request
  */
-export function passGuard(req: IncomingMessage, res: ServerResponse): boolean {
+export function passGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  methods: ReadonlySet<string> = ALLOWED_METHODS,
+): boolean {
   if (!isLoopback(req)) {
     sendJson(res, 403, { ok: false, code: 'forbidden', message: 'loopback only' });
     return false;
   }
-  if (!ALLOWED_METHODS.has(req.method ?? '')) {
-    sendJson(res, 405, { ok: false, code: 'method-not-allowed' }, { allow: 'GET, HEAD' });
+  if (!methods.has(req.method ?? '')) {
+    sendJson(res, 405, { ok: false, code: 'method-not-allowed' }, { allow: [...methods].join(', ') });
     return false;
   }
   return true;

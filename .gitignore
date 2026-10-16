@@ -27,3 +27,4 @@ commit-msg-tmp.txt
 *.tmp
 scratch-commit-msg.txt
 scratch-msg.txt
+tmp-commit-msg.txt

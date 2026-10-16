@@ -35,9 +35,12 @@ function section(title) {
 }
 
 /**
+ * @param {{ services?: Record<string, unknown> }} [options] — optional services the
+ *   context should resolve. Omitting `shell` models a deployment without one.
  * @returns {{ ctx: object, registered: object[], routes: object[], disposers: Array<() => void>, effects: string[], injected: string[] }}
  */
-function makeStubContext() {
+function makeStubContext(options = {}) {
+  const services = options.services ?? {};
   const registered = [];
   const routes = [];
   const disposers = [];
@@ -72,6 +75,17 @@ function makeStubContext() {
       injected.push(...names);
       const child = { ...ctx, webServer };
       callback(child);
+    },
+    /**
+     * Stands in for cordis' `get(name, strict)`, which resolves an optional service
+     * without waiting for it. Returns `undefined` for anything absent, matching the
+     * real one — verified against `new Context().get('nope')`.
+     *
+     * `services` is how a test supplies a shell executor; leaving it out models a
+     * headless deployment, which is the composition the nullable runner exists for.
+     */
+    get(name) {
+      return services[name];
     },
     effect(fn, label) {
       effects.push(label);
@@ -139,20 +153,29 @@ check('output.render returns content blocks', (() => {
   return Array.isArray(blocks) && blocks[0]?.type === 'text' && blocks[0]?.text === 'hello';
 })());
 
-section('apply() mounts the route through optional injection');
+section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// One route, not two: the repository-list route was removed once the panel started
-// reporting the project the operator is in rather than a global registry.
-check('exactly one route mounted', stub.routes.length === 1, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// Two routes since the analyze endpoint was added: one reads the working tree, one
+// starts a refresh. They are separate modules so the read-only half keeps a method
+// policy that cannot mutate.
+check('exactly two routes mounted', stub.routes.length === 2, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
-  'the coverage route is the one mounted',
-  stub.routes[0]?.path === '/api/gitnexus/coverage',
-  String(stub.routes[0]?.path),
+  'the coverage route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
 );
-check('the route is a prefix kind', stub.routes[0]?.kind === 'prefix', String(stub.routes[0]?.kind));
 check(
-  'no route starts a re-index (maintenance is handed over, not executed)',
-  !stub.routes.some((r) => r.path.includes('analyze')),
+  'the analyze route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/analyze'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check('every route is a prefix kind', stub.routes.every((r) => r.kind === 'prefix'));
+// The assertion this pair replaced said "no route starts a re-index", which was the
+// old contract and had to fail when the contract changed. What matters now is that
+// the mutating route is the *only* mutating one, and that it carries the write guard.
+check(
+  'the analyze route is the only one that can mutate',
+  stub.routes.filter((r) => r.path.includes('analyze')).length === 1,
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check('effects registered for teardown', stub.effects.length > 0, JSON.stringify(stub.effects));
