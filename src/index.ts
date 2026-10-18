@@ -20,7 +20,9 @@ import { formatReport } from './gitnexus/format.js';
 import { maintenanceCommands, commandRationale, type MaintenanceCommand } from './gitnexus/commands.js';
 import { mountCoverageRoute } from './routes/coverage.js';
 import { mountAnalyzeRoute } from './routes/analyze.js';
+import { mountInstallRoute } from './routes/install.js';
 import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
+import { createInstallRunner } from './gitnexus/install.js';
 
 /**
  * Whether a service resolved from the context has the shape the runner needs.
@@ -68,6 +70,13 @@ export interface PluginConfig {
    * is cancellable, so the cost of it being generous is bounded by the operator.
    */
   analyzeTimeoutMs: number;
+  /**
+   * Where the plugin installs GitNexus when asked. Empty means the default,
+   * `$DSH_HOME/gitnexus-plus/gitnexus`.
+   */
+  gitnexusInstallDir: string;
+  /** Wall-clock ceiling for that install. Compiling native modules is slow. */
+  installTimeoutMs: number;
   gitnexusHome: string;
 }
 
@@ -79,6 +88,8 @@ export const Config = Schema.object({
   memoryOff: Schema.boolean().default(true),
   analyzeHeapMb: Schema.natural().default(8192),
   analyzeTimeoutMs: Schema.natural().default(600000),
+  gitnexusInstallDir: Schema.string().default(''),
+  installTimeoutMs: Schema.natural().default(1200000),
   gitnexusHome: Schema.string().default(''),
 });
 
@@ -236,6 +247,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
         shell: isShellLike(shellRaw) ? shellRaw : null,
         timeoutMs: config.analyzeTimeoutMs,
       });
+      // GitNexus is what produces the index this plugin reads, so a machine without it
+      // has nothing to display and no way to change that from here. This runner is the
+      // way out: it installs a plugin-owned copy so the operator does not have to work
+      // out a package manager, a registry, or a global prefix themselves.
+      const install = createInstallRunner({
+        shell: isShellLike(shellRaw) ? shellRaw : null,
+        prefix: config.gitnexusInstallDir === '' ? undefined : config.gitnexusInstallDir,
+        timeoutMs: config.installTimeoutMs,
+      });
 
       const disposers = [
         mountCoverageRoute(svcCtx.webServer, {
@@ -247,12 +267,19 @@ export function apply(ctx: Context, config: PluginConfig): void {
           status: (repoPath) => analyze.status(repoPath),
           cancel: (repoPath) => analyze.cancel(repoPath),
         }),
+        mountInstallRoute(svcCtx.webServer, {
+          start: () => install.start(),
+          status: () => install.status(),
+          cancel: () => install.cancel(),
+          cliPath: () => install.cliPath(),
+        }),
       ];
       ctx.effect(() => () => {
         for (const dispose of disposers) dispose();
         // Abort before clearing, so a run in flight is stopped rather than orphaned
         // holding a handle onto a server that no longer exists.
         analyze.dispose();
+        install.dispose();
         cache.clear();
       }, 'gitnexus-plus: HTTP routes');
     });

@@ -155,10 +155,11 @@ check('output.render returns content blocks', (() => {
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Two routes since the analyze endpoint was added: one reads the working tree, one
-// starts a refresh. They are separate modules so the read-only half keeps a method
-// policy that cannot mutate.
-check('exactly two routes mounted', stub.routes.length === 2, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// Three routes now: read the working tree, refresh an index, and install GitNexus when
+// there is none. Separate modules because their privileges differ sharply — reading is
+// unprivileged, refreshing writes inside the workspace, and installing runs the
+// dependency tree's build scripts.
+check('exactly three routes mounted', stub.routes.length === 3, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
   'the coverage route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
@@ -169,13 +170,17 @@ check(
   stub.routes.some((r) => r.path === '/api/gitnexus/analyze'),
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
-check('every route is a prefix kind', stub.routes.every((r) => r.kind === 'prefix'));
-// The assertion this pair replaced said "no route starts a re-index", which was the
-// old contract and had to fail when the contract changed. What matters now is that
-// the mutating route is the *only* mutating one, and that it carries the write guard.
 check(
-  'the analyze route is the only one that can mutate',
-  stub.routes.filter((r) => r.path.includes('analyze')).length === 1,
+  'the install route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/install'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check('every route is a prefix kind', stub.routes.every((r) => r.kind === 'prefix'));
+// The assertion this replaced said "no route starts a re-index", which was the old
+// contract and had to fail when it changed. What matters now is which routes can write.
+check(
+  'exactly two routes can mutate',
+  stub.routes.filter((r) => r.path.includes('analyze') || r.path.includes('install')).length === 2,
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check('effects registered for teardown', stub.effects.length > 0, JSON.stringify(stub.effects));

@@ -99,7 +99,7 @@ export interface CliProbeFound {
   /** Whether `cliPath` has to be run through `node`. */
   viaNode: boolean;
   /** Where this came from, so an unexpected pick can be diagnosed. */
-  source: 'override' | 'dependency' | 'path';
+  source: 'override' | 'managed' | 'dependency' | 'path';
   /** The package root it was resolved from, when it came from a dependency. */
   packageRoot: string | null;
 }
@@ -139,6 +139,15 @@ export interface ToolchainOptions {
   moduleUrl?: string;
   /** Platform whose shim naming applies. Defaults to the running one. */
   platform?: NodeJS.Platform;
+  /**
+   * Where this plugin installs GitNexus when the operator asks it to.
+   *
+   * Checked before the dependency and PATH so that a copy the plugin installed is the
+   * one it uses: that copy is the only one whose version it chose, and finding a
+   * different one later would make the refresh behave differently from the install that
+   * preceded it.
+   */
+  managedPrefix?: string;
   /** Skips discovery entirely, returning an `absent` verdict — for tests. */
   discover?: boolean;
 }
@@ -203,9 +212,23 @@ export function findGitnexusCli(options: ToolchainOptions = {}): CliProbeFound |
     };
   }
 
+  // The copy this plugin installed, when there is one. Ahead of the dependency and PATH
+  // because it is the only copy whose version this plugin chose: finding a different one
+  // afterwards would make the refresh behave differently from the install before it.
+  const managed = options.managedPrefix;
+  if (typeof managed === 'string' && managed !== '') {
+    const script = path.join(managed, 'node_modules', 'gitnexus', 'dist', 'cli', 'index.js');
+    try {
+      if (existsSync(script)) {
+        return { present: true, cliPath: script, viaNode: true, source: 'managed', packageRoot: path.join(managed, 'node_modules', 'gitnexus') };
+      }
+    } catch {
+      /* unreadable managed tree — fall through to the other sources */
+    }
+  }
+
   const fromDependency = resolveDependencyCli(options);
   if (fromDependency !== null) return fromDependency;
-
   const entries = effectivePath(options.env).split(path.delimiter).filter((dir) => dir !== '');
   for (const dir of entries) {
     for (const name of cliShimNames(platform)) {

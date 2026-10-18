@@ -557,6 +557,66 @@ async function analyzeTests() {
   serial.dispose();
 }
 
+async function installTests() {
+  section('gitnexus installer (the prerequisite the plugin can satisfy)');
+  const { createInstallRunner, installCommandLine, defaultInstallPrefix } = await import('../lib/gitnexus/install.js');
+
+  // The two properties that make this safe to offer at all.
+  const win = installCommandLine('C:\\Users\\u\\.dsh\\gitnexus-plus\\gitnexus', 'gitnexus@^1.6.12', { platform: 'win32' });
+  check('the install is an npm install', win.startsWith('npm install'), win);
+  check('it installs under a prefix rather than changing directory', win.includes("--prefix '"), win);
+  // No `--registry`: the operator's npmrc is the only authority on where their packages
+  // come from, and hardcoding one breaks exactly the users who need this path.
+  check('no registry is hardcoded', !win.includes('--registry'), win);
+  check('the version spec is explicit', win.includes('gitnexus@^1.6.12'), win);
+
+  check('the default prefix is plugin-owned, not the global prefix', defaultInstallPrefix({ DSH_HOME: 'C:\\x' }).endsWith('gitnexus'), defaultInstallPrefix({ DSH_HOME: 'C:\\x' }));
+
+  const stubShell = (result) => ({
+    shell: {
+      resolve: (req) => req,
+      execute: async () => ({ result: async () => result, kill: () => true }),
+    },
+  });
+
+  const prefix = path.join(import.meta.dirname, '.fixtures', 'install-prefix');
+  const ok = createInstallRunner({ ...stubShell({ exitCode: 0, stdout: { text: 'added 206 packages' } }), prefix });
+  ok.start();
+  await new Promise((r) => setTimeout(r, 30));
+  check('a successful install reports done', ok.status()?.state === 'done', JSON.stringify(ok.status()));
+  check('the installed CLI path is under the prefix', ok.cliPath().includes('node_modules'), ok.cliPath());
+  check('the CLI path is the package bin', ok.cliPath().endsWith(path.join('dist', 'cli', 'index.js')), ok.cliPath());
+
+  // npm's build scripts are the most likely failure: a machine without a C++ toolchain,
+  // or a registry it cannot reach. The message has to name both.
+  const bad = createInstallRunner({ ...stubShell({ exitCode: 1, stderr: { text: 'gyp ERR! find VS' } }), prefix });
+  bad.start();
+  await new Promise((r) => setTimeout(r, 30));
+  check('a failed install reports failed', bad.status()?.state === 'failed');
+  check(
+    'the failure message names the two likely causes',
+    /registry/.test(bad.status()?.message ?? '') && /编译|toolchain|C\+\+/.test(bad.status()?.message ?? ''),
+    bad.status()?.message,
+  );
+
+  const denied = createInstallRunner({
+    ...stubShell({ exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } }),
+    prefix,
+  });
+  denied.start();
+  await new Promise((r) => setTimeout(r, 30));
+  check('a sandbox refusal is denied, not failed', denied.status()?.state === 'denied');
+  check('a denial says the plugin will not escalate', denied.status()?.message?.includes('不会申请扩权') === true);
+
+  const noShell = createInstallRunner({ shell: null, prefix });
+  noShell.start();
+  check('a deployment with no shell reports unavailable', noShell.status()?.state === 'unavailable');
+  check(
+    'the unavailable message tells the operator to run it themselves',
+    noShell.status()?.message?.includes('手动执行') === true,
+  );
+}
+
 async function stalenessTests() {
   section('staleness classification (the condition that was once inverted)');
   const { classifyStaleness } = await import('../lib/gitnexus/git.js');
@@ -789,6 +849,7 @@ await routeTests();
 await stalenessTests();
 await capabilityTests();
 await analyzeTests();
+await installTests();
 await commandTests();
 await formatTests();
 await realRepoSmoke();
