@@ -45,7 +45,9 @@ It does **not**:
 
 - fork GitNexus, patch it, or reimplement its parser or graph database;
 - redistribute GitNexus source. Nothing from that project is inside this package's
-  tarball — `gitnexus` is installed by npm as a separate dependency and stays separate;
+  tarball. `gitnexus` is declared as a **peer**, not a dependency, so installing this
+  plugin installs nothing from it — the operator supplies GitNexus, by whatever means,
+  and the two stay separate;
 - claim authorship of, or any contribution to, GitNexus. All rights in GitNexus belong
   to its author;
 - replace GitNexus. With no GitNexus index there is nothing here to display.
@@ -55,8 +57,12 @@ It does **not**:
 This project is **MIT** (see [LICENSE](LICENSE)).
 
 **It depends on GitNexus, which is `PolyForm-Noncommercial-1.0.0`.** That licence grants
-noncommercial use and restricts commercial use. Because installing this plugin installs
-GitNexus as a dependency:
+noncommercial use and restricts commercial use. GitNexus is **not** a dependency of this
+package — it is a peer, so installing this plugin does not install it, and the plugin
+never bundles or redistributes it. Installing this plugin's package therefore installs
+nothing under that licence. But every GitNexus-backed feature — reading an index,
+refreshing one, installing one on request — puts your use of *GitNexus* under
+*GitNexus's* licence:
 
 - **your use of this plugin's GitNexus-backed features is subject to GitNexus's
   licence**, not to this project's MIT grant;

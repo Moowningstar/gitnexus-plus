@@ -1,6 +1,6 @@
 {
   "name": "dsh-gitnexus-plus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH plugin: visualize a GitNexus project index, report what it left out, and run its incremental refresh from a sidebar panel — including detecting a missing GitNexus and installing one on request.",
   "type": "module",
   "license": "MIT",
@@ -61,13 +61,11 @@
       "platform": "web"
     }
   },
-  "dependencies": {
-    "gitnexus": "^1.6.12"
-  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0-0",
-    "@deepseek-ai/schemastery": ">=3.0.0 <4.0.0"
+    "@deepseek-ai/schemastery": ">=3.0.0 <4.0.0",
+    "gitnexus": ">=1.6.0 <2.0.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -77,6 +75,9 @@
       "optional": true
     },
     "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "gitnexus": {
       "optional": true
     }
   },
