@@ -37,7 +37,8 @@
     "lib",
     "scripts/link-runtime.mjs",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22",
@@ -59,6 +60,9 @@
     "client": {
       "platform": "web"
     }
+  },
+  "dependencies": {
+    "gitnexus": "^1.6.12"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

@@ -31,6 +31,7 @@
  */
 
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { findGitnexusRoot, readGitnexusVersion } from './root.js';
 
@@ -85,8 +86,22 @@ export const CLI_SHIM_NAMES: readonly string[] = POSIX_SHIM_NAMES;
 
 export interface CliProbeFound {
   present: true;
-  /** Absolute path to the shim that was found. */
-  shimPath: string;
+  /**
+   * Absolute path to the thing that runs the CLI.
+   *
+   * A `.js` script when it came from the declared `gitnexus` dependency — that
+   * package's `bin` is `dist/cli/index.js` — and a shim path when it came from PATH.
+   * `viaNode` says which, because the two need different command shapes: a script is
+   * spawned as `node <path>`, a shim is spawned directly (and on Windows needs the
+   * shell's call operator).
+   */
+  cliPath: string;
+  /** Whether `cliPath` has to be run through `node`. */
+  viaNode: boolean;
+  /** Where this came from, so an unexpected pick can be diagnosed. */
+  source: 'override' | 'dependency' | 'path';
+  /** The package root it was resolved from, when it came from a dependency. */
+  packageRoot: string | null;
 }
 
 export interface CliProbeMissing {
@@ -150,30 +165,55 @@ function effectivePath(override: NodeJS.ProcessEnv | undefined): string {
 }
 
 /**
- * Look for a `gitnexus` shim in every PATH entry.
+ * Resolve the `gitnexus` CLI this plugin will run.
+ *
+ * ORDER: explicit override, then the declared dependency, then PATH.
+ *
+ * The dependency comes first because the plugin now declares `gitnexus` as one, so it
+ * is present by construction and no PATH search is needed — the "is GitNexus installed"
+ * question stops being a runtime check and becomes an install-time guarantee. That was
+ * the whole point of taking the dependency: a check that always succeeds is not a check.
+ *
+ * PATH remains as the fallback rather than the primary, because a normal `npm install`
+ * of this plugin puts `gitnexus` beside it in `node_modules`, where PATH never looks.
+ * Keeping the search means a machine with a global install still works if the
+ * dependency somehow did not land, and it keeps this repository's own tests runnable
+ * without a 1 GB install.
  *
  * Does not execute anything. Spawning the CLI to ask its version would be the direct
  * test, but a confined DSH process denies piped stdio (`spawn EPERM`), which is the
- * same constraint that shaped the maintenance commands — so a probe that only stats
- * the filesystem is the one that works everywhere this plugin runs.
+ * same constraint that shaped the maintenance commands — so a probe that only stats the
+ * filesystem is the one that works everywhere this plugin runs.
  */
 export function findGitnexusCli(options: ToolchainOptions = {}): CliProbeFound | CliProbeMissing {
   if (options.discover === false) return { present: false, probedDirs: 0 };
 
-  const entries = effectivePath(options.env).split(path.delimiter).filter((dir) => dir !== '');
+  const platform = options.platform ?? process.platform;
 
   // An explicit override wins, so a machine with a non-standard layout — or a test —
-  // can name the shim directly.
+  // can name the executable directly.
   const explicit = options.env?.GITNEXUS_CLI ?? process.env.GITNEXUS_CLI;
   if (typeof explicit === 'string' && explicit !== '' && existsSync(explicit)) {
-    return { present: true, shimPath: explicit };
+    return {
+      present: true,
+      cliPath: explicit,
+      viaNode: explicit.endsWith('.js'),
+      source: 'override',
+      packageRoot: null,
+    };
   }
 
+  const fromDependency = resolveDependencyCli(options);
+  if (fromDependency !== null) return fromDependency;
+
+  const entries = effectivePath(options.env).split(path.delimiter).filter((dir) => dir !== '');
   for (const dir of entries) {
-    for (const name of cliShimNames(options.platform ?? process.platform)) {
+    for (const name of cliShimNames(platform)) {
       const candidate = path.join(dir, name);
       try {
-        if (existsSync(candidate)) return { present: true, shimPath: candidate };
+        if (existsSync(candidate)) {
+          return { present: true, cliPath: candidate, viaNode: false, source: 'path', packageRoot: null };
+        }
       } catch {
         /* unreadable PATH entry — keep looking */
       }
@@ -181,6 +221,56 @@ export function findGitnexusCli(options: ToolchainOptions = {}): CliProbeFound |
   }
 
   return { present: false, probedDirs: entries.length };
+}
+
+/**
+ * The CLI shipped inside the `gitnexus` dependency, if it is installed.
+ *
+ * Resolved by walking up from this module rather than by asking Node to resolve the
+ * package name, because these modules are CommonJS-compiled and a bare `require` of an
+ * ESM-only package would throw for a reason unrelated to whether the file exists. Each
+ * candidate is a plain `node_modules/gitnexus` directory on the way to the filesystem
+ * root, which is exactly where npm and pnpm put it.
+ */
+function resolveDependencyCli(options: ToolchainOptions): CliProbeFound | null {
+  const startDir = options.moduleUrl === undefined ? undefined : safeDirname(options.moduleUrl);
+  let dir = startDir ?? undefined;
+
+  // `import.meta.url` is only available in the host half, so the caller may not pass
+  // one; without a starting point there is nothing to walk and PATH is the answer.
+  if (dir === undefined) return null;
+
+  for (let depth = 0; depth < 24; depth += 1) {
+    const candidateRoot = path.join(dir, 'node_modules', 'gitnexus');
+    const manifest = path.join(candidateRoot, 'package.json');
+    const script = path.join(candidateRoot, 'dist', 'cli', 'index.js');
+    try {
+      if (existsSync(manifest) && existsSync(script)) {
+        return {
+          present: true,
+          cliPath: script,
+          viaNode: true,
+          source: 'dependency',
+          packageRoot: candidateRoot,
+        };
+      }
+    } catch {
+      /* unreadable directory — keep walking up */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** Directory of one module url, or `undefined` when it cannot be read as a path. */
+function safeDirname(moduleUrl: string): string | undefined {
+  try {
+    return path.dirname(fileURLToPath(moduleUrl));
+  } catch {
+    return undefined;
+  }
 }
 
 /** Resolve the full picture: library tree, CLI shim, and the verdict they imply. */

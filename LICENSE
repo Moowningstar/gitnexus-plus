@@ -1,0 +1,36 @@
+MIT License
+
+Copyright (c) 2026 Moowningstar
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This licence covers THIS PROJECT ONLY.
+
+This project is a visualization and automation layer for GitNexus. It does not
+fork GitNexus, does not modify it, and does not redistribute its source. GitNexus
+is installed separately by npm as a dependency, is distributed under
+PolyForm-Noncommercial-1.0.0, and remains the property of its author,
+Abhigyan Patwari — see https://github.com/abhigyanpatwari/GitNexus.
+
+Installing this project installs GitNexus as a dependency, so **your use of
+GitNexus through this project is subject to GitNexus's licence**: noncommercial
+use is granted, commercial use requires a separate grant from its author. A
+summary is in README.md under "License and what this project is not".

@@ -428,6 +428,17 @@ async function analyzeTests() {
   );
   check('POSIX uses assignment prefixes', posixLine.startsWith("GITNEXUS_MEMORY='off' NODE_OPTIONS="), posixLine);
 
+  // A CLI from the declared dependency is that package's own `dist/cli/index.js`, so it
+  // runs through `node`. That is the shape that removes the shim problems entirely: no
+  // `.cmd`/`.ps1` choice, and no reliance on the shell's call operator.
+  const nodeLine = analyzeCommandLine('D:\\p\\node_modules\\gitnexus\\dist\\cli\\index.js', 'D:\\repo', {
+    flavor: 'win32',
+    viaNode: true,
+  });
+  check('a dependency CLI is spawned through node', nodeLine.includes("node 'D:\\p\\node_modules\\gitnexus"), nodeLine);
+  check('a node-spawned CLI needs no call operator', !nodeLine.includes('& '), nodeLine);
+  check('a node-spawned CLI still gets the environment prefix', nodeLine.includes("$env:GITNEXUS_MEMORY='off'"));
+
   let captured = null;
   /**
    * A stub faithful to the seam: `result()` settles, and honours an abort.

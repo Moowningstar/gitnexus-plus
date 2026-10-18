@@ -167,21 +167,23 @@ function quoteFor(shell: 'win32' | 'posix', value: string): string {
  * Exported so the shape can be asserted without a shell.
  */
 export function analyzeCommandLine(
-  shimPath: string,
+  cliPath: string,
   repoPath: string,
-  options: { flavor?: 'win32' | 'posix'; memoryOff?: boolean; heapMb?: number } = {},
+  options: { flavor?: 'win32' | 'posix'; memoryOff?: boolean; heapMb?: number; viaNode?: boolean } = {},
 ): string {
   const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
   const memoryOff = options.memoryOff !== false;
   const heapMb = options.heapMb ?? 8192;
+  // A CLI taken from the declared dependency is the package's `dist/cli/index.js`, so it
+  // is spawned through `node`. This is the better shape when available: no shim, no
+  // `.cmd`/`.ps1` selection, and therefore no reliance on the shell's call operator.
+  const viaNode = options.viaNode === true;
 
   const args = `analyze --index-only ${quoteFor(flavor, repoPath)}`;
-  // On Windows the shim is a `.cmd` or `.ps1` reached by absolute path, so it needs
-  // `&`. On POSIX an absolute path in command position is already a command.
-  const invocation =
-    flavor === 'win32'
-      ? `& ${quoteFor(flavor, shimPath)} ${args}`
-      : `${quoteFor(flavor, shimPath)} ${args}`;
+  const head = viaNode ? `node ${quoteFor(flavor, cliPath)}` : quoteFor(flavor, cliPath);
+  // On Windows a `.cmd` or `.ps1` reached by absolute path needs `&`. POSIX needs none,
+  // because an absolute path in command position is already a command.
+  const invocation = viaNode || flavor !== 'win32' ? `${head} ${args}` : `& ${head} ${args}`;
   const heap = quoteFor(flavor, `--max-old-space-size=${heapMb}`);
 
   if (flavor === 'win32') {
@@ -269,7 +271,10 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       });
     }
 
-    const cli = findGitnexusCli(options.toolchain);
+    // `moduleUrl` is what lets the probe find the `gitnexus` that npm installed beside
+    // this plugin. Omitting it would make the dependency branch unreachable and silently
+    // fall back to PATH forever — the dependency would be installed and never used.
+    const cli = findGitnexusCli({ moduleUrl: import.meta.url, ...(options.toolchain ?? {}) });
     if (!cli.present) {
       return finish(key, {
         state: 'unavailable',
@@ -285,10 +290,11 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     // `--index-only` is not negotiable here: without it `analyze` rewrites AGENTS.md,
     // CLAUDE.md and the agent skill files inside the repository, which is a much larger
     // change than "refresh the index" and not what the button says it does.
-    const command = analyzeCommandLine(cli.shimPath, key, {
+    const command = analyzeCommandLine(cli.cliPath, key, {
       flavor: shellFlavor,
       memoryOff: options.memoryOff,
       heapMb: options.heapMb,
+      viaNode: cli.viaNode,
     });
 
     const controller = new AbortController();

@@ -22,6 +22,57 @@ represents your codebase and one that does not — measured on this machine,
 
 This plugin turns that line into data, a tool, and a route.
 
+## What this project is, and what it is not
+
+[GitNexus](https://github.com/abhigyanpatwari/GitNexus) is a code-intelligence engine by
+**Abhigyan Patwari**. It parses a repository into symbols, relationships and execution
+flows and writes them to a local graph database. It is a genuinely good piece of work,
+and this project would have nothing to show without it.
+
+What GitNexus does not give an everyday user is **visibility** and **automation**:
+
+- **Visibility** — how much of the repository does the index actually cover? Which files
+  were skipped for being too large? Has the index fallen behind `HEAD`, and by how much?
+  The CLI does not answer those unasked, and the answer is invisible exactly when it
+  matters.
+- **Automation** — once an index is stale, somebody has to remember to refresh it.
+
+**This project is a layer that adds those two things and nothing else.** It reads the
+index GitNexus wrote, reports what the index left out, and can start an incremental
+refresh through GitNexus's own CLI.
+
+It does **not**:
+
+- fork GitNexus, patch it, or reimplement its parser or graph database;
+- redistribute GitNexus source. Nothing from that project is inside this package's
+  tarball — `gitnexus` is installed by npm as a separate dependency and stays separate;
+- claim authorship of, or any contribution to, GitNexus. All rights in GitNexus belong
+  to its author;
+- replace GitNexus. With no GitNexus index there is nothing here to display.
+
+## Licence — read this before a commercial use
+
+This project is **MIT** (see [LICENSE](LICENSE)).
+
+**It depends on GitNexus, which is `PolyForm-Noncommercial-1.0.0`.** That licence grants
+noncommercial use and restricts commercial use. Because installing this plugin installs
+GitNexus as a dependency:
+
+- **your use of this plugin's GitNexus-backed features is subject to GitNexus's
+  licence**, not to this project's MIT grant;
+- **commercial use requires a separate grant from GitNexus's author.** If your use is
+  commercial, read
+  <https://github.com/abhigyanpatwari/GitNexus/blob/main/LICENSE> or contact the author
+  before relying on any of it.
+
+This project cannot and does not change that: it only calls the interfaces GitNexus
+provides. The read-only half — reading `.gitnexus/gitnexus.json` and reporting on it —
+is this project's own code and carries no GitNexus code, but it also has nothing to
+report on unless GitNexus produced that file.
+
+A one-line summary: **the MIT licence here covers my code; GitNexus's licence covers
+GitNexus, and installing this plugin installs GitNexus.**
+
 ## What it reports
 
 - **Skipped large files** — path, size, share of its language, and two independent
