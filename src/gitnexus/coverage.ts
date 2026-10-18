@@ -30,6 +30,7 @@ import {
 } from './languages.js';
 import { readGitState, classifyStaleness } from './git.js';
 import { readGitActivity, type ActivityInfo } from './git-activity.js';
+import { readToolchainStatus, type ToolchainStatus } from './toolchain.js';
 
 /**
  * Re-exported so a consumer of the report can name these without also depending on
@@ -338,6 +339,15 @@ export interface CoverageReport {
   warnings: ReportWarning[];
   languages: LanguageBreakdown | null;
   activity: ActivityInfo | null;
+  /**
+   * Whether GitNexus itself is present on this machine.
+   *
+   * Reported rather than thrown, because "no GitNexus" is a state the panel has to act
+   * on: it is the difference between showing an index and offering to produce one, and
+   * only the report can carry that distinction. The probe only stats the filesystem, so
+   * filling this costs nothing on the hot path.
+   */
+  toolchain: ToolchainStatus | null;
 }
 
 /**
@@ -486,6 +496,8 @@ export interface AnalyzeOptions {
   activityMaxCommits?: number;
   /** How many oversized files may be probed for minification before giving up. */
   minifiedSampleLimit?: number;
+  /** Where the plugin installs GitNexus, so the probe finds that copy too. */
+  toolchain?: { managedPrefix?: string };
 }
 
 /**
@@ -840,5 +852,12 @@ export async function analyzeCoverage(
     warnings,
     languages: languagesReport,
     activity,
+    // Filesystem-only probe, so it costs a few `existsSync` calls. Reported on every
+    // read rather than once at startup: a GitNexus installed while the panel is open
+    // should start working without the operator restarting anything.
+    toolchain: readToolchainStatus({
+      env: options.env,
+      ...(options.toolchain?.managedPrefix === undefined ? {} : { managedPrefix: options.toolchain.managedPrefix }),
+    }),
   };
 }

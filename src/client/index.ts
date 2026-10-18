@@ -242,6 +242,7 @@ interface ClientReport {
   largeFiles?: ClientLargeFile[];
   index?: ClientIndexInfo;
   attribution?: { oversizeShareOfScanned?: number };
+  toolchain?: ClientToolchain | null;
 }
 
 /** One maintenance command handed to the operator. */
@@ -253,6 +254,21 @@ interface ClientMaintenanceCommand {
   shell: string;
   destructive: boolean;
   caveat: string | null;
+}
+
+/**
+ * Whether GitNexus is present, as the host probed it.
+ *
+ * The panel offers to install only when the verdict is not `ready`, and it shows the
+ * command **first**. "Let me install it for you" is a much larger decision than "here is
+ * the command" — a few hundred megabytes and the package's build scripts running on this
+ * machine — so it must not be the default an operator reaches for by accident.
+ */
+interface ClientToolchain {
+  packageRoot: string | null;
+  packageVersion: string | null;
+  cli: { present: boolean; source?: string; viaNode?: boolean };
+  verdict: 'ready' | 'library-only' | 'absent';
 }
 
 /** The maintenance payload that rides along with a report. */
@@ -272,6 +288,24 @@ interface ClientMaintenance {
 interface ClientAnalyzeRun {
   state: 'unavailable' | 'running' | 'done' | 'failed' | 'timed-out' | 'cancelled' | 'denied';
   command: string;
+  startedAt: number;
+  finishedAt: number | null;
+  exitCode: number | null;
+  message: string | null;
+  output: string;
+}
+
+/**
+ * An install of GitNexus the panel started.
+ *
+ * The same states as a refresh minus the ones that cannot happen: an install never
+ * reports `denied` for a *permission* the operator could grant in the session — a
+ * sandbox refusal is reported and not retried, exactly like everywhere else.
+ */
+interface ClientInstallRun {
+  state: 'unavailable' | 'running' | 'done' | 'failed' | 'timed-out' | 'cancelled' | 'denied';
+  command: string;
+  prefix: string;
   startedAt: number;
   finishedAt: number | null;
   exitCode: number | null;
@@ -1534,6 +1568,185 @@ function contextDiagnostic(props: SlotProps): ContextDiagnostic {
  *
  * @param {{maintenance: any, projectPath: string | null, indexed: boolean}} props
  */
+/**
+ * What the panel says when GitNexus is not on this machine.
+ *
+ * THE ORDER IS THE DESIGN
+ * -----------------------
+ * The install command comes first and is copyable, because that is the answer for most
+ * operators: they know their network, their registry and their toolchain, and a command
+ * they can run is more useful than a download this plugin performs on their behalf. The
+ * plugin-install option is second and behind a confirmation, because making a
+ * several-hundred-megabyte download the path of least resistance would be the wrong
+ * default for a panel whose job is to report, not to act.
+ *
+ * Nothing renders when the verdict is `ready` — a permanent "GitNexus is fine" banner is
+ * noise in a panel whose whole purpose is to surface problems.
+ */
+function ToolchainNotice({
+  toolchain,
+  run,
+  runError,
+  now,
+  onInstall,
+  onCancelInstall,
+}: {
+  toolchain: ClientToolchain | null | undefined;
+  run: ClientInstallRun | null;
+  runError: string | null;
+  now: number;
+  onInstall: () => void;
+  onCancelInstall: () => void;
+}) {
+  const [copied, setCopied] = React.useState(false);
+  const [confirming, setConfirming] = React.useState(false);
+  const [acknowledged, setAcknowledged] = React.useState(false);
+
+  if (toolchain === undefined || toolchain === null || toolchain.verdict === 'ready') return null;
+
+  const activeRun = run ?? null;
+  const installing = activeRun?.state === 'running';
+  const at = typeof now === 'number' ? now : Date.now();
+  const elapsed =
+    activeRun === null ? 0 : Math.max(0, Math.round(((activeRun.finishedAt ?? at) - activeRun.startedAt) / 1000));
+  const libraryOnly = toolchain.verdict === 'library-only';
+  const command = 'npm install -g gitnexus';
+
+  const copy = (): void => {
+    const write =
+      typeof primitives.writeClipboard === 'function'
+        ? primitives.writeClipboard
+        : (text: string) => navigator.clipboard?.writeText(text);
+    try {
+      const outcome = write(command);
+      if (outcome && typeof outcome.then === 'function') outcome.then(() => setCopied(true)).catch(() => setCopied(false));
+      else setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return h(
+    Section,
+    { wide: true, title: libraryOnly ? '缺少 gitnexus 命令' : '本机没有 GitNexus' },
+    h(
+      'div',
+      { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '4px' } },
+      h(
+        'div',
+        { style: { ...MUTED, display: 'flex', gap: '6px', alignItems: 'flex-start' } },
+        h(StateDot, { state: 'warning' }),
+        h(
+          'span',
+          null,
+          libraryOnly
+            ? '找到了 GitNexus 的库，但没有可执行的 gitnexus 命令（可能只作为依赖安装、未全局链接）。读取不受影响；修复后即可执行增量刷新。'
+            : '本插件读取 .gitnexus/gitnexus.json —— 那份文件由 GitNexus 分析仓库产生，包含每个函数定义、符号关系与执行流。没有它就没什么可展示的。',
+        ),
+      ),
+
+      h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: { fontWeight: 600 } }, '① 自己安装（推荐）'),
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+          h(
+            'code',
+            {
+              style: {
+                ...styles.mono,
+                flex: '1 1 auto',
+                padding: '6px 8px',
+                border: HAIRLINE,
+                borderRadius: '6px',
+                background: SOFT_BG,
+                wordBreak: 'break-all',
+                userSelect: 'all',
+              },
+            },
+            command,
+          ),
+          h(Button, { variant: 'ghost', onClick: copy }, copied ? '已复制' : '复制'),
+        ),
+        h(
+          'div',
+          { style: MUTED },
+          '用你能访问到的源安装即可 —— 本插件不假设任何网络，也不会自行下载。',
+        ),
+      ),
+
+      h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+        h('div', { style: { fontWeight: 600 } }, '② 授权本插件安装'),
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          installing
+            ? h(Button, { variant: 'ghost', onClick: onCancelInstall }, `取消（已进行 ${elapsed}s）`)
+            : h(Button, { variant: 'ghost', onClick: () => setConfirming(true) }, '授权并安装'),
+          h(
+            'span',
+            { style: MUTED },
+            '装到插件自己的目录，用你已配置的 npm 源，不改全局前缀、不需要管理员权限。',
+          ),
+        ),
+        activeRun === null
+          ? null
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', gap: '3px', paddingTop: '2px' } },
+              h(
+                'div',
+                { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+                h(StateDot, { state: runStateTone(activeRun.state) }),
+                h('span', { style: { fontWeight: 600 } }, runStateLabel(activeRun.state)),
+                h('span', { style: MUTED }, installing ? `已运行 ${elapsed}s` : `${elapsed}s`),
+              ),
+              activeRun.message === null ? null : h('div', { style: MUTED }, activeRun.message),
+              activeRun.output === ''
+                ? null
+                : h(
+                    'pre',
+                    { style: { ...styles.mono, margin: 0, whiteSpace: 'pre-wrap', maxHeight: '9em', overflow: 'auto' } },
+                    activeRun.output,
+                  ),
+            ),
+        runError === null ? null : h('div', { style: { ...MUTED, color: 'var(--dsw-color-danger, inherit)' } }, runError),
+      ),
+
+      h(primitives.RiskConfirmation, {
+        open: confirming,
+        title: '授权本插件安装 GitNexus？',
+        description:
+          '本插件将执行：\n\nnpm install --prefix <插件数据目录>/gitnexus gitnexus@^1.6.12\n\n' +
+          '· 从你已配置的 npm 源下载约 500 MB ~ 1 GB\n' +
+          '· 需要几分钟；网络慢或需要本地编译时更久\n' +
+          '· 会在本机运行这些包的安装期构建脚本（原生数据库与解析器需要本地编译）\n' +
+          '· 安装到插件自己的目录，不改动你的全局 npm 前缀\n\n' +
+          '命令走 DSH 的 shell 执行器，沙箱与其它命令一致 —— 本插件不申请扩权。',
+        acknowledgeLabel: '我已了解这会下载数百 MB 并在本机编译原生模块',
+        cancelLabel: '取消',
+        confirmLabel: '授权并开始',
+        closeLabel: '关闭',
+        acknowledged,
+        onAcknowledgedChange: setAcknowledged,
+        onCancel: () => {
+          setConfirming(false);
+          setAcknowledged(false);
+        },
+        onConfirm: () => {
+          setConfirming(false);
+          setAcknowledged(false);
+          onInstall();
+        },
+      }),
+    ),
+  );
+}
+
 function MaintenanceSection({
   maintenance,
   projectPath,
@@ -1798,6 +2011,11 @@ interface CoverageViewProps {
   onRefresh: () => void;
   onStartRun: () => void;
   onCancelRun: () => void;
+  /** The GitNexus install, when the operator authorised one. */
+  installRun: ClientInstallRun | null;
+  installError: string | null;
+  onInstall: () => void;
+  onCancelInstall: () => void;
 }
 
 function CoverageView({
@@ -1814,6 +2032,10 @@ function CoverageView({
   onRefresh,
   onStartRun,
   onCancelRun,
+  installRun,
+  installError,
+  onInstall,
+  onCancelInstall,
 }: CoverageViewProps) {
   // Whether an index exists decides which maintenance command is applicable. When
   // the project could not even be identified there is nothing to claim, so it is
@@ -1954,6 +2176,18 @@ function CoverageView({
     // The header and the two status lines span everything: they describe the whole
     // panel, so giving them a column would make them look like one card's heading.
     h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+
+    // Immediately after the header, before any index content. If GitNexus is missing,
+    // that single fact explains everything the panel is about to show or fail to show,
+    // so it belongs above the numbers rather than beside them.
+    h(ToolchainNotice, {
+      toolchain: report.toolchain,
+      run: installRun,
+      runError: installError,
+      now,
+      onInstall,
+      onCancelInstall,
+    }),
 
     h(
       'div',
@@ -2281,6 +2515,63 @@ function CoveragePanel(props: SlotProps) {
     }
   }, [projectPath]);
 
+  // The GitNexus install. Its own state because it is not tied to a repository: the
+  // install target is one directory per machine, and the operator may have several
+  // projects open across a session.
+  const [installRun, setInstallRun] = React.useState<ClientInstallRun | null>(null);
+  const [installError, setInstallError] = React.useState<string | null>(null);
+  const installing = installRun?.state === 'running';
+
+  React.useEffect(() => {
+    if (!installing) return undefined;
+    let cancelled = false;
+    const poll = async (): Promise<void> => {
+      try {
+        const res = await fetch(routeUrl('/api/gitnexus/install'));
+        const body = await res.json().catch(() => null);
+        if (cancelled || !body?.ok) return;
+        const next: ClientInstallRun | null = body.run ?? null;
+        setInstallRun(next);
+        // A finished install changes what this machine can do, so re-read the report:
+        // the toolchain verdict is computed per read, so this is what clears the notice.
+        if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
+      } catch {
+        /* a dropped poll is not worth surfacing */
+      }
+    };
+    const id = setInterval(() => {
+      setTick((n) => n + 1);
+      void poll();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [installing]);
+
+  const startInstall = React.useCallback(async (): Promise<void> => {
+    setInstallError(null);
+    try {
+      const res = await fetch(routeUrl('/api/gitnexus/install'), { method: 'POST' });
+      const body = await res.json().catch(() => null);
+      if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
+      setInstallRun(body.run ?? null);
+      setTick(0);
+    } catch (cause) {
+      setInstallError(String((cause as Error)?.message ?? cause));
+    }
+  }, []);
+
+  const cancelInstall = React.useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch(routeUrl('/api/gitnexus/install'), { method: 'DELETE' });
+      const body = await res.json().catch(() => null);
+      if (body?.ok) setInstallRun(body.run ?? null);
+    } catch (cause) {
+      setInstallError(String((cause as Error)?.message ?? cause));
+    }
+  }, []);
+
   React.useEffect(() => {
     if (projectPath === null) return undefined;
     const controller = new AbortController();
@@ -2336,6 +2627,10 @@ function CoveragePanel(props: SlotProps) {
     onRefresh: () => setReloadToken((n) => n + 1),
     onStartRun: () => void startRun(),
     onCancelRun: () => void cancelRun(),
+    installRun,
+    installError,
+    onInstall: () => void startInstall(),
+    onCancelInstall: () => void cancelInstall(),
   });
 }
 
