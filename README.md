@@ -125,6 +125,53 @@ covered files as skipped.
 **Read-only.** Nothing here triggers `analyze`, writes to `.gitnexus/`, or takes the
 index lock. A status check must never start a 30-second rebuild.
 
+## Getting GitNexus — the prerequisite, and the two ways to satisfy it
+
+This plugin reads an index. **Only GitNexus produces one.** So the plugin checks
+whether GitNexus is present, and when it is not, the panel says so above everything else
+rather than letting you wonder why the numbers are missing.
+
+Two ways out, in the order the panel offers them:
+
+**① Install it yourself.** The panel shows a copyable `npm install -g gitnexus`, and
+that is the recommendation. You know your network, your registry and your toolchain; a
+command you can run is more useful than a download this plugin performs on your behalf,
+and it works behind whatever mirror or feed your machine actually reaches.
+
+**② Let the plugin install it.** Second in the list and behind a confirmation, because
+it is a much larger decision. It runs, through the host's shell executor:
+
+```
+npm install --prefix <DSH_HOME>/gitnexus-plus/gitnexus gitnexus@^1.6.12
+```
+
+and the confirmation states what that means before anything starts:
+
+- **about 500 MB to 1 GB** downloaded, from whatever registry your `.npmrc` already
+  names — this plugin hardcodes none, because a hardcoded one breaks exactly the users
+  whose network is why they need this path;
+- **several minutes**, longer on a slow link or when the native modules have to compile;
+- **this machine's build toolchain is used** — `@ladybugdb/core`, `tree-sitter` and
+  `tree-sitter-*` compile on install. That is why this is `npm` and not `pnpm`: pnpm 10+
+  refuses dependency build scripts by default, and the failure it produces is one you
+  cannot act on. GitNexus's own message names the grants it needs:
+  `--allow-build=@ladybugdb/core --allow-build=gitnexus --allow-build=tree-sitter`;
+- it installs into a **plugin-owned directory**, never your global prefix, so it needs no
+  elevation and cannot collide with a GitNexus you already have.
+
+Everything runs through `ctx.shell`, so a sandboxed deployment confines it exactly as it
+confines your own commands. **A refusal is reported as a refusal and never retried
+wider** — the plugin never asks for more scope than the session already granted.
+
+If your GitNexus lives somewhere unusual, name it directly and none of this applies:
+
+```sh
+GITNEXUS_CLI=/path/to/gitnexus/dist/cli/index.js
+```
+
+That path is checked first, and it is the answer for an offline or air-gapped machine:
+put a copy anywhere, point at it, done.
+
 ## Usage
 
 ```sh
@@ -367,10 +414,29 @@ because this package declares `dsh.bundle`.
   also degrades correctly on its own — `scan.ts` falls back to its own walker and
   reports `primitives: 'fallback'`, and the built-in size caps apply.
 - **A report that reused GitNexus's scan rules and one that fell back to an
-  approximation are still not distinguished in the panel.** The probe's verdict is not
-  yet carried into `CoverageReport`, so the fallback is silent: the built-in walker
-  deliberately does **not** implement upstream's ignore rules faithfully, and its
-  uncovered-file count can therefore carry false positives.
+  approximation are still not distinguished inside the report itself.** The toolchain
+  verdict now travels with it, so the panel knows whether GitNexus is present and says so
+  — but the per-file numbers do not carry a provenance marker, so a fallback walk is not
+  labelled as one where the numbers are shown. The built-in walker deliberately does
+  **not** implement upstream's ignore rules faithfully, and its uncovered-file count can
+  therefore carry false positives.
+- **Installing GitNexus from the panel has never been run against a real network.** The
+  command shape is verified (`npm install --prefix … --no-audit --no-fund`, no hardcoded
+  registry), the runner's state machine is covered by fourteen assertions, and the
+  failure paths name the two likely causes — unreachable registry, missing C++ toolchain.
+  What is **not** verified is the download and compile itself: it is several hundred
+  megabytes and was never executed from inside a confined DSH process. Treat the first
+  authorised install on any machine as untested, and fall back to the manual command if
+  it fails — which is why that command is offered first.
+- **`--omit=optional` saves about 486 MB of that install, and is not used by default.**
+  Measured: a full GitNexus tree is 998.9 MB, and omitting the optional dependencies
+  gives 513.2 MB by dropping `onnxruntime-node` (287 MB), `onnxruntime-web` (139 MB) and
+  `@huggingface/transformers`. Those serve vector search and embeddings, which this
+  plugin never enables and reports as `unavailable`. The default does not pass the flag
+  because the plugin cannot verify that analysis still succeeds without them on every
+  platform, and a refresh that fails in an unexplained way is worse than one that is
+  large. A deployment that wants the smaller tree can set `gitnexusInstallDir` aside and
+  install by hand with `--omit=optional`.
 - **The refresh runs outside the conversation, and that has a real consequence.** A
   command started from the panel goes through `ctx.shell` and is confined exactly as
   your own shell commands are, but it is **not** a tool call: it writes no
