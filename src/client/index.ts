@@ -2411,6 +2411,44 @@ interface CoverageViewProps {
   search?: SearchViewState;
 }
 
+/**
+ * An indeterminate progress bar for the one request the panel makes.
+ *
+ * The host returns a single coverage JSON body; it has no byte/phase progress to
+ * report. A native `<progress>` without `value` is the honest shape: it animates
+ * while the request is pending and does not pretend to know a percentage. The
+ * label is also the accessible value, so a screen reader gets the state, not just
+ * a spinning rectangle.
+ */
+function LoadingBar({ label }: { label: string }) {
+  return h(
+    'div',
+    {
+      style: {
+        gridColumn: '1 / -1',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '4px',
+      },
+    },
+    h('progress', {
+      'aria-label': label,
+      'aria-valuetext': label,
+      style: {
+        width: '100%',
+        height: '4px',
+        border: 0,
+        borderRadius: '999px',
+        overflow: 'hidden',
+        background: 'var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.16))',
+        accentColor: 'var(--dsw-alias-brand-primary, #4f8cff)',
+        color: 'var(--dsw-alias-brand-primary, #4f8cff)',
+      },
+    }),
+    h('div', { style: { ...MUTED, fontSize: '10px' } }, label),
+  );
+}
+
 function CoverageView({
   report,
   maintenance,
@@ -2465,6 +2503,15 @@ function CoverageView({
       h(IconRefreshOutlineRegular, { size: 14 }),
     ),
   );
+
+  // A report already on screen stays readable while a manual refresh runs; the bar
+  // rides above it. Before the first report exists, the bar is the whole body.
+  const progress =
+    report === null
+      ? h(LoadingBar, { label: '正在读取索引…' })
+      : busy
+        ? h(LoadingBar, { label: '正在刷新索引…' })
+        : null;
 
   // "I cannot tell which project this is" and "this project has no index" are
   // different facts, and the first revision conflated them: an unresolved project
@@ -2521,7 +2568,7 @@ function CoverageView({
   }
 
   if (report === null) {
-    return h('div', { style: styles.root }, header, h('div', { style: MUTED }, '正在读取索引…'));
+    return h('div', { style: styles.root }, header, progress);
   }
 
   // Defaults are resolved before the no-index branch: a scan-only report still has
@@ -2546,6 +2593,7 @@ function CoverageView({
       'div',
       { style: styles.root },
       h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+      progress,
       h(ToolchainNotice, {
         toolchain: report.toolchain,
         run: installRun,
@@ -2608,6 +2656,7 @@ function CoverageView({
     // The header and the two status lines span everything: they describe the whole
     // panel, so giving them a column would make them look like one card's heading.
     h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+    progress,
 
     // Immediately after the header, before any index content. If GitNexus is missing,
     // that single fact explains everything the panel is about to show or fail to show,

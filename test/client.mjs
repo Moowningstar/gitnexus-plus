@@ -745,6 +745,32 @@ const repos = [
 
 const view = render(I.CoverageView, { report, ...viewProps });
 
+check('a settled report shows no progress bar', !view.tags.includes('progress'));
+
+const loadingView = render(I.CoverageView, {
+  report: null,
+  ...viewProps,
+  busy: true,
+  error: null,
+});
+check(
+  'the first read shows an indeterminate progress bar',
+  loadingView.tags.includes('progress') && loadingView.text.includes('正在读取索引'),
+  loadingView.text.slice(0, 300),
+);
+
+const refreshingView = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  busy: true,
+  error: null,
+});
+check(
+  'a manual refresh shows progress above the existing report',
+  refreshingView.tags.includes('progress') && refreshingView.text.includes('正在刷新索引'),
+  refreshingView.text.slice(0, 300),
+);
+
 check('renders without throwing', view.text.length > 0);
 check('shows the project path instead of a picker', !view.tags.includes('select') && view.text.includes('D:\\demo'));
 check('shows the maintenance commands', view.text.includes('维护命令') && view.text.includes('强制全量重构'));
