@@ -1361,7 +1361,12 @@ async function realRepoSmoke() {
       JSON.stringify(localActivity?.cross),
     );
     if (localReport.repo?.lastCommit === null || localReport.repo?.lastCommit === undefined) {
-      check('baseline review (skipped: index has no recorded commit)', true);
+      check(
+        'baseline review falls back to the activity window',
+        localActivity?.baseline?.source === 'window' &&
+          localActivity.baseline.available === true,
+        JSON.stringify(localActivity?.baseline),
+      );
     } else {
       check(
         'activity reviews changes against the indexed commit',

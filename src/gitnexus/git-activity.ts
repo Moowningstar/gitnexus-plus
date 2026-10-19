@@ -131,6 +131,8 @@ export interface ActivityCross {
 /** What changed since the commit the index was built from. */
 export interface ActivityBaseline {
   ref: string | null;
+  /** `window` is the explicit fallback when the index recorded no commit. */
+  source: 'index' | 'window';
   available: boolean;
   shortSha: string | null;
   date: string | null;
@@ -461,7 +463,10 @@ export async function readGitActivity(
    * 90 days and the question is still "what changed since we indexed?", so this uses
    * a direct diff with its own bounded buffer rather than a wider log.
    */
-  const readBaseline = async (ref: string): Promise<ActivityBaseline> => {
+  const readBaseline = async (
+    ref: string,
+    source: ActivityBaseline['source'],
+  ): Promise<ActivityBaseline> => {
     const short = ref.slice(0, 8);
     const show = await git(repoPath, [
       'show',
@@ -472,6 +477,7 @@ export async function readGitActivity(
     if (show === null) {
       return {
         ref,
+        source,
         available: false,
         shortSha: short,
         date: null,
@@ -488,6 +494,7 @@ export async function readGitActivity(
     const [sha, date, author, subject]: (string | undefined)[] = show.trim().split(US);
     const base = {
       ref,
+      source,
       shortSha: (sha ?? ref).slice(0, 8),
       date: date ?? null,
       subject: subject ?? null,
@@ -665,7 +672,18 @@ export async function readGitActivity(
   });
 
   const baselineRef = typeof options.baselineRef === 'string' ? options.baselineRef.trim() : '';
-  const baseline = baselineRef === '' ? null : await readBaseline(baselineRef);
+  // The manifest can legitimately have no recorded commit. Falling back to the
+  // oldest commit in the activity window still answers "what changed recently?",
+  // but the source is carried so the UI never calls it an index baseline.
+  // `oldestCommit` is the oldest *date*; the fallback needs the oldest SHA, which
+  // is the last commit after `git log` has produced newest-first entries.
+  const windowBaseline = commits.length > 0 ? commits[commits.length - 1].sha : '';
+  const baseline =
+    baselineRef !== ''
+      ? await readBaseline(baselineRef, 'index')
+      : windowBaseline !== ''
+        ? await readBaseline(windowBaseline, 'window')
+        : null;
 
   return {
     window: {

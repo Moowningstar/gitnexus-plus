@@ -215,6 +215,8 @@ interface ClientActivityCrossRow {
 /** Changes since the index's recorded baseline. */
 interface ClientActivityBaseline {
   ref?: string | null;
+  /** `window` means the index recorded no commit and the window start was used. */
+  source?: 'index' | 'window';
   available?: boolean;
   shortSha?: string | null;
   date?: string | null;
@@ -1618,14 +1620,23 @@ function ActivityBaseline({ baseline }: { baseline: ClientActivityBaseline }) {
   const changedFiles = Array.isArray(baseline.changedFiles) ? baseline.changedFiles : [];
   const short = baseline.shortSha ?? baseline.ref?.slice(0, 8) ?? '未知';
   const date = typeof baseline.date === 'string' ? baseline.date.slice(0, 10) : '';
+  const windowBaseline = baseline.source === 'window';
   return h(
     'div',
     null,
     h(
       'div',
       { style: { ...MUTED, marginBottom: '4px' } },
-      `索引基线审查 · ${short}${date === '' ? '' : ` · ${date}`}`,
+      `${windowBaseline ? '活动窗口基线审查' : '索引基线审查'} · ${short}` +
+        (date === '' ? '' : ` · ${date}`),
     ),
+    windowBaseline
+      ? h(
+          'div',
+          { style: { ...MUTED, fontSize: '10px', marginBottom: '3px' } },
+          '索引没有记录基线提交，使用活动窗口最早的提交作为基线。',
+        )
+      : null,
     baseline.available === false
       ? h(
           'div',
