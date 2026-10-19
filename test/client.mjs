@@ -187,6 +187,7 @@ const VERIFIED_PRIMITIVES = new Set([
   'Tooltip',
   'IconRefreshOutlineRegular',
   'IconWarningOutlineRegular',
+  'RiskConfirmation',
   'classifyFileType',
   'fileSizeText',
   'writeClipboard',
@@ -209,6 +210,10 @@ const primitivesStub = {
     ),
   Tooltip: ({ children }) => children,
   Tag: ({ children }) => React.createElement('span', null, children),
+  // Closed by default in these fixtures; when open, the body is what the operator
+  // reads, so the stub renders the same prop the real modal renders.
+  RiskConfirmation: ({ open, title, description, acknowledgeLabel }) =>
+    open ? React.createElement('div', null, title, description, acknowledgeLabel) : null,
   StateDot: () => null,
   FileTypeIcon: () => null,
   PathLabel: ({ path }) => React.createElement('span', null, path),
@@ -547,8 +552,8 @@ const maintenance = {
       mode: 'init',
       label: '初始化索引',
       when: '该项目还没有 .gitnexus 索引时使用。',
-      argv: "gitnexus analyze --index-only --skip-fts 'D:\\demo'",
-      shell: "$env:GITNEXUS_MEMORY='off'; gitnexus analyze --index-only --skip-fts 'D:\\demo'",
+      argv: "gitnexus analyze --index-only 'D:\\demo'",
+      shell: "$env:GITNEXUS_MEMORY='off'; gitnexus analyze --index-only 'D:\\demo'",
       destructive: false,
       caveat: null,
     },
@@ -556,15 +561,41 @@ const maintenance = {
       mode: 'full',
       label: '强制全量重构',
       when: '增量刷新卡死时的逃生舱。',
-      argv: "gitnexus analyze --index-only --skip-fts --force 'D:\\demo'",
-      shell: "$env:GITNEXUS_MEMORY='off'; gitnexus analyze --index-only --skip-fts --force 'D:\\demo'",
+      argv: "gitnexus analyze --index-only --force 'D:\\demo'",
+      shell: "$env:GITNEXUS_MEMORY='off'; gitnexus analyze --index-only --force 'D:\\demo'",
       destructive: true,
       caveat: '--force 重建图与 FTS。',
     },
   ],
   rationale: ['GITNEXUS_MEMORY=off：阻止 CLI 重启自身。', '--index-only：不会改动 AGENTS.md。'],
+  // The host that predates `force=1` omits this; the button must then be disabled.
+  supportsForce: true,
 };
-const viewProps = { maintenance, projectPath: 'D:\\demo', busy: false, error: null, onRefresh: () => {} };
+const search = {
+  query: 'analyze',
+  onQueryChange: () => {},
+  onSubmit: () => {},
+  onClear: () => {},
+  searching: false,
+  error: null,
+  mode: 'graph',
+  results: [
+    {
+      kind: 'Function',
+      name: 'analyzeCoverage',
+      filePath: 'src/gitnexus/coverage.ts',
+      startLine: 507,
+      endLine: 862,
+    },
+  ],
+  total: 1,
+  truncated: false,
+  warning: null,
+  copied: null,
+  onOpen: () => {},
+  onCopy: () => {},
+};
+const viewProps = { maintenance, search, projectPath: 'D:\\demo', busy: false, error: null, onRefresh: () => {} };
 
 
 section('project resolution');
@@ -717,10 +748,12 @@ const view = render(I.CoverageView, { report, ...viewProps });
 check('renders without throwing', view.text.length > 0);
 check('shows the project path instead of a picker', !view.tags.includes('select') && view.text.includes('D:\\demo'));
 check('shows the maintenance commands', view.text.includes('维护命令') && view.text.includes('强制全量重构'));
-// Which command is applicable depends on whether an index exists: on an indexed
-// project the initialize command must not read as the thing to do.
-check('marks the applicable command on an indexed project', view.text.includes('当前适用'));
-check('both commands remain visible for copying', view.text.includes('初始化索引') && view.text.includes('强制全量重构'));
+// On an indexed project the incremental command is the normal action and must not
+// read as "initialize"; the full rebuild is an escape hatch, never the applicable one.
+check('an indexed project shows 增量刷新, not 初始化索引', view.text.includes('增量刷新') && !view.text.includes('初始化索引'));
+check('marks the incremental command as applicable', view.text.includes('当前适用'));
+check('both commands remain visible', view.text.includes('增量刷新') && view.text.includes('强制全量重构'));
+check('offers an executable full rebuild', view.text.includes('全量重建'));
 check('shows the totals line', view.text.includes('扫描 120'));
 check('shows the skipped-file count', view.text.includes('被跳过的超大文件'));
 check('lists each skipped file', view.text.includes('dist/app.min.js') && view.text.includes('CHANGELOG.old.md'));
@@ -728,10 +761,30 @@ check('flags the minified file', view.text.includes('单行'));
 // The cap now renders as a value plus a separate source hint in the metric grid,
 // rather than the two concatenated into one string.
 check(
-  'shows the size cap and where it came from',
-  view.text.includes('512.0 KB') && view.text.includes('index'),
+  'shows the size cap and where it came from, in the panel language',
+  view.text.includes('512.0 KB') && view.text.includes('索引记录'),
   view.text.slice(0, 400),
 );
+check('renders the keyword search card', view.text.includes('关键词搜索') && view.text.includes('搜索'));
+check('renders a search input', view.tags.includes('input'));
+const address = I.fileResourceAddress('sess-1', 'src/a b.ts');
+check(
+  'builds the platform file address with line-compatible encoding',
+  address === 'dsh-resource://file/session/sess-1/src/a%20b.ts',
+  address,
+);
+check(
+  'normalizes Windows separators in the file address',
+  I.fileResourceAddress('sess-1', 'src\\client\\index.ts') ===
+    'dsh-resource://file/session/sess-1/src/client/index.ts',
+);
+check('the result row offers an open action, not only copy', view.text.includes('点击结果打开文件'));
+check(
+  'renders a search hit with its kind, name and path',
+  view.text.includes('analyzeCoverage') && view.text.includes('src/gitnexus/coverage.ts'),
+  view.text.slice(0, 500),
+);
+check('names the search scope, not a full-text claim', view.text.includes('按符号名与文件路径'));
 check('renders the language legend', view.text.includes('TypeScript') && view.text.includes('JavaScript'));
 check('renders the notable warning text', view.text.includes('2 个文件超过上限被跳过'));
 check('renders the context warning separately', view.text.includes('未记录上限'));
@@ -752,11 +805,11 @@ check('renders the commit histogram', view.text.includes('每') && /峰值/.test
 // full-width cards stretches every row across a metre of empty space.
 check(
   'every section renders as a card element',
-  // Exactly the seven cards: 索引概览, 语言分布, 需要注意, 解析质量与溯源,
-  // 被跳过的超大文件, Git 活动, 维护命令. Pinned rather than a floor, because the
-  // failure this guards against is a section quietly losing its card wrapper —
-  // which shows up as a lower count, not a higher one.
-  view.tags.filter((t) => t === 'section').length === 7,
+  // Exactly the eight cards: 关键词搜索, 索引概览, 语言分布, 需要注意,
+  // 解析质量与溯源, 被跳过的超大文件, Git 活动, 维护命令. Pinned rather than a
+  // floor, because the failure this guards against is a section quietly losing its
+  // card wrapper — which shows up as a lower count, not a higher one.
+  view.tags.filter((t) => t === 'section').length === 8,
   'sections=' + view.tags.filter((t) => t === 'section').length,
 );
 check(
@@ -778,7 +831,7 @@ check(
   'every section is expanded — nothing is hidden behind a click',
   // Three sections used to be folded away behind a disclosure row. Inside a card
   // the click bought nothing, so every section now renders its body unconditionally.
-  view.text.includes('初始化索引') && view.text.includes('未解析接收者') && view.text.includes('已索引'),
+  view.text.includes('增量刷新') && view.text.includes('未解析接收者') && view.text.includes('已索引'),
   view.text.slice(0, 300),
 );
 check(
@@ -802,7 +855,9 @@ check('renders an unavailable capability reason', view.text.includes('extension-
 check('renders staleness as diverged', view.text.includes('diverged'), view.text.slice(0, 400));
 check(
   'staleness does not fake a "behind N" for a diverged head',
-  !view.text.includes('落后'),
+  // Scoped to a count: the maintenance copy legitimately says "索引落后或…" without
+  // claiming how far, and a bare substring check confused that with a stale index.
+  !/落后\s*\d+/.test(view.text),
   view.text.slice(0, 400),
 );
 check('renders the git activity section title', view.text.includes('Git 活动'), view.text.slice(0, 400));
@@ -821,8 +876,28 @@ const empty = render(I.CoverageView, { report: { ...report, largeFiles: [], warn
 check('a clean report renders without a skipped-file section', !empty.text.includes('被跳过的超大文件'));
 check('a clean report still renders languages', empty.text.includes('语言分布'));
 
-const noIndex = render(I.CoverageView, { report: { repo: { indexed: false, path: 'D:\\\\demo' } }, ...viewProps });
+const noIndex = render(I.CoverageView, {
+  report: {
+    repo: { indexed: false, path: 'D:\\demo' },
+    totals: { scanned: 10, selected: 9, indexedInGraph: 0, large: 0, largeBytes: 0, suppressedDeclarations: 0, scannedBytes: 2048 },
+    cap: { text: '512.0 KB', source: 'default' },
+    languages: {
+      rows: [{ key: 'typescript', label: 'TypeScript', color: '#3178c6', klass: 'recognized', files: 9, bytes: 2048 }],
+      totalFiles: 9,
+      totalBytes: 2048,
+      detector: 'builtin',
+    },
+    toolchain: { verdict: 'ready' },
+  },
+  ...viewProps,
+});
 check('an unindexed project leads with the initialize command', noIndex.text.includes('还没有 GitNexus 索引') && noIndex.text.includes('初始化索引'));
+check('an unindexed project still shows a scan overview', noIndex.text.includes('扫描概览') && noIndex.text.includes('扫描文件'));
+check(
+  'an unindexed project shows the fallback language split',
+  noIndex.text.includes('语言分布') && noIndex.text.includes('TypeScript') && noIndex.text.includes('内置扩展名映射'),
+  noIndex.text.slice(0, 400),
+);
 check('still marks an applicable command when unindexed', noIndex.text.includes('当前适用'));
 
 const errored = render(I.CoverageView, { report: null, ...viewProps, error: '工作区未解析' });
@@ -830,6 +905,56 @@ check('error state surfaces the message', errored.text.includes('工作区未解
 
 const partial = render(I.CoverageView, { report: { ...report, languages: null }, ...viewProps });
 check('missing language data degrades without crashing', partial.text.includes('被跳过的超大文件'));
+
+const searchEmpty = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  search: { ...search, results: [], total: 0 },
+});
+check('an empty search result says so', searchEmpty.text.includes('没有匹配'), searchEmpty.text.slice(0, 400));
+
+const searchFailed = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  search: { ...search, results: null, error: '图查询失败' },
+});
+check('a search error is surfaced', searchFailed.text.includes('图查询失败'), searchFailed.text.slice(0, 400));
+
+const textFallback = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  search: {
+    ...search,
+    mode: 'text',
+    results: [
+      { kind: 'Text', name: 'const x = analyzeCoverage(y);', filePath: 'src/gitnexus/coverage.ts', startLine: 507, endLine: 507 },
+    ],
+    warning: '图查询不可用；已回退到索引文件的源码关键词搜索。结果来自文本，不是图谱。',
+  },
+});
+check(
+  'a text fallback labels itself and names its scope',
+  textFallback.text.includes('源码关键词（回退）') &&
+    textFallback.text.includes('处源码匹配') &&
+    textFallback.text.includes('结果来自文本'),
+  textFallback.text.slice(0, 500),
+);
+
+const oldHost = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  maintenance: { ...maintenance, supportsForce: false },
+});
+check(
+  'an older host does not offer an enabled full rebuild',
+  oldHost.text.includes('全量重建（需重启）'),
+  oldHost.text.slice(-500),
+);
+check(
+  'an older host asks for a restart before maintenance',
+  oldHost.text.includes('执行增量刷新（需重启）') && oldHost.text.includes('当前宿主是旧版本'),
+  oldHost.text.slice(-500),
+);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -103,6 +103,8 @@ interface ClientTotals {
   large: number;
   largeBytes: number;
   suppressedDeclarations: number;
+  /** Present on a scan-only report; older hosts may omit it. */
+  scannedBytes?: number;
 }
 
 /** The effective size cap and where it came from. Built unconditionally too. */
@@ -174,6 +176,8 @@ interface ClientLanguages {
   totalBytes: number;
   totalFiles: number;
   largeExcluded?: LanguageRowLike[];
+  /** `builtin` means GitNexus was unavailable and the extension map filled in. */
+  detector?: 'gitnexus' | 'builtin';
 }
 
 /** One touched file from the activity window. */
@@ -275,6 +279,12 @@ interface ClientToolchain {
 interface ClientMaintenance {
   commands?: ClientMaintenanceCommand[];
   rationale?: string[];
+  /**
+   * Absent on hosts that predate `force=1`. The full-rebuild button is gated on it:
+   * against such a host the flag is ignored, so the button would run an incremental
+   * refresh under a full-rebuild label.
+   */
+  supportsForce?: boolean;
 }
 
 /**
@@ -287,12 +297,97 @@ interface ClientMaintenance {
  */
 interface ClientAnalyzeRun {
   state: 'unavailable' | 'running' | 'done' | 'failed' | 'timed-out' | 'cancelled' | 'denied';
+  /** Whether this run was the `--force` full rebuild. Older hosts omit it. */
+  force?: boolean;
   command: string;
   startedAt: number;
   finishedAt: number | null;
   exitCode: number | null;
   message: string | null;
   output: string;
+}
+
+/**
+ * One keyword hit from the graph search.
+ *
+ * `kind` is GitNexus's node label (Function, Class, File, …), not a translated
+ * category: preserving the index's own vocabulary is what lets a reader compare a
+ * hit against `context`/`impact` output.
+ */
+interface ClientSearchHit {
+  kind: string;
+  name: string;
+  filePath: string;
+  startLine: number | null;
+  endLine: number | null;
+}
+
+/**
+ * The slice of the right-sidebar controller this panel uses to open a file.
+ *
+ * `openResource` is the public navigation method: it claims a `dsh-resource://`
+ * address and reveals the column. `openResourceIn` is the session-targeted variant
+ * the controller also implements; the panel prefers it so a click lands in the
+ * session whose tab it belongs to, not merely the one on screen.
+ */
+interface SidebarRightOpenOptions {
+  params?: Record<string, unknown>;
+}
+
+interface SidebarRightApi {
+  openResource(address: string, options?: SidebarRightOpenOptions): void;
+  openResourceIn?(sessionId: string, address: string, options?: SidebarRightOpenOptions): void;
+}
+
+type OpenResource = (address: string, options?: SidebarRightOpenOptions) => void;
+type OpenResourceIn = (
+  sessionId: string,
+  address: string,
+  options?: SidebarRightOpenOptions,
+) => void;
+
+/** Captured from `ctx.inject(['sidebarRight'])`; null when the profile has no column. */
+let openResource: OpenResource | null = null;
+let openResourceIn: OpenResourceIn | null = null;
+
+/**
+ * Build the platform's file resource address.
+ *
+ * The address is `dsh-resource://file/session/<session>/<path>`, exactly what the
+ * built-in file strip and the chat's file links use. Relative paths resolve through
+ * that session's workspace, which is the project this panel is reporting on. The
+ * encoding keeps `:` literal so a Windows drive letter survives, and encodes each
+ * segment separately so `/` stays a path separator.
+ */
+function fileResourceAddress(sessionId: string, filePath: string): string {
+  const encodeSegment = (segment: string): string =>
+    encodeURIComponent(segment).replace(/%3A/gi, ':');
+  const normalized = filePath.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+  return `dsh-resource://file/session/${encodeSegment(sessionId)}/${normalized
+    .split('/')
+    .map(encodeSegment)
+    .join('/')}`;
+}
+
+/** The search card's state, supplied by `CoveragePanel` and rendered by the view. */
+interface SearchViewState {
+  query: string;
+  onQueryChange: (value: string) => void;
+  onSubmit: () => void;
+  onClear: () => void;
+  searching: boolean;
+  error: string | null;
+  /** `graph` for the index query, `text` for the source fallback. */
+  mode: 'graph' | 'text' | null;
+  /** `null` until a search has run; `[]` means it ran and found nothing. */
+  results: ClientSearchHit[] | null;
+  /** Open a hit in the platform's file viewer at its line. */
+  onOpen: (hit: ClientSearchHit) => void;
+  total: number;
+  truncated: boolean;
+  warning: string | null;
+  copied: string | null;
+  onCopy: (hit: ClientSearchHit) => void;
 }
 
 /**
@@ -379,6 +474,7 @@ const ZERO_TOTALS: ClientTotals = {
   large: 0,
   largeBytes: 0,
   suppressedDeclarations: 0,
+  scannedBytes: 0,
 };
 const ZERO_CAP: ClientCap = { text: '—', source: 'default', maxText: '—' };
 const ZERO_ANALYZER: { gitnexusVersion: string | null; primitives: string } = {
@@ -450,6 +546,24 @@ function routeUrl(path: string): string {
 function fileSize(bytes: number): string {
   if (typeof primitives.fileSizeText === 'function') return primitives.fileSizeText(bytes);
   return formatBytes(bytes);
+}
+
+/**
+ * The cap's provenance, in the panel's language. The host reports stable English
+ * keys (`index` / `env` / `default`); showing those raw put an English word in the
+ * middle of a Chinese metric row, measured in the real panel as "512.0 KB index".
+ */
+function capSourceLabel(source: string): string {
+  switch (source) {
+    case 'index':
+      return '索引记录';
+    case 'env':
+      return '环境变量';
+    case 'default':
+      return '默认值';
+    default:
+      return source;
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -746,16 +860,23 @@ const SOFT_BG = 'color-mix(in srgb, currentColor 6%, transparent)';
  * full-width cards reads as broken at the wide end — every metric row stretches
  * across a metre of empty space.
  *
- * Column count is content-driven rather than media-queried, because an inline-styled
- * plugin has no stylesheet to put a breakpoint in: `auto-fit` with a 620px floor
- * yields two columns once the pane can hold them and one column below that. A
- * card that needs the full width says so with `gridColumn: '1 / -1'`, which is
- * column-count agnostic — unlike `span 2`, which would overflow a single column.
+ * A single column is the honest layout for a docked sidebar. The previous
+ * `auto-fit` grid asked for two columns whenever the pane was wide enough for
+ * `2 × 620px + gap`; in a real narrow sidebar it therefore laid the second column —
+ * the entire language breakdown — past the visible edge, and the wide Git-activity
+ * card lost its third verdict. Tuning the floor only moves which pane width breaks;
+ * one column always fits. On a wide pane the card internals still distribute their
+ * metrics, so the space is not wasted.
+ *
+ * `minmax(0, 1fr)` also removes the min-content floor that let the grid widen its
+ * own container. A card that needs the full width still says so with
+ * `gridColumn: '1 / -1'`, which is harmless in one column and keeps the markup
+ * honest if the layout ever changes.
  */
 const styles = {
   root: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 620px), 1fr))',
+    gridTemplateColumns: 'minmax(0, 1fr)',
     // No `alignItems: start`: grid items stretch to the row height by default, so
     // two cards sharing a row end level. With `start` each card took its natural
     // height and the row showed a ragged bottom edge.
@@ -763,7 +884,13 @@ const styles = {
     padding: '12px',
     fontSize: '12px',
     lineHeight: 1.5,
+    width: '100%',
+    maxWidth: '100%',
+    minWidth: 0,
     overflowY: 'auto',
+    // A card that overflows must be scrolled to, not painted outside the pane and
+    // mistaken for a neighbouring surface.
+    overflowX: 'hidden',
     height: '100%',
     boxSizing: 'border-box',
   },
@@ -1016,6 +1143,21 @@ function Histogram({ histogram, height = 54 }: HistogramProps) {
   const max = Math.max(...buckets.map((b) => b.commits), 1);
   const bucketDays = histogram.bucketDays ?? 1;
 
+  // One bucket is not a time series. Drawing it produced a full-width, full-height
+  // rectangle that read as a skeleton or a broken chart — measured on this
+  // repository, whose entire history fits in one week. The totals directly above
+  // already say the same number, so state the bucket instead of drawing it.
+  if (buckets.length === 1) {
+    const only = buckets[0];
+    return h(
+      'div',
+      { style: { ...MUTED, display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+      h('span', null, `${only.label} 起这一${bucketDays === 7 ? '周' : '天'}`),
+      h('span', null, `${only.commits} 次提交`),
+      h('span', null, `+${compactNumber(only.insertions)} / -${compactNumber(only.deletions)}`),
+    );
+  }
+
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '3px' } },
@@ -1037,10 +1179,19 @@ function Histogram({ histogram, height = 54 }: HistogramProps) {
           h('div', {
             style: {
               flex: '1 1 0',
+              // Bars do not grow past a readable width on a wide pane; a two-bucket
+              // chart otherwise stretches each bar across half the card.
+              maxWidth: '56px',
               // A zero bucket keeps a visible floor so a gap reads as "no commits"
               // rather than as missing data.
               height: `${Math.max(2, (bucket.commits / max) * height)}px`,
-              background: bucket.commits === 0 ? 'currentColor' : 'var(--dsw-color-accent, currentColor)',
+              // The host's real token. The first version invented `--dsw-color-accent`,
+              // which does not exist, so every bar fell back to `currentColor` and the
+              // chart rendered as a grey block in both themes.
+              background:
+                bucket.commits === 0
+                  ? 'currentColor'
+                  : 'var(--dsw-alias-brand-primary, currentColor)',
               opacity: bucket.commits === 0 ? 0.16 : 0.75,
               borderRadius: '1px',
               alignSelf: 'flex-end',
@@ -1174,7 +1325,9 @@ function LanguageSection({ languages }: { languages: ClientLanguages }) {
     h(
       'div',
       { style: { marginTop: 'auto', paddingTop: '8px', fontSize: '10px', ...MUTED } },
-      `按${unit}计的占比；GitNexus 只解析其中一部分语言，其余仅作为文件节点存在`,
+      languages.detector === 'builtin'
+        ? `按${unit}计的占比；GitNexus 不可用，语言由内置扩展名映射识别（仅作参考）`
+        : `按${unit}计的占比；GitNexus 只解析其中一部分语言，其余仅作为文件节点存在`,
     ),
   );
 }
@@ -1690,7 +1843,8 @@ function ToolchainNotice({
           h(
             'span',
             { style: MUTED },
-            '装到插件自己的目录，用你已配置的 npm 源，不改全局前缀、不需要管理员权限。',
+            '装到插件自己的目录，用你已配置的 npm 源，不改全局前缀、不需要管理员权限；' +
+              '若当前项目还没有索引，装完会继续初始化一次。',
           ),
         ),
         activeRun === null
@@ -1714,7 +1868,7 @@ function ToolchainNotice({
                     activeRun.output,
                   ),
             ),
-        runError === null ? null : h('div', { style: { ...MUTED, color: 'var(--dsw-color-danger, inherit)' } }, runError),
+        runError === null ? null : h('div', { style: { ...MUTED, color: 'var(--dsw-alias-state-error-primary, inherit)' } }, runError),
       ),
 
       h(primitives.RiskConfirmation, {
@@ -1725,9 +1879,11 @@ function ToolchainNotice({
           '· 从你已配置的 npm 源下载约 500 MB ~ 1 GB\n' +
           '· 需要几分钟；网络慢或需要本地编译时更久\n' +
           '· 会在本机运行这些包的安装期构建脚本（原生数据库与解析器需要本地编译）\n' +
-          '· 安装到插件自己的目录，不改动你的全局 npm 前缀\n\n' +
+          '· 安装到插件自己的目录，不改动你的全局 npm 前缀\n' +
+          '· 安装成功后，若当前项目尚无索引，会继续运行一次 ' +
+          '`gitnexus analyze --index-only`（只写 .gitnexus/，不改源文件）\n\n' +
           '命令走 DSH 的 shell 执行器，沙箱与其它命令一致 —— 本插件不申请扩权。',
-        acknowledgeLabel: '我已了解这会下载数百 MB 并在本机编译原生模块',
+        acknowledgeLabel: '我已了解这会下载数百 MB、在本机编译原生模块，并在需要时初始化当前项目',
         cancelLabel: '取消',
         confirmLabel: '授权并开始',
         closeLabel: '关闭',
@@ -1747,6 +1903,171 @@ function ToolchainNotice({
   );
 }
 
+/**
+ * Keyword search over the graph's symbol names and file paths.
+ *
+ * A native `input` rather than a primitives component: the shared package ships no
+ * declarations for an input, and guessing a prop name there fails at mount time in a
+ * browser where no test here can see it. The styling is the same theme-agnostic
+ * vocabulary the rest of the panel uses — inherited colour, borders from
+ * `currentColor`.
+ */
+function SearchSection({ search }: { search: SearchViewState }) {
+  const keyOf = (hit: ClientSearchHit): string =>
+    `${hit.kind}:${hit.filePath}:${hit.startLine ?? ''}:${hit.name}`;
+  const canSubmit = search.query.trim() !== '' && !search.searching;
+
+  return h(
+    Section,
+    {
+      wide: true,
+      title: '关键词搜索',
+      meta: h(
+        'span',
+        { style: { ...MUTED, fontSize: '11px' } },
+        search.mode === 'text' ? '源码关键词（回退）' : '符号名 / 文件路径',
+      ),
+    },
+    h(
+      'div',
+      { style: { display: 'flex', gap: '8px', alignItems: 'center', paddingTop: '4px', flexWrap: 'wrap' } },
+      h('input', {
+        type: 'search',
+        value: search.query,
+        placeholder: '搜索符号或文件，例如 analyzeCoverage',
+        'aria-label': '关键词搜索',
+        spellCheck: false,
+        autoComplete: 'off',
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) => search.onQueryChange(event.target.value),
+        onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
+          if (event.key === 'Enter' && canSubmit) {
+            event.preventDefault();
+            search.onSubmit();
+          }
+        },
+        style: {
+          flex: '1 1 auto',
+          minWidth: 0,
+          padding: '5px 8px',
+          border: HAIRLINE,
+          borderRadius: '6px',
+          background: SOFT_BG,
+          color: 'inherit',
+          font: 'inherit',
+        },
+      }),
+      h(Button, { variant: 'primary', disabled: !canSubmit, onClick: search.onSubmit }, search.searching ? '搜索中…' : '搜索'),
+      search.query === '' ? null : h(Button, { variant: 'ghost', onClick: search.onClear }, '清除'),
+    ),
+    search.error !== null
+      ? h(
+          'div',
+          {
+            style: {
+              ...MUTED,
+              color: 'var(--dsw-alias-state-error-primary, inherit)',
+              marginTop: '6px',
+            },
+          },
+          search.error,
+        )
+      : null,
+    h(
+      'div',
+      { style: { ...MUTED, fontSize: '10px', marginTop: '4px' } },
+      search.warning ??
+        (search.mode === 'text'
+          ? '图查询不可用，已回退到源码关键词搜索。'
+          : '按符号名与文件路径匹配；不搜索正文。'),
+    ),
+    search.results === null
+      ? null
+      : search.results.length === 0
+        ? h('div', { style: { ...MUTED, marginTop: '6px' } }, `没有匹配“${search.query}”的符号或文件。`)
+        : h(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', marginTop: '6px' } },
+            h(
+              'div',
+              { style: { ...MUTED, fontSize: '10px', paddingBottom: '2px' } },
+              (search.mode === 'text'
+                ? `找到 ${search.total} 处源码匹配`
+                : `找到 ${search.total} 个结果`) +
+                `${search.truncated ? '（已截断）' : ''} · 点击结果打开文件`,
+            ),
+            search.results.map((hit) =>
+              h(
+                'div',
+                {
+                  key: keyOf(hit),
+                  style: { ...styles.fileRow, borderTop: HAIRLINE, padding: '5px 0' },
+                },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    onClick: () => search.onOpen(hit),
+                    title:
+                      hit.startLine === null
+                        ? `打开 ${hit.filePath}`
+                        : `打开 ${hit.filePath}:${hit.startLine}`,
+                    style: {
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      flex: '1 1 auto',
+                      minWidth: 0,
+                      padding: 0,
+                      border: 0,
+                      background: 'none',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                    },
+                  },
+                  h(Tag, { tone: 'neutral' }, hit.kind),
+                  h(
+                    'span',
+                    {
+                      style: {
+                        fontWeight: 600,
+                        minWidth: 0,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      },
+                    },
+                    hit.name,
+                  ),
+                  h(
+                    'span',
+                    {
+                      style: {
+                        ...MUTED,
+                        ...styles.mono,
+                        minWidth: 0,
+                        flex: '1 1 auto',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      },
+                    },
+                    h(PathLabel, { path: hit.filePath }),
+                    hit.startLine !== null ? `:${hit.startLine}` : '',
+                  ),
+                ),
+                h(
+                  Button,
+                  { variant: 'ghost', onClick: () => search.onCopy(hit) },
+                  search.copied === keyOf(hit) ? '已复制' : '复制',
+                ),
+              ),
+            ),
+          ),
+  );
+}
+
 function MaintenanceSection({
   maintenance,
   projectPath,
@@ -1763,21 +2084,33 @@ function MaintenanceSection({
   run: ClientAnalyzeRun | null;
   runError: string | null;
   now: number;
-  onStartRun: () => void;
+  onStartRun: (force?: boolean) => void;
   onCancelRun: () => void;
 }) {
   // `projectPath` is part of the prop set for the header, which builds the commands
   // from it; the body does not read it.
   void projectPath;
   const [copied, setCopied] = React.useState<string | null>(null);
-  const [confirming, setConfirming] = React.useState(false);
+  const [confirming, setConfirming] = React.useState<'init' | 'full' | null>(null);
   // `RiskConfirmation`'s checkbox is controlled, so the tick has to live here. Without
   // this the box renders but never moves, which is how it looked the first time.
   const [acknowledged, setAcknowledged] = React.useState(false);
   const commands = Array.isArray(maintenance?.commands) ? maintenance.commands : [];
   if (commands.length === 0) return null;
 
-  const applicable = indexed ? 'full' : 'init';
+  // The incremental command is the normal action on both states: it initialises a
+  // missing index and refreshes a present one. The full rebuild is an escape hatch
+  // for a hung refresh, never "what applies" — marking it applicable on every
+  // indexed repository recommended the destructive path by default.
+  const applicable = 'init';
+  const fullConfirm = confirming === 'full';
+  const confirmCommand = commands.find((c) => c.mode === (fullConfirm ? 'full' : 'init'));
+  // `supportsForce` is also the host-generation marker: the same 0.1.2 release
+  // added the adaptive FTS decision and the project-local GITNEXUS_HOME. An older
+  // host's runner does not include either fix, so a refresh can fail on the FTS
+  // install or the registry write. Refuse to start it and say why, rather than
+  // leaving a button that is known to be wrong on this host.
+  const hostCurrent = maintenance.supportsForce === true;
   // Normalised rather than trusted. The declared type says `ClientAnalyzeRun | null`,
   // but a React element built without the prop arrives as `undefined` — which is
   // exactly what happened the first time this component was rendered by a caller that
@@ -1814,7 +2147,10 @@ function MaintenanceSection({
     h(
       'div',
       { style: MUTED },
-      '增量刷新可直接执行（走 DSH 的 shell 执行器，沙箱与其它命令一致，本插件不申请扩权）；其余命令复制后到会话执行。',
+      hostCurrent
+        ? '两条命令都可由本插件执行（走 DSH 的 shell 执行器，沙箱与其它命令一致，本插件不申请扩权）。' +
+            '全量重建只应在增量刷新卡死或结果反常时使用。'
+        : '当前宿主是旧版本（不包含 FTS 自适应与注册表重定向修复）；重启 DSH 后再执行维护。命令仍可复制。',
     ),
 
     // The run sits above the commands rather than under one of them: the host holds a
@@ -1840,11 +2176,20 @@ function MaintenanceSection({
             { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
             h(StateDot, { state: runStateTone(activeRun.state) }),
             h('span', { style: { fontWeight: 600 } }, runStateLabel(activeRun.state)),
+            activeRun.force === true ? h(Tag, { tone: 'outline' }, '全量') : null,
             h('span', { style: MUTED }, activeRun.state === 'running' ? `已运行 ${elapsed}s` : `${elapsed}s`),
             h('span', { style: { flex: 1 } }),
             running
               ? h(Button, { variant: 'ghost', onClick: onCancelRun }, '取消')
-              : h(Button, { variant: 'ghost', onClick: onStartRun }, '再次执行'),
+              // Wrapped, not passed directly: once `onStartRun` takes a `force`
+              // argument, React's click event would arrive as that argument and every
+              // "run again" would become a full rebuild. Repeating the last mode is
+              // also the honest reading of "run again" after a force rebuild.
+              : h(
+                  Button,
+                  { variant: 'ghost', disabled: !hostCurrent, onClick: () => onStartRun(activeRun.force === true) },
+                  '再次执行',
+                ),
           ),
           activeRun.message === null ? null : h('div', { style: MUTED }, activeRun.message),
           // The output is the evidence. A run that reports success with a warning in
@@ -1869,10 +2214,22 @@ function MaintenanceSection({
 
     runError === null
       ? null
-      : h('div', { style: { ...MUTED, color: 'var(--dsw-color-danger, inherit)' } }, runError),
+      : h('div', { style: { ...MUTED, color: 'var(--dsw-alias-state-error-primary, inherit)' } }, runError),
 
-    commands.map((command) =>
-      h(
+    commands.map((command) => {
+      // The host's wording is written for the no-index state ("初始化索引", "该项目还没有
+      // … 索引时使用"). Reusing it on an indexed project told the operator to initialise
+      // an index that already existed. Only the label and the "when" line are stateful;
+      // the command itself is identical.
+      const shown =
+        command.mode === 'init' && indexed
+          ? {
+              ...command,
+              label: '增量刷新',
+              when: '索引落后或有文件改动时使用；未变更文件的解析产物会复用。',
+            }
+          : command;
+      return h(
         'div',
         {
           key: command.mode,
@@ -1888,20 +2245,35 @@ function MaintenanceSection({
         h(
           'div',
           { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-          h('span', { style: { fontWeight: 600 } }, command.label),
+          h('span', { style: { fontWeight: 600 } }, shown.label),
           command.mode === applicable ? h(Tag, { tone: 'solid' }, '当前适用') : null,
           command.destructive ? h(Tag, { tone: 'outline' }, '破坏性') : null,
           h('span', { style: { flex: 1 } }),
-          // Only the incremental command gets a button, and only because it is the one
-          // the host route implements. A button on `--force` would quietly run
-          // something other than what its label says.
+          // Both commands are executable now, each behind its own confirmation. The
+          // force button exists because the host route implements `--force`; a button
+          // labelled "全量重建" that quietly ran an incremental refresh would be the
+          // exact failure the earlier revision refused to ship.
           command.mode === 'init'
             ? h(
                 Button,
-                { variant: 'ghost', disabled: running, onClick: () => setConfirming(true) },
-                running ? '运行中' : '执行增量刷新',
+                { variant: 'ghost', disabled: running || !hostCurrent, onClick: () => setConfirming('init') },
+                running ? '运行中' : hostCurrent ? '执行增量刷新' : '执行增量刷新（需重启）',
               )
-            : null,
+            : hostCurrent
+              ? h(
+                  Button,
+                  { variant: 'ghost', disabled: running, onClick: () => setConfirming('full') },
+                  running ? '运行中' : '全量重建',
+                )
+              : h(
+                  Button,
+                  {
+                    variant: 'ghost',
+                    disabled: true,
+                    title: '当前宿主版本尚未支持 force=1；重启 DSH 后再试，或复制命令执行',
+                  },
+                  '全量重建（需重启）',
+                ),
           h(
             Button,
             { variant: 'ghost', onClick: () => copy(command) },
@@ -1924,13 +2296,13 @@ function MaintenanceSection({
             },
             command.shell,
           ),
-          h('div', { style: MUTED }, command.when),
+          h('div', { style: MUTED }, shown.when),
           command.caveat !== null && command.caveat !== undefined
             ? h('div', { style: MUTED }, command.caveat)
             : null,
-        ),
-      ),
-      Array.isArray(maintenance?.rationale) && maintenance.rationale.length > 0
+      );
+    }),
+    Array.isArray(maintenance?.rationale) && maintenance.rationale.length > 0
         ? h(
             'div',
             { style: { ...MUTED, display: 'flex', flexDirection: 'column', gap: '2px' } },
@@ -1942,33 +2314,48 @@ function MaintenanceSection({
     // working tree goes in `description`, because that is the prop the modal renders:
     // an earlier revision passed this as children and the dialog opened with an empty
     // body and two unlabelled buttons.
+    //
+    // One dialog, two modes. The full rebuild gets its own title, wording and
+    // acknowledgement because it is a different risk: it discards the graph and FTS
+    // and can take minutes, while the incremental path reuses unchanged files.
     h(primitives.RiskConfirmation, {
-      open: confirming,
-      title: '执行增量刷新？',
-      description:
-        '将在项目目录下运行：\n\n' +
-        (commands.find((c) => c.mode === 'init')?.shell ?? 'gitnexus analyze --index-only') +
-        '\n\n' +
-        '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
-        '耗时取决于改动量：无改动时约 7 秒，改动几个文件时实测可到 3 分钟，' +
-        '大仓库的全量重建可能更久（上限 10 分钟，可随时取消）。' +
-        '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
-      acknowledgeLabel: '我了解这会运行一个进程并写入 .gitnexus/',
+      open: confirming !== null,
+      title: fullConfirm ? '执行全量重建？' : '执行增量刷新？',
+      description: fullConfirm
+        ? '将执行强制全量重建：\n\n' +
+          (confirmCommand?.shell ?? 'gitnexus analyze --index-only --force') +
+          '\n\n' +
+          '这会重建图与 FTS；未变更文件的解析产物仍会复用。' +
+          '但耗时以分钟计，索引很大时更久（上限 10 分钟，可随时取消）。' +
+          '重建期间索引可能短暂不可用。' +
+          '只写入 .gitnexus/，不改动源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
+          '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。'
+        : '将在项目目录下运行：\n\n' +
+          (confirmCommand?.shell ?? 'gitnexus analyze --index-only') +
+          '\n\n' +
+          '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
+          '耗时取决于改动量：无改动时约 7 秒，改动几个文件时实测可到 3 分钟，' +
+          '大仓库的初始化或刷新可能更久（上限 10 分钟，可随时取消）。' +
+          '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
+      acknowledgeLabel: fullConfirm
+        ? '我了解这会重建图与 FTS、耗时数分钟，并可能让索引短暂不可用'
+        : '我了解这会运行一个进程并写入 .gitnexus/',
       cancelLabel: '取消',
-      confirmLabel: '执行',
+      confirmLabel: fullConfirm ? '开始重建' : '执行',
       closeLabel: '关闭',
       // The checkbox is controlled, so it needs state of its own, and it is reset on
       // close: the acknowledgement is per-action rather than remembered.
       acknowledged,
       onAcknowledgedChange: setAcknowledged,
       onCancel: () => {
-        setConfirming(false);
+        setConfirming(null);
         setAcknowledged(false);
       },
       onConfirm: () => {
-        setConfirming(false);
+        const force = confirming === 'full';
+        setConfirming(null);
         setAcknowledged(false);
-        onStartRun();
+        onStartRun(force);
       },
     }),
   );
@@ -2009,13 +2396,19 @@ interface CoverageViewProps {
   /** Advances once a second while a run is in flight, so elapsed time moves. */
   now: number;
   onRefresh: () => void;
-  onStartRun: () => void;
+  onStartRun: (force?: boolean) => void;
   onCancelRun: () => void;
   /** The GitNexus install, when the operator authorised one. */
   installRun: ClientInstallRun | null;
   installError: string | null;
   onInstall: () => void;
   onCancelInstall: () => void;
+  /**
+   * Keyword search state. Optional so a view rendered without a search surface —
+   * the no-index state, or a test fixture that only exercises the cards — stays a
+   * pure function of what it is given.
+   */
+  search?: SearchViewState;
 }
 
 function CoverageView({
@@ -2036,6 +2429,7 @@ function CoverageView({
   installError,
   onInstall,
   onCancelInstall,
+  search,
 }: CoverageViewProps) {
   // Whether an index exists decides which maintenance command is applicable. When
   // the project could not even be identified there is nothing to claim, so it is
@@ -2130,19 +2524,64 @@ function CoverageView({
     return h('div', { style: styles.root }, header, h('div', { style: MUTED }, '正在读取索引…'));
   }
 
-  // No index yet. This is the state the initialize command exists for, so the
-  // panel leads with the command rather than an error.
+  // Defaults are resolved before the no-index branch: a scan-only report still has
+  // totals, a cap and languages even though it has no graph. Building them only for
+  // an indexed report is what made "no index" mean "nothing to show".
+  const totals = report.totals ?? ZERO_TOTALS;
+  const cap = report.cap ?? ZERO_CAP;
+  const analyzer = report.analyzer ?? ZERO_ANALYZER;
+  const largeFiles = report.largeFiles ?? [];
+  const languages = report.languages ?? null;
+
+  const { notable, context: contextWarnings } = splitWarnings(report.warnings);
+  const ratio = coverageRatio(report);
+
+  // No index yet. This is the state the initialize command exists for, but it is
+  // also a state in which the working tree is still readable: file counts, bytes,
+  // the cap and the language split do not need GitNexus. The panel used to show
+  // only "没有索引" and a command, which made an otherwise healthy repository look
+  // empty. The scan is the "at least something to look at" floor.
   if (report.repo?.indexed !== true) {
     return h(
       'div',
       { style: styles.root },
-      header,
+      h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+      h(ToolchainNotice, {
+        toolchain: report.toolchain,
+        run: installRun,
+        runError: installError,
+        now,
+        onInstall,
+        onCancelInstall,
+      }),
+      h(
+        'div',
+        { style: { gridColumn: '1 / -1', display: 'flex', gap: '8px', alignItems: 'flex-start' } },
+        h(StateDot, { state: 'idle' }),
+        h(
+          'span',
+          null,
+          '该项目还没有 GitNexus 索引。下面是工作区扫描结果；初始化后可看到图谱、查询能力与 Git 活动对账。',
+        ),
+      ),
       h(
         Section,
-        { wide: true, style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
-        h(StateDot, { state: 'idle' }),
-        h('span', null, '该项目还没有 GitNexus 索引。'),
+        { wide: true, title: '扫描概览 · 尚未索引' },
+        h(MetricGrid, {
+          items: [
+            { label: '扫描文件', value: compactNumber(totals.scanned) },
+            { label: '选中文件', value: compactNumber(totals.selected) },
+            { label: '扫描字节', value: fileSize(totals.scannedBytes ?? 0) },
+            { label: '大小上限', value: cap.text, hint: capSourceLabel(cap.source) },
+          ],
+        }),
+        h(
+          'div',
+          { style: { ...MUTED, marginTop: '6px' } },
+          '这里的数字来自工作区，不是索引；索引里有什么，只有建立后才能回答。',
+        ),
       ),
+      languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
       maintenance === null || maintenance === undefined
         ? null
         : h(
@@ -2150,25 +2589,18 @@ function CoverageView({
             {
               wide: true,
               title: '初始化索引',
-              meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
+              meta: h(
+                'span',
+                { style: { ...MUTED, fontSize: '11px' } },
+                maintenance.supportsForce === true
+                  ? '均可直接执行，也可复制到会话（沙箱与提权由 DSH 处理）'
+                  : '重启 DSH 后可执行；当前仅可复制（沙箱与提权由 DSH 处理）',
+              ),
             },
             h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, now, onStartRun, onCancelRun }),
           ),
     );
   }
-
-  // Past this point an index exists, and the host builds these blocks
-  // unconditionally for one. Defaulting them once here beats a `?? []` at each of
-  // twenty read sites — and a default repeated twenty times is one that will
-  // eventually be forgotten at the twenty-first.
-  const totals = report.totals ?? ZERO_TOTALS;
-  const cap = report.cap ?? ZERO_CAP;
-  const analyzer = report.analyzer ?? ZERO_ANALYZER;
-  const largeFiles = report.largeFiles ?? [];
-
-  const { notable, context: contextWarnings } = splitWarnings(report.warnings);
-  const ratio = coverageRatio(report);
-  const languages = report.languages ?? null;
 
   return h(
     'div',
@@ -2216,6 +2648,10 @@ function CoverageView({
           })(),
     ),
 
+    // Search sits above the report cards: it is the action a reader reaches for
+    // before reading, not an annotation on the numbers below it.
+    search === undefined ? null : h(SearchSection, { search }),
+
     // One card for the whole "what is this index" question — file coverage and
     // graph contents together.
     //
@@ -2240,7 +2676,10 @@ function CoverageView({
           : h(Ring, {
               ratio,
               caption: '覆盖',
-              tone: ratio >= 0.9 ? 'var(--dsw-color-success, #3fb950)' : 'var(--dsw-color-warning, #d9a441)',
+              tone:
+                ratio >= 0.9
+                  ? 'var(--dsw-alias-state-success-primary, #3fb950)'
+                  : 'var(--dsw-alias-state-warn-primary, #d9a441)',
             }),
         h(
           'div',
@@ -2258,7 +2697,7 @@ function CoverageView({
               h('div', { style: { ...MUTED, marginBottom: '5px' } }, '文件'),
               h(MetricGrid, {
                 items: [
-                  { label: '大小上限', value: cap.text, hint: cap.source },
+                  { label: '大小上限', value: cap.text, hint: capSourceLabel(cap.source) },
                   { label: '跳过合计', value: fileSize(totals.largeBytes) },
                   { label: '超限文件', value: compactNumber(totals.large) },
                 ],
@@ -2287,6 +2726,13 @@ function CoverageView({
             { style: { borderTop: HAIRLINE, paddingTop: '8px' } },
             h('div', { style: { ...MUTED, marginBottom: '5px' } }, '查询能力'),
             h(CapabilityStrip, { capabilities: report.capabilities }),
+            report.capabilities?.fts?.status === 'available'
+              ? null
+              : h(
+                  'div',
+                  { style: { ...MUTED, marginTop: '4px', fontSize: '10px' } },
+                  '顶部「关键词搜索」会先查图；图查询不可用时回退到源码关键词。',
+                ),
           ),
         ),
       ),
@@ -2413,7 +2859,11 @@ function CoverageView({
             meta: h(
               'span',
               { style: { ...MUTED, fontSize: '11px' } },
-              `${maintenance.commands?.length ?? 0} 条 · 复制后到会话执行（沙箱与提权由 DSH 处理）`,
+              `${maintenance.commands?.length ?? 0} 条 · ` +
+                (maintenance.supportsForce === true
+                  ? '均可直接执行，也可复制到会话'
+                  : '重启 DSH 后可执行；当前仅可复制') +
+                '（沙箱与提权由 DSH 处理）',
             ),
           },
           h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, now, onStartRun, onCancelRun }),
@@ -2432,6 +2882,7 @@ function CoverageView({
  */
 function CoveragePanel(props: SlotProps) {
   const projectPath = useProjectPath(props);
+  const sessionId = typeof props.sessionId === 'string' ? props.sessionId : null;
   const [report, setReport] = React.useState<ClientReport | null>(null);
   const [maintenance, setMaintenance] = React.useState<ClientMaintenance | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -2443,6 +2894,20 @@ function CoveragePanel(props: SlotProps) {
   const [readAt, setReadAt] = React.useState<string | null>(null);
   // Only a manual refresh bypasses the host's cache; the initial load does not.
   const wantsFresh = reloadToken > 0;
+
+  // Keyword search. Its own state because it is an on-demand action, not part of
+  // the report the panel loads: an idle panel makes no search requests at all.
+  const [searchQuery, setSearchQuery] = React.useState('');
+  const [searchResults, setSearchResults] = React.useState<ClientSearchHit[] | null>(null);
+  const [searchMode, setSearchMode] = React.useState<'graph' | 'text' | null>(null);
+  const [searchTotal, setSearchTotal] = React.useState(0);
+  const [searchTruncated, setSearchTruncated] = React.useState(false);
+  const [searchWarning, setSearchWarning] = React.useState<string | null>(null);
+  const [searching, setSearching] = React.useState(false);
+  const [searchError, setSearchError] = React.useState<string | null>(null);
+  const [searchCopied, setSearchCopied] = React.useState<string | null>(null);
+  // Monotonic request id: a slower earlier search must not overwrite a newer one.
+  const searchSeq = React.useRef(0);
 
   // The refresh run, and the tick that makes its elapsed time advance. `run` is null
   // until something is started in this host's lifetime — a state the card renders as
@@ -2486,13 +2951,15 @@ function CoveragePanel(props: SlotProps) {
     };
   }, [projectPath, running]);
 
-  const startRun = React.useCallback(async (): Promise<void> => {
+  const startRun = React.useCallback(async (force = false): Promise<void> => {
     if (projectPath === null) return;
     setRunError(null);
     try {
-      const res = await fetch(routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}`), {
-        method: 'POST',
-      });
+      const suffix = force ? '&force=1' : '';
+      const res = await fetch(
+        routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}${suffix}`),
+        { method: 'POST' },
+      );
       const body = await res.json().catch(() => null);
       if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
       setRun(body.run ?? null);
@@ -2515,12 +2982,165 @@ function CoveragePanel(props: SlotProps) {
     }
   }, [projectPath]);
 
+  /**
+   * Run one keyword search.
+   *
+   * No request on mount and no request per keystroke: a graph query is cheap but not
+   * free, and the operator's typing is not a search intent until Enter or the button.
+   * `searchSeq` makes an older in-flight response a no-op, which is the difference
+   * between "the last search wins" and a result list that flickers backwards.
+   */
+  const runSearch = React.useCallback(async (): Promise<void> => {
+    if (projectPath === null) return;
+    const query = searchQuery.trim();
+    if (query === '') {
+      setSearchResults(null);
+      setSearchError(null);
+      return;
+    }
+    const seq = ++searchSeq.current;
+    setSearching(true);
+    setSearchError(null);
+    setSearchCopied(null);
+    try {
+      const res = await fetch(
+        routeUrl(
+          `/api/gitnexus/search?repo=${encodeURIComponent(projectPath)}` +
+            `&q=${encodeURIComponent(query)}&limit=20`,
+        ),
+      );
+      const body = await res.json().catch(() => null);
+      if (seq !== searchSeq.current) return;
+      if (!body?.ok) {
+        // A 404 without the route's own code means the host predates the search
+        // route, not that the project is wrong: the panel's own project path is a
+        // project root by construction.
+        if (res.status === 404 && body?.code !== 'not-a-project') {
+          throw new Error('当前宿主没有搜索路由；重启 DSH 后再试。');
+        }
+        throw new Error(
+          typeof body?.message === 'string' ? body.message : `请求失败 (${res.status})`,
+        );
+      }
+      const results: ClientSearchHit[] = Array.isArray(body.results)
+        ? (body.results as ClientSearchHit[]).filter(
+            (hit): hit is ClientSearchHit =>
+              hit !== null &&
+              typeof hit === 'object' &&
+              typeof hit.kind === 'string' &&
+              typeof hit.name === 'string' &&
+              typeof hit.filePath === 'string',
+          )
+        : [];
+      setSearchResults(results);
+      setSearchMode(body.mode === 'text' ? 'text' : body.mode === 'graph' ? 'graph' : null);
+      setSearchTotal(typeof body.total === 'number' ? body.total : results.length);
+      setSearchTruncated(body.truncated === true);
+      setSearchWarning(typeof body.warning === 'string' ? body.warning : null);
+    } catch (cause) {
+      if (seq !== searchSeq.current) return;
+      setSearchResults(null);
+      setSearchError(String((cause as Error)?.message ?? cause));
+    } finally {
+      if (seq === searchSeq.current) setSearching(false);
+    }
+  }, [projectPath, searchQuery]);
+
+  const clearSearch = React.useCallback((): void => {
+    searchSeq.current += 1;
+    setSearchQuery('');
+    setSearchResults(null);
+    setSearchMode(null);
+    setSearchTotal(0);
+    setSearchTruncated(false);
+    setSearchWarning(null);
+    setSearchError(null);
+    setSearching(false);
+    setSearchCopied(null);
+  }, []);
+
+  const copySearchHit = React.useCallback((hit: ClientSearchHit): void => {
+    const text = `${hit.filePath}${hit.startLine !== null ? `:${hit.startLine}` : ''}`;
+    const key = `${hit.kind}:${hit.filePath}:${hit.startLine ?? ''}:${hit.name}`;
+    const write =
+      typeof primitives.writeClipboard === 'function'
+        ? primitives.writeClipboard
+        : (value: string) => navigator.clipboard?.writeText(value);
+    try {
+      const outcome = write(text);
+      if (outcome && typeof outcome.then === 'function') {
+        outcome
+          .then(() => {
+            setSearchCopied(key);
+            setTimeout(() => setSearchCopied(null), 1500);
+          })
+          .catch(() => setSearchCopied(null));
+      } else {
+        setSearchCopied(key);
+        setTimeout(() => setSearchCopied(null), 1500);
+      }
+    } catch {
+      setSearchCopied(null);
+    }
+  }, []);
+
+  /**
+   * Open a hit in the platform's file viewer at its line.
+   *
+   * The resource address is the same `dsh-resource://file/session/...` the built-in
+   * file strip uses; `params.line` is what the chat's file links pass. If the
+   * deployment has no right-sidebar controller (a headless profile, or a host older
+   * than the service), opening is impossible — copy the `path:line` instead of
+   * silently doing nothing, and say why.
+   */
+  const openSearchHit = React.useCallback(
+    (hit: ClientSearchHit): void => {
+      setSearchError(null);
+      if (sessionId === null) {
+        setSearchError('未能定位当前会话，已复制路径。');
+        copySearchHit(hit);
+        return;
+      }
+      const address = fileResourceAddress(sessionId, hit.filePath);
+      const options =
+        hit.startLine === null
+          ? undefined
+          : { params: { line: hit.startLine } };
+      try {
+        if (openResourceIn !== null) {
+          openResourceIn(sessionId, address, options);
+          return;
+        }
+        if (openResource !== null) {
+          openResource(address, options);
+          return;
+        }
+      } catch {
+        /* fall through to the copy path */
+      }
+      setSearchError('当前宿主没有可用的文件打开能力，已复制路径。');
+      copySearchHit(hit);
+    },
+    [sessionId, copySearchHit],
+  );
+
+  // A different project means the previous hits are another repository's symbols.
+  React.useEffect(() => {
+    clearSearch();
+  }, [projectPath, clearSearch]);
+
   // The GitNexus install. Its own state because it is not tied to a repository: the
   // install target is one directory per machine, and the operator may have several
   // projects open across a session.
   const [installRun, setInstallRun] = React.useState<ClientInstallRun | null>(null);
   const [installError, setInstallError] = React.useState<string | null>(null);
   const installing = installRun?.state === 'running';
+  // Only an install the operator authorised *in this panel* may chain into an
+  // analyze. A successful install from an earlier session is still visible in the
+  // host's run state, and starting a write from that would be acting on consent the
+  // operator gave for a different action.
+  const autoInitArmed = React.useRef(false);
+  const autoInitDone = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (!installing) return undefined;
@@ -2551,6 +3171,7 @@ function CoveragePanel(props: SlotProps) {
 
   const startInstall = React.useCallback(async (): Promise<void> => {
     setInstallError(null);
+    autoInitArmed.current = true;
     try {
       const res = await fetch(routeUrl('/api/gitnexus/install'), { method: 'POST' });
       const body = await res.json().catch(() => null);
@@ -2558,6 +3179,7 @@ function CoveragePanel(props: SlotProps) {
       setInstallRun(body.run ?? null);
       setTick(0);
     } catch (cause) {
+      autoInitArmed.current = false;
       setInstallError(String((cause as Error)?.message ?? cause));
     }
   }, []);
@@ -2571,6 +3193,32 @@ function CoveragePanel(props: SlotProps) {
       setInstallError(String((cause as Error)?.message ?? cause));
     }
   }, []);
+
+  /**
+   * Install → initialize, in one authorised step.
+   *
+   * The install is machine-wide; the index is per-project. Chaining them is the
+   * difference between "you now have a CLI" and "you can see the index", which is
+   * what the operator asked for. Three conditions keep it honest: the install must
+   * have finished successfully, the project must still have no index (otherwise
+   * this would silently refresh an index nobody asked to refresh), and the operator
+   * must have started *this* install from this panel.
+   *
+   * The key includes the install's start time, so a retry after a cancellation is a
+   * new run and may chain again, while the poll ticks of one run cannot start two
+   * analyses.
+   */
+  React.useEffect(() => {
+    if (!autoInitArmed.current) return;
+    if (installRun?.state !== 'done') return;
+    // Wait for a report rather than treating "not loaded" as "not indexed".
+    if (report === null || projectPath === null || report.repo?.indexed === true) return;
+    const key = `${projectPath}:${installRun.startedAt}`;
+    if (autoInitDone.current === key) return;
+    autoInitDone.current = key;
+    autoInitArmed.current = false;
+    void startRun(false);
+  }, [installRun, projectPath, report, startRun]);
 
   React.useEffect(() => {
     if (projectPath === null) return undefined;
@@ -2625,12 +3273,39 @@ function CoveragePanel(props: SlotProps) {
     // otherwise looks frozen.
     now: Date.now() + tick * 0,
     onRefresh: () => setReloadToken((n) => n + 1),
-    onStartRun: () => void startRun(),
+    onStartRun: (force?: boolean) => void startRun(force),
     onCancelRun: () => void cancelRun(),
     installRun,
     installError,
     onInstall: () => void startInstall(),
     onCancelInstall: () => void cancelInstall(),
+    search: {
+      query: searchQuery,
+      onQueryChange: (value: string) => {
+        // Invalidate an in-flight search for the previous text: otherwise its
+        // response can land after the edit and repopulate a list that no longer
+        // matches the box. The sequence bump also makes its `finally` a no-op, so
+        // the spinner is cleared here.
+        searchSeq.current += 1;
+        setSearching(false);
+        setSearchQuery(value);
+        setSearchError(null);
+        setSearchResults(null);
+        setSearchMode(null);
+      },
+      onSubmit: () => void runSearch(),
+      onClear: clearSearch,
+      searching,
+      error: searchError,
+      mode: searchMode,
+      results: searchResults,
+      total: searchTotal,
+      truncated: searchTruncated,
+      warning: searchWarning,
+      copied: searchCopied,
+      onOpen: openSearchHit,
+      onCopy: copySearchHit,
+    },
   });
 }
 
@@ -2667,7 +3342,13 @@ interface SlotsContext {
     register(spec: { name: string; key: string }, component: unknown): unknown;
   };
   effect(callback: () => () => void, label?: string): void;
-  inject(deps: readonly string[], callback: (svcCtx: { sidebarRightTabs: SidebarRightTabs }) => void): void;
+  inject(deps: readonly string[], callback: (svcCtx: InjectedServices) => void): void;
+}
+
+/** Services this plugin optionally reaches for; absent ones are a normal profile shape. */
+interface InjectedServices {
+  sidebarRightTabs?: SidebarRightTabs;
+  sidebarRight?: SidebarRightApi;
 }
 
 /** The sidebar-right tab registry service. */
@@ -2692,9 +3373,11 @@ function apply(ctx: SlotsContext): void {
 
   safe('sidebarRightTabs', () => {
     ctx.inject(['sidebarRightTabs'], (svcCtx) => {
+      const tabs = svcCtx.sidebarRightTabs;
+      if (tabs === undefined) return;
       ctx.effect(
         () =>
-          svcCtx.sidebarRightTabs.register({
+          tabs.register({
             id: PLUGIN_ID,
             kind: TAB_KIND,
             title: () => 'GitNexus',
@@ -2713,6 +3396,20 @@ function apply(ctx: SlotsContext): void {
           }),
         `${PLUGIN_ID}: tab type`,
       );
+    });
+  });
+
+  // The navigation controller the chat and the file strip already use. Optional:
+  // a profile without a right column simply leaves the module-level openers null,
+  // and a search-result click falls back to copying `path:line`.
+  safe('sidebarRight', () => {
+    ctx.inject(['sidebarRight'], (svcCtx) => {
+      const service = svcCtx.sidebarRight;
+      if (service === undefined || typeof service.openResource !== 'function') return;
+      openResource = (address, options) => service.openResource(address, options);
+      if (typeof service.openResourceIn === 'function') {
+        openResourceIn = (sessionId, address, options) => service.openResourceIn?.(sessionId, address, options);
+      }
     });
   });
 
@@ -2736,6 +3433,7 @@ module.exports = {
     PLUGIN_ID,
     TAB_KIND,
     routeUrl,
+    fileResourceAddress,
     formatBytes,
     fileSize,
     percent,

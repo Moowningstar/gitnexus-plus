@@ -33,8 +33,12 @@ import type { AnalyzeStatus } from '../gitnexus/analyze.js';
 const ANALYZE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'POST', 'DELETE']);
 
 export interface AnalyzeRouteDeps {
-  /** Begin a run, or return the one already in flight for this repository. */
-  start: (repoPath: string) => AnalyzeStatus;
+  /**
+   * Begin a run, or return the one already in flight for this repository.
+   * `force` selects the destructive full rebuild; it is passed through, never
+   * inferred from the method or the route.
+   */
+  start: (repoPath: string, options?: { force?: boolean }) => AnalyzeStatus;
   status: (repoPath: string) => AnalyzeStatus | null;
   cancel: (repoPath: string) => boolean;
 }
@@ -61,7 +65,11 @@ export function mountAnalyzeRoute(webServer: WebServerService, deps: AnalyzeRout
       // cross-origin page can reach loopback; `Origin` is what separates it from the
       // desktop shell's own fetch.
       if (!passWriteGuard(req, res)) return;
-      sendJson(res, 200, { ok: true, run: deps.start(absRepo) });
+      // `force=1` is the full rebuild. It is an explicit query flag rather than a
+      // body field because the panel's only other POST parameter is the repo, and a
+      // flag in the URL is visible in the run's own command and in a log.
+      const force = url.searchParams.get('force') === '1';
+      sendJson(res, 200, { ok: true, run: deps.start(absRepo, { force }) });
       return;
     }
 

@@ -512,10 +512,11 @@ export async function analyzeCoverage(
   const env = options.env ?? process.env;
   const absRepo = path.resolve(repoPath);
 
+  const managedPrefix = options.toolchain?.managedPrefix;
   const [meta, registryEntry, detector] = await Promise.all([
     readIndexMeta(absRepo),
     findRegistryEntry(absRepo, { env }),
-    loadLanguageDetector({ env }),
+    loadLanguageDetector({ env, managedPrefix }),
   ]);
 
   // Read after the manifest, because classifying staleness needs the indexed commit.
@@ -528,6 +529,7 @@ export async function analyzeCoverage(
   const scan = await scanRepository(absRepo, {
     env,
     capBytes: meta?.coverageMaxFileSizeBytes ?? undefined,
+    managedPrefix,
   });
 
   const largeFiles: LargeFile[] = [];

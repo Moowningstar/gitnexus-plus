@@ -127,10 +127,15 @@ check(
   JSON.stringify(defaults),
 );
 check(
-  'the maintenance commands default to the sandbox-safe environment',
-  defaults.skipFts === true && defaults.memoryOff === true && defaults.analyzeHeapMb === 8192,
+  'the maintenance commands default to the measured environment',
+  defaults.skipFts === false && defaults.memoryOff === true && defaults.analyzeHeapMb === 8192,
   JSON.stringify(defaults),
 );
+// The default is the measurement, not the older sandbox reasoning: disabling an FTS
+// the store already has forces a 21x slower full rebuild. This assertion exists because
+// the schema default once disagreed with `commands.ts` and with the README, and only the
+// real panel showed the flag still being offered.
+check('--skip-fts is not enabled by default', defaults.skipFts === false, JSON.stringify(defaults));
 check('gitnexusHome defaults to empty (no redirect)', defaults.gitnexusHome === '', JSON.stringify(defaults));
 
 section('apply() registers the tool');
@@ -155,14 +160,19 @@ check('output.render returns content blocks', (() => {
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Three routes now: read the working tree, refresh an index, and install GitNexus when
-// there is none. Separate modules because their privileges differ sharply — reading is
-// unprivileged, refreshing writes inside the workspace, and installing runs the
-// dependency tree's build scripts.
-check('exactly three routes mounted', stub.routes.length === 3, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// Four routes now: read the working tree, keyword-search the graph, refresh an index,
+// and install GitNexus when there is none. Separate modules because their privileges
+// differ sharply — reading/searching are unprivileged, refreshing writes inside the
+// workspace, and installing runs the dependency tree's build scripts.
+check('exactly four routes mounted', stub.routes.length === 4, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
   'the coverage route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check(
+  'the search route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/search'),
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check(
@@ -184,6 +194,37 @@ check(
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check('effects registered for teardown', stub.effects.length > 0, JSON.stringify(stub.effects));
+
+section('analyze route: force is explicit');
+{
+  const analyzeRoute = stub.routes.find((r) => r.path === '/api/gitnexus/analyze');
+  const call = async (url) => {
+    const req = { method: 'POST', url, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+    let body = '';
+    const res = {
+      statusCode: 0,
+      headersSent: false,
+      setHeader() {},
+      end(value) {
+        body = String(value ?? '');
+        this.headersSent = true;
+      },
+    };
+    await analyzeRoute.handler(req, res);
+    // The handler is wrapped in a promise-guard; the response is written synchronously
+    // by this route, so the body is final by the next turn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return JSON.parse(body);
+  };
+
+  const plain = await call('/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe'));
+  check('a POST without force asks for an incremental run', plain.run?.force === false, JSON.stringify(plain.run));
+  const forced = await call(
+    '/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe') + '&force=1',
+  );
+  check('force=1 reaches the runner', forced.run?.force === true, JSON.stringify(forced.run));
+  check('the forced run names --force in its command', String(forced.run?.command ?? '').includes('--force'), forced.run?.command);
+}
 
 section('serveRoutes=false suppresses the routes');
 const off = makeStubContext();

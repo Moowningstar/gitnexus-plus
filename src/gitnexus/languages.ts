@@ -73,6 +73,7 @@ const DISPLAY: Readonly<Record<string, readonly [label: string, color: string]>>
   batch: ['Batchfile', '#C1F12E'],
   diff: ['Diff', '#8b949e'],
   plaintext: ['Text', '#6e7681'],
+  xml: ['XML', '#0060ac'],
   text: ['其他', '#484f58'],
 });
 
@@ -96,6 +97,86 @@ const SUPPLEMENTARY_EXTENSIONS: Readonly<Record<string, string>> = Object.freeze
   '.diff': 'diff',
   '.txt': 'plaintext',
   '.log': 'plaintext',
+});
+
+/**
+ * Built-in extension map used only when GitNexus's detector is unavailable.
+ *
+ * This is the fallback that was missing: with no GitNexus package, `detector` is
+ * `null` and every ordinary source file used to fall through to `text`, so a
+ * TypeScript repository reported a one-row "其他" breakdown — indistinguishable
+ * from "this repository has no code". The map covers the languages this plugin
+ * already knows how to display; it is not a reimplementation of GitNexus's parser
+ * table, and it never claims a file is parsed. Every hit is classed `recognized`
+ * because, without GitNexus, no parser support can be verified.
+ *
+ * Deliberately absent: extensions where the format is genuinely ambiguous
+ * (`.h` is C here, matching GitHub linguist's default) or where upstream makes a
+ * decision this plugin should not second-guess (`.ipynb`).
+ */
+const FALLBACK_EXTENSIONS: Readonly<Record<string, string>> = Object.freeze({
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.py': 'python',
+  '.pyw': 'python',
+  '.java': 'java',
+  '.c': 'c',
+  '.h': 'c',
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+  '.hpp': 'cpp',
+  '.hh': 'cpp',
+  '.hxx': 'cpp',
+  '.m': 'objective-c',
+  '.mm': 'objective-c',
+  '.cs': 'csharp',
+  '.go': 'go',
+  '.rb': 'ruby',
+  '.rake': 'ruby',
+  '.rs': 'rust',
+  '.php': 'php',
+  '.kt': 'kotlin',
+  '.kts': 'kotlin',
+  '.swift': 'swift',
+  '.dart': 'dart',
+  '.vue': 'vue',
+  '.cob': 'cobol',
+  '.cbl': 'cobol',
+  '.zig': 'zig',
+  '.md': 'markdown',
+  '.markdown': 'markdown',
+  '.mdx': 'markdown',
+  '.json': 'json',
+  '.jsonc': 'json',
+  '.json5': 'json',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.html': 'markup',
+  '.htm': 'markup',
+  '.xhtml': 'markup',
+  '.css': 'css',
+  '.scss': 'css',
+  '.sass': 'css',
+  '.less': 'css',
+  '.sh': 'bash',
+  '.bash': 'bash',
+  '.zsh': 'bash',
+  '.fish': 'bash',
+  '.sql': 'sql',
+  '.toml': 'toml',
+  '.ini': 'ini',
+  '.cfg': 'ini',
+  '.conf': 'ini',
+  '.xml': 'xml',
+  '.xsd': 'xml',
+  '.svg': 'xml',
 });
 
 /**
@@ -150,6 +231,12 @@ export interface LanguageAggregate {
   rows: LanguageRow[];
   totalFiles: number;
   totalBytes: number;
+  /**
+   * Which classifier produced the rows. `builtin` means GitNexus was unavailable
+   * and {@link FALLBACK_EXTENSIONS} filled in; the rows are still useful, but no
+   * row may be presented as "GitNexus parses this".
+   */
+  detector: 'gitnexus' | 'builtin';
 }
 
 let detector: LanguageDetector | null = null;
@@ -160,7 +247,7 @@ let detector: LanguageDetector | null = null;
  * is classified `other` — a degraded but honest answer, never a fabricated one.
  */
 export async function loadLanguageDetector(
-  options: { env?: NodeJS.ProcessEnv } = {},
+  options: { env?: NodeJS.ProcessEnv; managedPrefix?: string } = {},
 ): Promise<LanguageDetector | null> {
   if (detector !== null) return detector;
   const root = findGitnexusRoot(options);
@@ -211,7 +298,7 @@ export function classifyFile(filePath: string, det: LanguageDetector | null): Cl
     const lastDot = filePath.lastIndexOf('.');
     if (lastDot >= 0) {
       const ext = filePath.slice(lastDot).toLowerCase();
-      const supplement = SUPPLEMENTARY_EXTENSIONS[ext];
+      const supplement = SUPPLEMENTARY_EXTENSIONS[ext] ?? FALLBACK_EXTENSIONS[ext];
       if (supplement !== undefined) key = supplement;
     }
   }
@@ -275,5 +362,5 @@ export function aggregateLanguages(
       (a.key < b.key ? -1 : 1),
   );
 
-  return { rows, totalFiles, totalBytes };
+  return { rows, totalFiles, totalBytes, detector: det === null ? 'builtin' : 'gitnexus' };
 }

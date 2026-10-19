@@ -50,7 +50,9 @@ It does **not**:
   and the two stay separate;
 - claim authorship of, or any contribution to, GitNexus. All rights in GitNexus belong
   to its author;
-- replace GitNexus. With no GitNexus index there is nothing here to display.
+- replace GitNexus. With no GitNexus index there is no graph to display — only a
+  working-tree scan (file counts, bytes, languages), which is useful but is not a
+  substitute for the graph.
 
 ## Licence — read this before a commercial use
 
@@ -99,9 +101,22 @@ GitNexus, and installing this plugin installs GitNexus.**
   one is the point: of the files people are actively editing, which does the graph
   not see?
 - **Language distribution by bytes**, split three ways: languages GitNexus can
-  *parse* into the graph, formats it merely *recognizes*, and everything else.
+  *parse* into the graph, formats it merely *recognizes*, and everything else. When
+  GitNexus is absent, a built-in extension map keeps the breakdown useful; those
+  rows are marked `detector: "builtin"` and are never presented as *parsed*.
 - **Resolver confidence** — untyped receiver sites, which make `impact` and
   `context` a lower bound rather than an exact answer.
+- **A scan-only report when there is no index** — file count, selected count, bytes
+  and language split are readable from the working tree alone. The panel shows them
+  under "尚未索引" instead of an empty state, and the initialize command sits beside
+  them.
+- **Keyword search with click-to-open** — the panel's search box asks the graph for
+  nodes whose `name` or `filePath` contains the query, and returns the graph node
+  kind, name, path and line. **Clicking a hit opens that file in the platform's file
+  viewer at that line** through `ctx.sidebarRight.openResource` and a
+  `dsh-resource://file/session/...` address; a separate 复制 button copies
+  `path:line`. When the graph helper cannot start, the bounded source-text fallback
+  is used instead and the card is labelled 源码关键词（回退）.
 
 ## Why the git three-way split matters
 
@@ -169,6 +184,20 @@ Everything runs through `ctx.shell`, so a sandboxed deployment confines it exact
 confines your own commands. **A refusal is reported as a refusal and never retried
 wider** — the plugin never asks for more scope than the session already granted.
 
+**The installed copy is the one every later step uses.** The install prefix is resolved
+once and passed to all three consumers: the coverage engine's own scan primitives, the
+language detector, and the `analyze` runner. This wiring was missing in 0.1.1 — the
+installer wrote a plugin-owned tree, while the reader and runner probed only PATH and
+the declared dependency, so the install succeeded and *nothing used it*. A machine with
+no global GitNexus still reported "absent" after a successful install.
+
+**Install → initialize is one authorised step.** If the current project has no index,
+a successful install continues with a single `gitnexus analyze --index-only` for that
+project, so the operator gets from "no GitNexus" to a visible index without a second
+click. The install confirmation says this before anything starts. The chain is gated on
+the install having been started from this panel and on the project still having no
+index; it never silently refreshes an index that already exists.
+
 If your GitNexus lives somewhere unusual, name it directly and none of this applies:
 
 ```sh
@@ -200,22 +229,66 @@ In DSH the plugin exposes:
 - **tool** `gitnexus_coverage` — `{ repo, includeLanguages? }`
 - **route** `GET /api/gitnexus/coverage?repo=<project>` — one report, plus the
   maintenance commands for that project
+- **route** `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20` —
+  read-only keyword search over the graph's symbol names and file paths
 - **panel** — a right-sidebar tab type `gitnexus`, opened from the sidebar's **+** →
   guide page ("GitNexus 索引")
 
-The coverage route is read-only and accepts only directories that are already GitNexus
-indexes, so it cannot be turned into a filesystem probe; it is additionally
-restricted to loopback peers because a third-party DSH route is unauthenticated by
-default on a bare `dsh web` profile.
+The coverage route is read-only. Its bound is a **project root** — a directory with a
+`.gitnexus` index or a `.git` marker — so it cannot be turned into a filesystem probe.
+An index is no longer required: a git project without one gets the engine's scan-only
+report, which is what makes "no index yet" informative. It is additionally restricted
+to loopback peers because a third-party DSH route is unauthenticated by default on a
+bare `dsh web` profile.
 
 There is now a **second** route, `/api/gitnexus/analyze`, and it is the only one that
-can change anything. It answers `POST` to start an incremental refresh, `GET` to report
-where that got to, and `DELETE` to stop it. It is a separate module from the coverage
+can change anything. It answers `POST` to start an incremental refresh (`?force=1`
+selects a full rebuild), `GET` to report where that got to, and `DELETE` to stop it. It is a separate module from the coverage
 route so the read-only half keeps a method policy that cannot mutate — the shared guard
 takes the accepted methods from the route rather than hard-coding one set for both. The
 mutating verbs additionally pass the write guard, which refuses cross-origin requests;
 loopback alone is not enough, because any page the operator visits can reach
 `127.0.0.1`. See **Maintenance** below for what it will and will not do.
+
+A **third** route, `/api/gitnexus/search`, is read-only like coverage but queries the
+LadybugDB graph instead of the manifest. It opens the database read-only and searches
+node names and file paths; it does **not** use FTS, which is why it works on an index
+built with `--skip-fts` and on a machine where the FTS extension fails to load. The
+response carries the node kind, name, path and line, plus an honest warning when
+content-level FTS is unavailable.
+
+**Two tiers, because the host shell can be unavailable.** The normal path is the
+graph query. If the helper cannot start — a Windows sandbox backend that cannot create
+its own temp directory, no shell executor, a busy database — the route falls back to a
+bounded source-text search over the files listed in the index manifest. That fallback
+needs neither a shell nor the native addon; it returns `mode: "text"`, searches code
+files before documentation, caps files/bytes/matches, and says so in `warning` and in
+the panel's card title. A silent swap between "graph" and "source text" would be a
+dishonest answer, so the mode is part of the response.
+
+**The graph query runs in a Node helper subprocess, not in the DSH host.** The host runs on
+Electron's Node, and GitNexus's LadybugDB addon is built for the system Node ABI.
+Loading it in-process fails with `A dynamic link library (DLL) initialization routine
+failed ... lbugjs.node`; the same addon loads under the system Node 24 that the CLI
+uses. The host therefore starts:
+
+```
+node lib/bin/search-helper.js <repo> <keyword> <limit> <managed-prefix>
+```
+
+and parses one JSON object. That is the same execution boundary the analyze runner
+already uses, and it keeps the panel process free of native state it cannot load.
+Consequently the graph path needs a shell executor and `node` on the shell's PATH;
+without them it falls back to source text, not an empty result list.
+
+**Clicking a hit opens the file, not a copy.** The row calls
+`ctx.sidebarRight.openResourceIn(sessionId, address, { params: { line } })` (or the
+public `openResource` when the targeted variant is unavailable) with
+`dsh-resource://file/session/<session>/<path>`. That is the same address and line
+parameter the built-in file strip and the chat's file links use, so the platform's
+own file viewer/editor handles the navigation. A separate 复制 button remains for the
+`path:line` text. A profile without a right-sidebar controller falls back to copying
+and says so.
 
 ## TypeScript, and why the build looks the way it does
 
@@ -290,6 +363,9 @@ That is not stylistic: a component that fetches cannot be rendered against a
 fixture, and the states worth asserting on — a report with skipped files, one
 without, an error, missing language data — are exactly the ones a fixture supplies.
 `test/client.mjs` renders each of them through a minimal single-pass hooks shim.
+Keyword search follows the same split: `CoveragePanel` owns the request and
+`SearchSection` is a pure function of its props, so the empty, error and result
+states are all fixture-testable without a graph database.
 
 Styling is theme-agnostic by construction: host elements only, `color` inherited,
 every border derived from `currentColor`. `@deepseek-ai/dsh-client-ui-primitives` is
@@ -308,6 +384,28 @@ GET /api/gitnexus/coverage?repo=D:\Project\material-ui     HTTP 200
   1.4 MB  CHANGELOG.old.md
   739.9 KB packages/mui-icons-material/lib/index.mjs  generated
 GET /api/gitnexus/coverage?repo=C:\Windows                 HTTP 404 (refused)
+```
+
+The search engine and its route were exercised over a loopback harness against this
+repository's real index (the same database the panel reads):
+
+```
+GET /api/gitnexus/search?repo=D:\Project\gitnexus-plus&q=analyzeCoverage  HTTP 200
+  Function analyzeCoverage src/gitnexus/coverage.ts:507
+GET /api/gitnexus/search?repo=D:\Project\gitnexus-plus&q=client/index&limit=3  HTTP 200
+  File index.ts src/client/index.ts
+GET /api/gitnexus/search?repo=C:\Windows\System32&q=x                     HTTP 404 (refused)
+```
+
+The helper boundary itself, run under the system Node 24, returns the JSON the host
+parses (the host's Electron Node cannot load the native addon):
+
+```
+node lib/bin/search-helper.js D:\Project\gitnexus-plus analyzeCoverage 5
+{"ok":true,"report":{"query":"analyzecoverage","mode":"graph",
+ "results":[{"kind":"Function","name":"analyzeCoverage",
+ "filePath":"src/gitnexus/coverage.ts","startLine":507,"endLine":864}],
+ "ftsAvailable":false,"total":1,...}}
 ```
 
 ## Scope: the project you are in, not a global list
@@ -330,13 +428,15 @@ Two situations the read-only half cannot resolve on its own:
 - **初始化索引 / 增量刷新** — the index is missing or behind HEAD. This one the plugin
   runs for you.
 - **强制全量重构** — the incremental refresh has hung. GitNexus's update path is not
-  reliably terminating, and when it wedges a full rebuild is the only way out. Handed
-  over as text.
+  reliably terminating, and when it wedges a full rebuild is the only way out. This
+  one also has a button, behind its own destructive confirmation: the route implements
+  `--force`, and the dialog says what it rebuilds, how long it can take, and that the
+  index may be briefly unavailable.
 
-**增量刷新 runs through the host's shell executor.** An earlier revision handed over
-every command as text, justified by "a plugin that spawns processes bypasses the
-permission system". That reasoning was wrong, and the correction is worth stating
-precisely:
+**Both maintenance actions run through the host's shell executor.** An earlier revision
+handed over every command as text, justified by "a plugin that spawns processes
+bypasses the permission system". That reasoning was wrong, and the correction is worth
+stating precisely:
 
 DSH's approval service governs **sandbox escalation** — widening the scope a session was
 granted. Its audit pair must be turn-enclosed, which is why `ApprovalService.request()`
@@ -360,35 +460,50 @@ What the plugin commits to, and what is tested:
   the agent skill files in your tree — a far larger change than "refresh the index".
 - **A confirmation before it starts**, stating the exact command, what it touches and
   how long it takes.
+- **The full rebuild is a separate confirmation.** It runs only when the request carries
+  `force=1`, its confirmation says it rebuilds the graph and FTS and may take minutes,
+  and its button is labelled 全量重建 rather than borrowing the incremental one.
 - **Cancellable**, with a ten-minute ceiling by default (`analyzeTimeoutMs`).
 
-The full rebuild still has no button, because the host route does not implement
-`--force`. A button that quietly ran something other than its label would be worse than
-no button.
+The full rebuild used to have no button because the host route did not implement
+`--force`. The route does now, and the button runs exactly the command its dialog
+shows — a button that quietly ran something other than its label would still be worse
+than no button.
 
-The commands handed over are not a bare `gitnexus analyze`, because that does not work
-in every deployment:
+The commands shown and executed are not a bare `gitnexus analyze`, because that does not
+work in every deployment:
 
 ```
 $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; \
+  $env:GITNEXUS_HOME='<project>\.gitnexus\plugin-home'; \
   gitnexus analyze --index-only '<project>'
 
 $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; \
+  $env:GITNEXUS_HOME='<project>\.gitnexus\plugin-home'; \
   gitnexus analyze --index-only --force '<project>'
 ```
 
 - `GITNEXUS_MEMORY=off` — the CLI otherwise re-spawns itself with a larger heap over
   piped stdio, which a confined sandbox denies (`spawn EPERM`).
 - `NODE_OPTIONS=--max-old-space-size=8192` — supplies the heap that respawn wanted.
+- `GITNEXUS_HOME=<project>\.gitnexus\plugin-home` — the global registry write would
+  otherwise go to `~/.gitnexus`, outside a confined host's writable scope. A failed
+  registry write leaves the index marked `incremental-in-progress` and incomplete.
+  The plugin defaults this redirect to the project's own `.gitnexus/plugin-home`;
+  `gitnexusHome` overrides it.
 - `--index-only` — the default `analyze` also rewrites `AGENTS.md`, `CLAUDE.md` and
   agent skill files inside your repository. A maintenance action must not edit the
   working tree.
 
-`--skip-fts` is **no longer** part of either command. Measured on a 39-file repository,
-disabling a search index the store already has forces a full graph-store rebuild —
-179.22 s against 8.57 s, a 21× penalty on the transition an operator is most likely to
-hit, and the opposite of incremental. Letting FTS fail on its own costs nothing: it
-prints a warning and indexes anyway.
+`--skip-fts` is **adaptive**, not a static default. An index whose manifest says
+`capabilities.fts.status: available` gets no flag; an index without FTS gets
+`--skip-fts`, because the extension's install is an out-of-process step a confined
+host denies (`spawn EPERM`), and that failure aborts the refresh. This matters in both
+directions: measured on a 39-file repository, putting `--skip-fts` on an index that
+already has FTS forces a full graph-store rebuild — 179.22 s against 8.57 s, a 21×
+penalty — while omitting it on an index without FTS makes the refresh fail outright.
+Setting `skipFts: true` forces the flag; there is no config that forces FTS on, because
+enabling it is a repair (`gitnexus analyze --repair-fts`), not an incremental refresh.
 
 The panel prints these rationales next to the commands, so they do not look
 arbitrary. `src/gitnexus/commands.js` is pure and asserted verbatim by tests.
@@ -408,24 +523,27 @@ because this package declares `dsh.bundle`.
 
 ## Known limits
 
-- **A machine without GitNexus is not detected yet.** The plugin declares no runtime
-  dependencies and never imports `gitnexus`; it reads an index another tool produced
-  and, when it can, deep-imports the upstream scan primitives at runtime. That design
-  keeps it a pure observer, but it makes "the operator has no GitNexus" a reachable
-  state. `src/gitnexus/toolchain.ts` implements a three-state probe (`ready` /
-  `library-only` / `absent`, separating "the library tree exists" from "a CLI is on
-  PATH", because they gate different promises), and the refresh runner now consults it
-  **before spawning anything**: with no CLI it reports `unavailable` and tells the
-  operator to install one, rather than starting a process that cannot work. The engine
-  also degrades correctly on its own — `scan.ts` falls back to its own walker and
-  reports `primitives: 'fallback'`, and the built-in size caps apply.
+- **Detection is a filesystem probe, not an execution check.** The plugin declares no
+  runtime dependencies and never imports `gitnexus`; it reads an index another tool
+  produced and, when it can, deep-imports the upstream scan primitives at runtime. That
+  design keeps it a pure observer, but it makes "the operator has no GitNexus" a
+  reachable state — so `src/gitnexus/toolchain.ts` probes it in three states (`ready` /
+  `library-only` / `absent`), separating "the library tree exists" from "a CLI is on
+  PATH" because they gate different promises. The refresh runner consults it **before
+  spawning anything**: with no CLI it reports `unavailable` and tells the operator to
+  install one, rather than starting a process that cannot work. Spawning the CLI to ask
+  its version would be the direct test, but a confined process denies piped stdio, so
+  the probe only stats the filesystem. The engine degrades on its own too — `scan.ts`
+  falls back to its own walker and reports `primitives: 'fallback'`, and the built-in
+  size caps apply.
 - **A report that reused GitNexus's scan rules and one that fell back to an
-  approximation are still not distinguished inside the report itself.** The toolchain
-  verdict now travels with it, so the panel knows whether GitNexus is present and says so
-  — but the per-file numbers do not carry a provenance marker, so a fallback walk is not
-  labelled as one where the numbers are shown. The built-in walker deliberately does
-  **not** implement upstream's ignore rules faithfully, and its uncovered-file count can
-  therefore carry false positives.
+  approximation are still not distinguished per file.** The toolchain verdict travels
+  with the report, the language breakdown carries `detector: "gitnexus" | "builtin"`,
+  and the fallback rows are never labelled *parsed* — but the remaining per-file numbers
+  do not carry a provenance marker, so a fallback walk is not labelled as one where
+  those numbers are shown. The built-in walker deliberately does **not** implement
+  upstream's ignore rules faithfully, and its uncovered-file count can therefore carry
+  false positives.
 - **Installing GitNexus from the panel has never been run against a real network.** The
   command shape is verified (`npm install --prefix … --no-audit --no-fund`, no hardcoded
   registry), the runner's state machine is covered by fourteen assertions, and the
@@ -433,7 +551,9 @@ because this package declares `dsh.bundle`.
   What is **not** verified is the download and compile itself: it is several hundred
   megabytes and was never executed from inside a confined DSH process. Treat the first
   authorised install on any machine as untested, and fall back to the manual command if
-  it fails — which is why that command is offered first.
+  it fails — which is why that command is offered first. What *is* verified by tests is
+  that the installed prefix is the one the reader, the language detector and the analyze
+  runner all resolve; the download and compile remain unverified.
 - **`--omit=optional` saves about 486 MB of that install, and is not used by default.**
   Measured: a full GitNexus tree is 998.9 MB, and omitting the optional dependencies
   gives 513.2 MB by dropping `onnxruntime-node` (287 MB), `onnxruntime-web` (139 MB) and
@@ -475,10 +595,38 @@ because this package declares `dsh.bundle`.
   git-tracked files; real data killed it — 8 of the "missing" tracked files in a
   37-file repo were dotfiles excluded by the walker's `dot: false`, and 2 indexed
   files were untracked. The walker's own rules are the only honest denominator.
-- **Panel effects and re-render are untested.** `react-dom` is not installed on
-  this machine, so rendering uses a single-pass shim: `useState` yields its initial
-  value and `useEffect` never runs. The pure view is covered; the fetch lifecycle
-  is not.
-- **No incremental update yet.** This ships the read-only monitoring half of the
-  plan. Driving `analyze` is a separate concern with its own safety story — if
-  nothing else, a status check must never start a 30-second rebuild.
+- **Keyword search is graph name/path first, with a source-text fallback.** The graph
+  mode finds symbols and files whose *names* or *paths* contain the query; it does not
+  search function bodies, comments or descriptions. The fallback (`mode: "text"`) does
+  search line text, but only in the files the index manifest lists, and only when the
+  graph helper cannot start. Content-level search as a first-class mode is GitNexus's
+  FTS surface, and on this machine the FTS extension fails to load
+  (`libfts.lbug_extension` missing) and the current index was built with `--skip-fts`.
+  The panel labels the two modes separately (符号名 / 文件路径 vs 源码关键词（回退）) and
+  never presents a text hit as a graph hit.
+- **Search needs a child Node process for the graph path.** The host's Electron Node
+  cannot load the LadybugDB addon (ABI mismatch), so the query is delegated to
+  `lib/bin/search-helper.js` under the system Node 24. This is deliberate, not a
+  workaround to remove: an in-process search fails on the host with the DLL
+  initialization error above. If the shell executor is unavailable (measured on this
+  machine: the Windows `windows-acl-run` sandbox cannot create its temp directory),
+  search does **not** fail — it falls back to the bounded source-text scan and labels
+  the result `text`. The graph query remains the preferred path when the helper can
+  start.
+- **The source fallback is not the graph.** It searches line text in the files the
+  index manifest lists, not symbol relationships; code paths are searched before
+  documentation, and the file/byte/match caps can truncate a large repository. The
+  panel's card title changes to 源码关键词（回退） and the warning names the fallback,
+  so a text hit is never presented as a graph hit.
+- **Panel effects and re-render are still not automated.** `react-dom` is not installed
+  on this machine, so rendering uses a single-pass shim: `useState` yields its initial
+  value and `useEffect` never runs. The pure view is covered; the fetch lifecycle is
+  not. The panel has now been checked once against the real right sidebar, and that
+  check is what exposed the two-column layout clipping the language card at a narrow
+  pane edge, the grey single-bucket chart, the invented `--dsw-color-*` tokens, the
+  raw English `index` cap source, and the `--skip-fts` config default. Those are
+  fixed, but a future prop or layout change can still pass every test here without
+  being seen in a browser.
+- **Install → initialize has not been exercised end to end against a real npm install.**
+  The managed-prefix wiring, the auto-chain gate, and the analyze command are covered by
+  tests; the several-hundred-megabyte download and native compile are not.

@@ -7,6 +7,7 @@
  * is not the graph comes from here or from `~/.gitnexus/registry.json`.
  */
 
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -104,13 +105,12 @@ export async function findRegistryEntry(
 /**
  * Whether a directory holds a GitNexus index.
  *
- * This is the bound the HTTP route enforces instead of registry membership. The
- * panel shows the project the user is *in*, which need not appear in the global
+ * The panel shows the project the user is *in*, which need not appear in the global
  * registry at all — and a plugin that refused to describe the user's own working
  * directory because a global file elsewhere had not heard of it would be wrong.
- * Requiring the directory to already be a GitNexus index keeps the route from
- * becoming a filesystem probe: it will describe a path only if GitNexus has
- * already indexed it.
+ * This is not by itself the route bound any more: a git project with no index still
+ * has a readable working tree, so the routes use {@link isProjectRoot}, which
+ * accepts either an index or a `.git` marker.
  */
 export async function hasIndex(repoPath: string): Promise<boolean> {
   const dir = path.join(repoPath, '.gitnexus');
@@ -123,6 +123,25 @@ export async function hasIndex(repoPath: string): Promise<boolean> {
     }
   }
   return false;
+}
+
+/**
+ * Whether a directory is a project the routes may describe.
+ *
+ * Deliberately wider than {@link hasIndex}: a git repository with no index still has
+ * a readable working tree, and both the scan-only coverage report and the initialize
+ * action are for exactly that state. A directory with neither an index nor a `.git`
+ * marker is refused, which is what keeps these routes from becoming a filesystem
+ * probe. `.git` may be a directory or a file (worktrees and submodules), so this
+ * checks existence rather than type.
+ */
+export async function isProjectRoot(repoPath: string): Promise<boolean> {
+  if (await hasIndex(repoPath)) return true;
+  try {
+    return existsSync(path.join(repoPath, '.git'));
+  } catch {
+    return false;
+  }
 }
 
 /** `indexCoverage` as the `analyze` that produced the index wrote it. */

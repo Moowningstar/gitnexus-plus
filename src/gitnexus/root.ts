@@ -32,6 +32,12 @@ export interface RootDiscoveryOptions {
   env?: NodeJS.ProcessEnv;
   moduleUrl?: string;
   discover?: boolean;
+  /**
+   * The prefix a panel-authorised install wrote to. Consulted before PATH and the
+   * declared dependency, because it is the only copy whose version the plugin
+   * chose — and, after an install from the panel, the only copy on the machine.
+   */
+  managedPrefix?: string;
 }
 
 /**
@@ -54,6 +60,13 @@ function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
   const roots: string[] = [];
 
   if (env.GITNEXUS_PACKAGE_ROOT) roots.push(env.GITNEXUS_PACKAGE_ROOT);
+
+  // The copy this plugin installed. Ahead of PATH and the dependency because it is
+  // the version the operator selected by installing; finding a different one later
+  // would make the report describe a tree the refresh will not use.
+  if (typeof options.managedPrefix === 'string' && options.managedPrefix !== '') {
+    roots.push(path.join(options.managedPrefix, 'node_modules', 'gitnexus'));
+  }
 
   // Probe every PATH entry for a sibling `node_modules/gitnexus` directly.
   //

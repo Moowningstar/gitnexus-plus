@@ -1,15 +1,16 @@
 /**
  * The maintenance commands this plugin hands to the operator.
  *
- * WHY THE PLUGIN DOES NOT RUN THESE ITSELF
- * ---------------------------------------
+ * WHY THE TEXT STILL EXISTS AFTER THE BUTTONS
+ * -------------------------------------------
  * A first revision spawned `gitnexus analyze` directly from the plugin and exposed
- * it as a button. That was wrong, for a reason that has nothing to do with
- * convenience: a plugin that spawns processes bypasses the host's permission
- * system. Nothing would ask the operator whether a thirty-minute write against
- * their working tree was intended, and nothing would leave an audit trail of the
- * escalation. Presenting the command and letting it run through the normal tool
- * path keeps the decision — and the approval — where the product put it.
+ * it as a button. That was wrong: a plugin that spawns processes bypasses the host's
+ * permission system. The correction was not "never run it" but "run it through
+ * `ctx.shell`", which is what the analyze runner does. The exact command is still the
+ * deliverable here because it is what the confirmation shows, what a failed run can
+ * be reproduced with, and what an operator can paste when the deployment has no
+ * shell executor at all. The two must not drift: the runner builds its argv from the
+ * same decisions this module documents.
  *
  * WHAT MAKES THE COMMANDS NON-OBVIOUS
  * -----------------------------------
@@ -29,8 +30,65 @@
  * inside the repository. A maintenance button must not edit the working tree.
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
 /** Heap the CLI is given, matching what `ensureHeap` would have asked for. */
 const HEAP_MB = 8192;
+
+/**
+ * Where this plugin keeps GitNexus's global registry for one repository.
+ *
+ * `GITNEXUS_HOME` is normally `~/.gitnexus`, outside a confined host's writable
+ * scope. Pointing it at a directory inside the project's own `.gitnexus/` keeps the
+ * registry write next to the index and inside the workspace — which is the scope the
+ * operator already granted. The analysis itself still writes `.gitnexus/lbug`; this
+ * only moves the global registry side effect.
+ */
+export function defaultGitnexusHome(repoPath: string): string {
+  return path.join(repoPath, '.gitnexus', 'plugin-home');
+}
+
+/**
+ * Whether this index says content-level FTS is available.
+ *
+ * A missing manifest, a legacy manifest, or a status other than `available` all mean
+ * "do not attempt FTS". The read is synchronous because both the maintenance-command
+ * builder and the analyze runner are synchronous; the manifest is a few kilobytes.
+ */
+export function ftsAvailable(repoPath: string): boolean {
+  for (const name of ['gitnexus.json', 'meta.json']) {
+    try {
+      const raw = JSON.parse(readFileSync(path.join(repoPath, '.gitnexus', name), 'utf8')) as {
+        capabilities?: { fts?: { status?: unknown } };
+      };
+      // The first manifest that parses is authoritative; falling through to the
+      // legacy copy on a `disabled-by-flag` status could resurrect a contradictory
+      // `available` from a stale `meta.json`.
+      return raw.capabilities?.fts?.status === 'available';
+    } catch {
+      /* try the other manifest name */
+    }
+  }
+  return false;
+}
+
+/**
+ * The effective `--skip-fts` decision for one repository.
+ *
+ * `false` (the default) means **automatic**: skip FTS when the index does not have
+ * it, so a refresh in a confined process does not die trying to install an extension
+ * out-of-process. `true` forces the flag. There is deliberately no "force FTS on":
+ * that is a repair action (`gitnexus analyze --repair-fts`), not an incremental
+ * refresh, and hiding a repair behind a config boolean would mislead.
+ *
+ * The alternative — a static default — was measured wrong in both directions: `true`
+ * forces a 21x full rebuild on an index that already has FTS, while `false` makes the
+ * refresh fail with `spawn EPERM` on an index that does not.
+ */
+export function effectiveSkipFts(repoPath: string, configured: boolean): boolean {
+  return configured || !ftsAvailable(repoPath);
+}
 
 export type MaintenanceMode = 'init' | 'full';
 
@@ -143,7 +201,7 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
     {
       mode: 'full',
       label: '强制全量重构',
-      when: '增量刷新卡死或结果反常时的逃生舱。会丢弃可复用的解析产物，耗时数分钟。',
+      when: '增量刷新卡死或结果反常时的逃生舱。重建图与 FTS，耗时数分钟；未变更文件的解析产物仍会复用。',
       argv: line(['--force']),
       shell: envPrefix() + line(['--force']),
       destructive: true,

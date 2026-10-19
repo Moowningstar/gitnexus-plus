@@ -5,8 +5,8 @@
  * carrier contract in `@deepseek-ai/dsh-host-webserver`: bare `node:http`, no
  * Express, exact-then-longest-prefix matching, and a disposer for teardown.
  *
- * THE BOUND IS "IS A GITNEXUS INDEX", NOT "IS IN THE REGISTRY"
- * -----------------------------------------------------------
+ * THE BOUND IS "IS A PROJECT ROOT", NOT "IS IN THE REGISTRY"
+ * ----------------------------------------------------------
  * An earlier revision accepted only paths present in `~/.gitnexus/registry.json`.
  * That was wrong for the panel's actual job: it shows the project the user is
  * *in*, and a working directory the global registry has never heard of — a fresh
@@ -14,13 +14,21 @@
  * panel exists to report on. Refusing it would have been a correctness bug wearing
  * a security costume.
  *
- * The route still refuses to describe arbitrary directories: the path must already
- * contain `.gitnexus/gitnexus.json` or `.gitnexus/meta.json`, so a caller cannot
- * use it to enumerate a filesystem. Loopback and method guards live in `./guard.js`.
+ * A later revision required an index. That was also wrong, for the same reason at a
+ * different state: a project with no index yet still has a readable working tree,
+ * and the engine already builds a useful scan-only report for it. The bound is now a
+ * project root (`.gitnexus` or `.git`), which still refuses arbitrary directories.
+ *
+ * The route still refuses to describe arbitrary directories: the path must be a
+ * project root — carrying `.gitnexus/gitnexus.json`, `.gitnexus/meta.json`, or a
+ * `.git` marker — so a caller cannot use it to enumerate a filesystem. An index is
+ * no longer required: the engine's scan-only report is what makes the "no index
+ * yet" state informative instead of an empty command. Loopback and method guards
+ * live in `./guard.js`.
  */
 
 import path from 'node:path';
-import { hasIndex } from '../gitnexus/index-meta.js';
+import { isProjectRoot } from '../gitnexus/index-meta.js';
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { CoverageReport } from '../gitnexus/coverage.js';
@@ -60,13 +68,18 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
     }
 
     const absRepo = path.resolve(repo);
-    if (!(await hasIndex(absRepo))) {
-      // Not an error the caller should retry: this directory simply has no index
-      // yet, which is the state the panel's initialize action exists for.
+    // The bound changed from "is a GitNexus index" to "is a project root": a
+    // directory with neither an index nor a `.git` marker is still refused, so the
+    // route cannot be used to enumerate a filesystem. A git repository without an
+    // index is the state the panel's initialize action exists for, and the engine
+    // already produces a useful scan-only report for it (file counts, bytes,
+    // languages, the size cap). Refusing that state was hiding data, not protecting
+    // anything — the route only answers loopback callers.
+    if (!(await isProjectRoot(absRepo))) {
       sendJson(res, 404, {
         ok: false,
-        code: 'not-indexed',
-        message: 'directory has no GitNexus index (.gitnexus/gitnexus.json or meta.json)',
+        code: 'not-a-project',
+        message: 'directory is neither a GitNexus index nor a git repository root',
       });
       return;
     }

@@ -132,11 +132,14 @@ export async function scanRepository(
     capBytes?: number;
     env?: NodeJS.ProcessEnv;
     primitives?: ScanPrimitives | null;
+    managedPrefix?: string;
   } = {},
 ): Promise<ScanReport> {
   const env = options.env ?? process.env;
   const primitives =
-    options.primitives === undefined ? await loadScanPrimitives({ env }) : options.primitives;
+    options.primitives === undefined
+      ? await loadScanPrimitives({ env, managedPrefix: options.managedPrefix })
+      : options.primitives;
 
   const defaultCapBytes = primitives?.DEFAULT_MAX_FILE_SIZE_BYTES ?? 512 * 1024;
   const maxCapBytes = primitives?.MAX_FILE_SIZE_UPPER_BOUND_BYTES ?? 32 * 1024 * 1024;

@@ -1,33 +1,43 @@
 /**
- * dsh-gitnexus-plus 鈥?host half.
+ * dsh-gitnexus-plus —host half.
  *
  * Registers one read-only tool and one loopback HTTP route over the coverage
- * engine in `./gitnexus/`. Both answer the same question 鈥?"what did this index
- * leave out?" 鈥?for the two callers that need it: the model, and a browser half
+ * engine in `./gitnexus/`. Both answer the same question —"what did this index
+ * leave out?" —for the two callers that need it: the model, and a browser half
  * that will render it.
  *
- * Deliberately read-only. Nothing here triggers `analyze`, writes to `.gitnexus/`,
- * or takes the index lock; driving updates is a separate concern with its own
- * safety story, and mixing the two would mean a status check could start a
- * 30-second rebuild.
+ * The read path is still never allowed to change anything: a status check must not
+ * start a 30-second rebuild. The two mutating capabilities are separate routes with
+ * their own guards, and both go through the host's shell executor rather than
+ * spawning from the read path. Keyword search is a third read-only route over the
+ * graph itself; the tool above stays read-only.
  */
 
+import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { analyzeCoverage, type CoverageReport } from './gitnexus/coverage.js';
 import { formatReport } from './gitnexus/format.js';
-import { maintenanceCommands, commandRationale, type MaintenanceCommand } from './gitnexus/commands.js';
+import {
+  commandRationale,
+  defaultGitnexusHome,
+  effectiveSkipFts,
+  maintenanceCommands,
+  type MaintenanceCommand,
+} from './gitnexus/commands.js';
 import { mountCoverageRoute } from './routes/coverage.js';
 import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
+import { mountSearchRoute } from './routes/search.js';
+import { searchWithFallback } from './gitnexus/search.js';
 import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
-import { createInstallRunner } from './gitnexus/install.js';
+import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
 
 /**
  * Whether a service resolved from the context has the shape the runner needs.
  *
- * `ctx.get` is untyped here 鈥?the DSH packages ship no declarations, so the service
+ * `ctx.get` is untyped here —the DSH packages ship no declarations, so the service
  * arrives as `unknown`. Checking the two methods the runner actually calls is the
  * narrowest claim that can be made: asserting the full `ctx.shell` contract from this
  * side would be a guess, and a wrong guess fails at the first click rather than here.
@@ -42,7 +52,7 @@ export const name = 'gitnexus-plus';
 
 /**
  * Only `tools` is required. `webServer` is reached through `ctx.inject` because a
- * headless profile has no HTTP carrier at all 鈥?naming it here would leave the
+ * headless profile has no HTTP carrier at all —naming it here would leave the
  * plugin permanently pending there, and the tool would never register.
  */
 export const inject = ['tools'] as const;
@@ -53,10 +63,16 @@ export interface PluginConfig {
   minifiedSampleLimit: number;
   serveRoutes: boolean;
   /**
-   * Shapes the maintenance commands the panel hands to the operator. The defaults
-   * are the values measured to work inside a confined DSH process; a deployment
-   * that is not sandboxed can turn them off to get keyword search and a
-   * self-managed heap.
+   * Shapes the maintenance commands the panel hands to the operator. `memoryOff`
+   * defaults on because the CLI otherwise re-spawns itself over piped stdio, which
+   * a confined process denies.
+   *
+   * `skipFts: false` (default) means **automatic**: the plugin skips FTS when the
+   * index does not have it, and omits the flag when it does. Both static values were
+   * measured wrong on a real machine: `true` forces a 21x full rebuild on an FTS
+   * index, while an unconditional `false` makes a refresh on a non-FTS index die
+   * with `spawn EPERM` when the extension tries to install out-of-process. `true`
+   * here forces the flag for an operator who needs it.
    */
   skipFts: boolean;
   memoryOff: boolean;
@@ -77,6 +93,12 @@ export interface PluginConfig {
   gitnexusInstallDir: string;
   /** Wall-clock ceiling for that install. Compiling native modules is slow. */
   installTimeoutMs: number;
+  /**
+   * Redirect for GitNexus's global registry write. Empty means
+   * `<project>/.gitnexus/plugin-home`, inside the workspace. The global
+   * `~/.gitnexus` is outside a confined host's writable scope, and a refresh that
+   * dies on the registry write leaves the index incomplete.
+   */
   gitnexusHome: string;
 }
 
@@ -84,7 +106,7 @@ export const Config = Schema.object({
   scanDefaultCapKb: Schema.natural().default(512),
   minifiedSampleLimit: Schema.natural().default(40),
   serveRoutes: Schema.boolean().default(true),
-  skipFts: Schema.boolean().default(true),
+  skipFts: Schema.boolean().default(false),
   memoryOff: Schema.boolean().default(true),
   analyzeHeapMb: Schema.natural().default(8192),
   analyzeTimeoutMs: Schema.natural().default(600000),
@@ -97,8 +119,8 @@ export const Config = Schema.object({
  * Compile-time proof that the schema and {@link PluginConfig} describe the same
  * object.
  *
- * These are two independent declarations of one contract 鈥?`Schema.object` infers a
- * shape, and `apply` is written against a hand-written interface 鈥?so without this
+ * These are two independent declarations of one contract —`Schema.object` infers a
+ * shape, and `apply` is written against a hand-written interface —so without this
  * they can drift, and the drift is silent: a config key added to the schema but not
  * the interface is simply unreadable from `apply`, and one added to the interface
  * but not the schema is `undefined` at runtime. The check is bidirectional, because
@@ -116,6 +138,12 @@ void configShapeMatches;
 export interface MaintenanceInfo {
   commands: MaintenanceCommand[];
   rationale: string[];
+  /**
+   * Whether the mounted analyze route understands `force=1`. The client uses it to
+   * avoid offering a full-rebuild button against an older host, where that flag was
+   * ignored and the button would silently run an incremental refresh instead.
+   */
+  supportsForce: true;
 }
 
 /** What the `gitnexus_coverage` tool returns to the model. */
@@ -138,6 +166,23 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const CACHE_TTL_MS = 15_000;
 
   /**
+   * The one install location, resolved once and shared by every path that needs to
+   * know it. This was the broken link in "install, then initialize": the installer
+   * wrote a plugin-owned tree under DSH_HOME, while the coverage engine and the
+   * analyze runner probed only PATH and the declared dependency. On a machine with
+   * no global GitNexus the install succeeded and then *nothing used it* — the panel
+   * still reported "absent" and the refresh still said "no CLI". Passing the same
+   * prefix to all three (reader, language detector, runner) is what makes the
+   * install a prerequisite rather than an isolated side effect.
+   */
+  const installPrefix =
+    config.gitnexusInstallDir === '' ? defaultInstallPrefix() : config.gitnexusInstallDir;
+  const managedToolchain = { managedPrefix: installPrefix };
+  // Resolved at boot so a search never depends on the host's working directory. The
+  // file is run by the system Node (see `searchViaHelper`); this process only names it.
+  const searchHelperPath = fileURLToPath(new URL('./bin/search-helper.js', import.meta.url));
+
+  /**
    * Resolve a coverage report, from cache when it is recent enough.
    *
    * Scan results are pure functions of the working tree, so a short TTL removes the
@@ -146,7 +191,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
    *
    * `fresh` bypasses the TTL. A manual refresh is an explicit instruction from a
    * person who believes the numbers may have moved, and answering it with a cached
-   * copy makes the control look broken 鈥?which is exactly how it was reported. A
+   * copy makes the control look broken —which is exactly how it was reported. A
    * background poll is the case the TTL exists for; a click is not.
    */
   const coverageFor = async (repoPath: string, options: { fresh?: boolean } = {}): Promise<CoverageReport> => {
@@ -157,6 +202,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     }
     const report = await analyzeCoverage(key, {
       minifiedSampleLimit: config.minifiedSampleLimit,
+      toolchain: managedToolchain,
     });
     cache.set(key, { at: Date.now(), report });
     return report;
@@ -169,13 +215,18 @@ export function apply(ctx: Context, config: PluginConfig): void {
    */
   const maintenanceFor = (repoPath: string): MaintenanceInfo => {
     const options = {
-      skipFts: config.skipFts,
+      // `skipFts: false` means automatic, not "attempt FTS": if the index has no FTS,
+      // attempting the install dies with `spawn EPERM` in a confined host.
+      skipFts: effectiveSkipFts(repoPath, config.skipFts),
       memoryOff: config.memoryOff,
-      gitnexusHome: config.gitnexusHome === '' ? null : config.gitnexusHome,
+      // Default to a plugin-owned home inside the project so the global registry
+      // write stays within the workspace. The explicit config still wins.
+      gitnexusHome: config.gitnexusHome === '' ? defaultGitnexusHome(repoPath) : config.gitnexusHome,
     };
     return {
       commands: maintenanceCommands(repoPath, options),
       rationale: commandRationale(options),
+      supportsForce: true,
     };
   };
 
@@ -205,7 +256,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           additionalProperties: true,
           properties: {
             // `required: true` per property, never `required: [...]`. The DSL's
-            // compiler rejects the array form outright 鈥?it collects these marks
+            // compiler rejects the array form outright —it collects these marks
             // into the JSON Schema `required` list itself.
             text: { type: 'string', required: true },
             indexed: { type: 'boolean', required: true },
@@ -240,12 +291,20 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // Read through `ctx.get` rather than injecting, because `shell` is optional here
       // and `inject` would make the whole route block wait for a service a headless
       // deployment never provides. `null` is handed to the runner, which reports
-      // `unavailable` and tells the operator to run the command themselves 鈥?the
+      // `unavailable` and tells the operator to run the command themselves —the
       // read-only half of the panel keeps working either way.
       const shellRaw: unknown = svcCtx.get('shell');
+      const searchShell = isShellLike(shellRaw) ? shellRaw : null;
       const analyze = createAnalyzeRunner({
-        shell: isShellLike(shellRaw) ? shellRaw : null,
+        shell: searchShell,
         timeoutMs: config.analyzeTimeoutMs,
+        toolchain: managedToolchain,
+        // The runner must read the same config as the command text it confirms,
+        // otherwise the dialog describes a command the run does not execute. It
+        // resolves `false` per repository (automatic), and defaults to the
+        // project-local `GITNEXUS_HOME` when the config leaves it empty.
+        skipFts: config.skipFts,
+        gitnexusHome: config.gitnexusHome === '' ? null : config.gitnexusHome,
       });
       // GitNexus is what produces the index this plugin reads, so a machine without it
       // has nothing to display and no way to change that from here. This runner is the
@@ -253,7 +312,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // out a package manager, a registry, or a global prefix themselves.
       const install = createInstallRunner({
         shell: isShellLike(shellRaw) ? shellRaw : null,
-        prefix: config.gitnexusInstallDir === '' ? undefined : config.gitnexusInstallDir,
+        prefix: installPrefix,
         timeoutMs: config.installTimeoutMs,
       });
 
@@ -263,7 +322,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           maintenance: (repoPath) => maintenanceFor(repoPath),
         }),
         mountAnalyzeRoute(svcCtx.webServer, {
-          start: (repoPath) => analyze.start(repoPath),
+          start: (repoPath, options) => analyze.start(repoPath, options),
           status: (repoPath) => analyze.status(repoPath),
           cancel: (repoPath) => analyze.cancel(repoPath),
         }),
@@ -272,6 +331,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
           status: () => install.status(),
           cancel: () => install.cancel(),
           cliPath: () => install.cliPath(),
+        }),
+        mountSearchRoute(svcCtx.webServer, {
+          search: (repoPath, query, options) =>
+            searchWithFallback(repoPath, query, {
+              shell: searchShell,
+              helperPath: searchHelperPath,
+              limit: options?.limit,
+              managedPrefix: installPrefix,
+            }),
         }),
       ];
       ctx.effect(() => () => {
@@ -287,7 +355,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 }
 
 /**
- * Human-readable rendering lives in `./gitnexus/format.js` 鈥?free of DSH imports
+ * Human-readable rendering lives in `./gitnexus/format.js` —free of DSH imports
  * so it can be tested without a host. Re-exported here for callers that already
  * hold the plugin module.
  */

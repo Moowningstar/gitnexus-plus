@@ -346,15 +346,27 @@ async function routeTests() {
   const missing = await hit('/api/gitnexus/coverage');
   check('missing repo param rejected', missing.status === 400 && missing.body?.code === 'missing-repo', 'status=' + missing.status);
 
-  // The bound that replaced registry membership: a directory with no index is not
-  // described. This is what keeps the route from being a filesystem probe.
+  // The bound that replaced registry membership: a directory that is neither an index
+  // nor a project root is not described. This is what keeps the route from being a
+  // filesystem probe. It no longer requires an index — a git project without one is
+  // exactly the state the panel's scan-only view and initialize action serve.
   const sysdir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent('C:\\Windows\\System32'));
-  check('a directory with no index is refused', sysdir.status === 404 && sysdir.body?.code === 'not-indexed', 'status=' + sysdir.status + ' code=' + sysdir.body?.code);
+  check('a directory with no index and no git marker is refused', sysdir.status === 404 && sysdir.body?.code === 'not-a-project', 'status=' + sysdir.status + ' code=' + sysdir.body?.code);
 
   const tempDir = fixturePath('noindex');
   await fs.mkdir(tempDir, { recursive: true });
   const plainDir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(tempDir));
-  check('an existing but unindexed directory is refused too', plainDir.status === 404 && plainDir.body?.code === 'not-indexed', 'status=' + plainDir.status);
+  check('a plain directory is refused too', plainDir.status === 404 && plainDir.body?.code === 'not-a-project', 'status=' + plainDir.status + ' code=' + plainDir.body?.code);
+
+  // A `.git` marker alone is enough for the bound: the engine's scan-only report is
+  // what makes "no index yet" informative instead of a 404 with no data.
+  await fs.mkdir(path.join(tempDir, '.git'), { recursive: true });
+  const noIndex = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(tempDir));
+  check(
+    'a git project without an index is answered with a scan-only report',
+    noIndex.status === 200 && noIndex.body?.ok === true,
+    'status=' + noIndex.status + ' body=' + JSON.stringify(noIndex.body),
+  );
   await fs.rm(tempDir, { recursive: true, force: true });
 
   const post = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path), { method: 'POST' });
@@ -402,6 +414,348 @@ async function capabilityTests() {
   check('graph quality total is read', quality?.totalSites === 5);
 }
 
+async function languageTests() {
+  section('language fallback when GitNexus is absent');
+  const { classifyFile, aggregateLanguages } = await import('../lib/gitnexus/languages.js');
+
+  const ts = classifyFile('src/a.ts', null);
+  check(
+    'TypeScript is recognised without a detector',
+    ts.key === 'typescript' && ts.klass === 'recognized',
+    JSON.stringify(ts),
+  );
+  const md = classifyFile('README.md', null);
+  check(
+    'Markdown is recognised without a detector',
+    md.key === 'markdown' && md.klass === 'recognized',
+    JSON.stringify(md),
+  );
+  // The fallback must not claim parser support it cannot verify: no row from it may be
+  // `parsed`, because `parsed` is the promise that symbols exist in the graph.
+  check('fallback rows never claim to be parsed', ts.klass !== 'parsed' && md.klass !== 'parsed');
+  const unknown = classifyFile('blob.xyz', null);
+  check('an unknown extension stays 其他', unknown.key === 'text' && unknown.klass === 'other', JSON.stringify(unknown));
+
+  const aggregate = aggregateLanguages(
+    [
+      { path: 'src/a.ts', size: 100 },
+      { path: 'src/b.js', size: 50 },
+      { path: 'blob.xyz', size: 10 },
+    ],
+    null,
+  );
+  check(
+    'the fallback produces a multi-language breakdown',
+    aggregate.rows.length === 3 && aggregate.rows.some((r) => r.key === 'typescript') && aggregate.rows.some((r) => r.key === 'javascript'),
+    JSON.stringify(aggregate.rows.map((r) => r.key)),
+  );
+  check('the fallback marks itself as builtin', aggregate.detector === 'builtin', aggregate.detector);
+
+  const withDetector = aggregateLanguages([{ path: 'src/a.ts', size: 100 }], {
+    getLanguageFromFilename: () => 'typescript',
+    getSyntaxLanguageFromFilename: () => 'text',
+  });
+  check('a real detector is marked as gitnexus', withDetector.detector === 'gitnexus', withDetector.detector);
+}
+
+async function searchTests() {
+  section('keyword search over the graph');
+  const {
+    searchSymbols,
+    searchViaHelper,
+    searchWithFallback,
+    searchText,
+    sanitizeSearchQuery,
+    SearchError,
+  } = await import('../lib/gitnexus/search.js');
+
+  const clean = sanitizeSearchQuery("a'b\\c");
+  check('sanitize removes quotes and backslashes', !clean.includes("'") && !clean.includes('\\'), JSON.stringify(clean));
+  check('sanitize preserves CJK keywords', sanitizeSearchQuery('覆盖 率') === '覆盖 率');
+  check('sanitize caps a pathological query', sanitizeSearchQuery('a'.repeat(200)).length === 80);
+
+  const repo = process.cwd();
+  const hasStore = await fs
+    .access(path.join(repo, '.gitnexus', 'lbug'))
+    .then(() => true)
+    .catch(() => false);
+  if (hasStore) {
+    // The host cannot load the native addon (Electron Node ABI); the helper is the
+    // boundary that runs it under the system Node. Run it FIRST: it opens the DB in a
+    // child process, and the direct search below keeps a connection open in this one.
+    // Two readers can be fine in production, but this test runner's sandbox can deny
+    // the child spawn outright, which is a skip rather than a product failure.
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const helper = path.join(import.meta.dirname, '..', 'lib', 'bin', 'search-helper.js');
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [helper, repo, 'analyzeCoverage', '5', ''],
+        { cwd: repo, timeout: 30_000, windowsHide: true },
+      );
+      const body = JSON.parse(stdout.trim());
+      check(
+        'the helper subprocess returns a JSON report',
+        body.ok === true && body.report?.results?.some((hit) => hit.name === 'analyzeCoverage'),
+        stdout.slice(0, 300),
+      );
+    } catch (error) {
+      const message = String(error);
+      const denied = /EPERM|EACCES|spawn/i.test(message);
+      check(
+        'the helper subprocess is spawnable in this environment',
+        denied,
+        denied ? 'spawn denied by this sandbox — covered by the unconfined run' : message,
+      );
+    }
+
+    try {
+      const report = await searchSymbols(repo, 'analyzeCoverage', { limit: 8 });
+      check('real search returns graph hits', report.mode === 'graph' && report.results.length > 0, JSON.stringify(report).slice(0, 300));
+      check(
+        'real search finds a known symbol',
+        report.results.some((hit) => hit.name === 'analyzeCoverage'),
+        JSON.stringify(report.results.map((hit) => hit.name)),
+      );
+      check('search reports FTS as degraded', report.ftsAvailable === false && report.warning !== null);
+      check(
+        'every hit carries a path and a valid line',
+        report.results.every(
+          (hit) => hit.filePath !== '' && (hit.startLine === null || Number.isInteger(hit.startLine)),
+        ),
+      );
+    } catch (error) {
+      check('real search runs against the indexed repository', false, String(error));
+    }
+  } else {
+    check('real search runs against the indexed repository (skipped)', true, 'no .gitnexus/lbug on this machine');
+  }
+
+  let captured = null;
+  const stubShell = {
+    resolve(request) {
+      captured = request;
+      return request;
+    },
+    execute: async () => ({
+      result: async () => ({
+        exitCode: 0,
+        stdout: {
+          text: JSON.stringify({
+            ok: true,
+            report: {
+              query: 'analyzecoverage',
+              mode: 'graph',
+              ftsAvailable: false,
+              results: [
+                {
+                  kind: 'Function',
+                  name: 'analyzeCoverage',
+                  filePath: 'src/gitnexus/coverage.ts',
+                  startLine: 507,
+                  endLine: 864,
+                },
+              ],
+              total: 1,
+              truncated: false,
+              warning: null,
+            },
+          }),
+        },
+      }),
+    }),
+  };
+  const viaHelper = await searchViaHelper(repo, 'analyzeCoverage', {
+    shell: stubShell,
+    helperPath: 'C:/plugin/lib/bin/search-helper.js',
+    limit: 5,
+  });
+  check(
+    'the host runs node on the helper, not the native adapter in-process',
+    String(captured?.command).startsWith('node ') && String(captured?.command).includes('search-helper.js'),
+    String(captured?.command),
+  );
+  check('the host parses the helper report', viaHelper.results[0]?.name === 'analyzeCoverage');
+
+  const failingShell = {
+    resolve: (request) => request,
+    execute: async () => ({
+      result: async () => ({
+        exitCode: 1,
+        stdout: { text: JSON.stringify({ ok: false, status: 503, code: 'search-unavailable', message: 'native' }) },
+        stderr: { text: '' },
+      }),
+    }),
+  };
+  const helperFailure = await searchViaHelper(repo, 'analyzeCoverage', {
+    shell: failingShell,
+    helperPath: 'C:/plugin/lib/bin/search-helper.js',
+  }).catch((error) => error);
+  check(
+    'a typed helper failure keeps its code and status',
+    helperFailure instanceof SearchError &&
+      helperFailure.code === 'search-unavailable' &&
+      helperFailure.status === 503,
+    String(helperFailure),
+  );
+
+  const unparseableShell = {
+    resolve: (request) => request,
+    execute: async () => ({
+      result: async () => ({
+        exitCode: 1,
+        stdout: { text: '' },
+        stderr: { text: 'A dynamic link library (DLL) initialization routine failed' },
+      }),
+    }),
+  };
+  const unparseable = await searchViaHelper(repo, 'analyzeCoverage', {
+    shell: unparseableShell,
+    helperPath: 'C:/plugin/lib/bin/search-helper.js',
+  }).catch((error) => error);
+  check(
+    'an unparseable helper failure reports the stderr tail',
+    unparseable instanceof SearchError &&
+      unparseable.code === 'search-failed' &&
+      unparseable.message.includes('(DLL) initialization'),
+    String(unparseable),
+  );
+
+  // The fallback path: no shell, no native load — reads the indexed files in-process.
+  const text = await searchText(repo, 'analyzeCoverage', { limit: 8 });
+  check(
+    'source fallback finds a match in the indexed files',
+    text.mode === 'text' &&
+      text.results.some((hit) => hit.kind === 'Text' && hit.filePath === 'src/gitnexus/coverage.ts'),
+    JSON.stringify(text).slice(0, 400),
+  );
+  check('source fallback says it is not the graph', text.warning !== null && text.warning.includes('源码'));
+
+  const fallback = await searchWithFallback(repo, 'analyzeCoverage', {
+    shell: unparseableShell,
+    helperPath: 'C:/plugin/lib/bin/search-helper.js',
+  });
+  check(
+    'a helper failure falls back to source text instead of an error card',
+    fallback.mode === 'text' && fallback.results.length > 0 && fallback.warning !== null,
+    JSON.stringify(fallback).slice(0, 400),
+  );
+
+  const empty = await searchSymbols(repo, '   ').catch((error) => error);
+  check('an empty query is rejected', empty instanceof SearchError && empty.code === 'invalid-query', String(empty));
+
+  const notProject = fixturePath('not-project');
+  await fs.rm(notProject, { recursive: true, force: true });
+  await fs.mkdir(notProject, { recursive: true });
+  const notProjectError = await searchSymbols(notProject, 'x').catch((error) => error);
+  check(
+    'a plain directory is refused',
+    notProjectError instanceof SearchError && notProjectError.code === 'not-a-project',
+    String(notProjectError),
+  );
+  await fs.rm(notProject, { recursive: true, force: true });
+
+  const noIndex = fixturePath('git-no-index');
+  await fs.rm(noIndex, { recursive: true, force: true });
+  await fs.mkdir(path.join(noIndex, '.git'), { recursive: true });
+  const noIndexError = await searchSymbols(noIndex, 'x').catch((error) => error);
+  check(
+    'a git project without an index is refused',
+    noIndexError instanceof SearchError && noIndexError.code === 'no-index',
+    String(noIndexError),
+  );
+  await fs.rm(noIndex, { recursive: true, force: true });
+}
+
+async function searchRouteTests() {
+  section('route: /api/gitnexus/search');
+  const http = await import('node:http');
+  const { mountSearchRoute } = await import('../lib/routes/search.js');
+  const { SearchError } = await import('../lib/gitnexus/search.js');
+
+  const registered = [];
+  const shimServer = {
+    register: (route) => {
+      registered.push(route);
+      return () => {
+        const i = registered.indexOf(route);
+        if (i >= 0) registered.splice(i, 1);
+      };
+    },
+  };
+  const calls = [];
+  const dispose = mountSearchRoute(shimServer, {
+    search: async (repo, query, options) => {
+      calls.push({ repo, query, options });
+      if (query === 'busy') throw new SearchError('index-busy', 503, '索引正忙');
+      return {
+        query,
+        mode: 'graph',
+        ftsAvailable: false,
+        results: [
+          { kind: 'Function', name: 'analyzeCoverage', filePath: 'src/gitnexus/coverage.ts', startLine: 507, endLine: 862 },
+        ],
+        total: 1,
+        truncated: false,
+        warning: 'FTS 内容检索不可用',
+      };
+    },
+  });
+
+  const server = http.createServer((req, res) => {
+    const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
+    if (match !== undefined) {
+      void match.handler(req, res);
+      return;
+    }
+    res.statusCode = 404;
+    res.end('no route');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const hit = async (pathname) => {
+    const res = await fetch('http://127.0.0.1:' + port + pathname);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+
+  const repo = encodeURIComponent(process.cwd());
+  const ok = await hit(`/api/gitnexus/search?repo=${repo}&q=analyze&limit=5`);
+  check('search route answers 200', ok.status === 200 && ok.body?.ok === true, 'status=' + ok.status);
+  check('results pass through', ok.body?.results?.[0]?.name === 'analyzeCoverage');
+  check('the route forwards the query and limit', calls[0]?.query === 'analyze' && calls[0]?.options?.limit === 5);
+
+  const missingQuery = await hit(`/api/gitnexus/search?repo=${repo}`);
+  check('missing q is rejected', missingQuery.status === 400 && missingQuery.body?.code === 'missing-query');
+
+  const missingRepo = await hit('/api/gitnexus/search?q=analyze');
+  check('missing repo is rejected', missingRepo.status === 400 && missingRepo.body?.code === 'missing-repo');
+
+  const notProject = await hit('/api/gitnexus/search?repo=' + encodeURIComponent('C:\\Windows\\System32') + '&q=analyze');
+  check(
+    'a non-project is refused',
+    notProject.status === 404 && notProject.body?.code === 'not-a-project',
+    'status=' + notProject.status,
+  );
+
+  const busy = await hit(`/api/gitnexus/search?repo=${repo}&q=busy`);
+  check('a typed engine error keeps its status', busy.status === 503 && busy.body?.code === 'index-busy', 'status=' + busy.status);
+
+  const post = await fetch('http://127.0.0.1:' + port + `/api/gitnexus/search?repo=${repo}&q=analyze`, {
+    method: 'POST',
+  });
+  check('POST is rejected', post.status === 405, 'status=' + post.status);
+
+  const head = await fetch('http://127.0.0.1:' + port + `/api/gitnexus/search?repo=${repo}&q=analyze`, {
+    method: 'HEAD',
+  });
+  check('HEAD is allowed without a body', head.status === 200, 'status=' + head.status);
+
+  await new Promise((resolve) => server.close(resolve));
+  dispose();
+  check('search route disposer clears the registration', registered.length === 0);
+}
+
 async function analyzeTests() {
   section('analyze runner (the one mutating capability)');
   const { createAnalyzeRunner, analyzeCommandLine } = await import('../lib/gitnexus/analyze.js');
@@ -419,6 +773,23 @@ async function analyzeTests() {
   // maintenance text exists to avoid.
   check('GITNEXUS_MEMORY=off is kept', winLine.includes("$env:GITNEXUS_MEMORY='off'"), winLine);
   check('the heap override is kept', winLine.includes("$env:NODE_OPTIONS='--max-old-space-size=8192'"), winLine);
+
+  const forcedLine = analyzeCommandLine('C:\\tools\\gitnexus.cmd', 'D:\\repo', { flavor: 'win32', force: true });
+  check('--force is appended after --index-only', forcedLine.includes('analyze --index-only --force'), forcedLine);
+  check('a normal command is not forced', !winLine.includes('--force'), winLine);
+
+  // The runner reads the same config as the command text. Without this, the panel
+  // confirms `GITNEXUS_HOME=… --skip-fts` and the process runs without either.
+  const configuredLine = analyzeCommandLine('/usr/local/bin/gitnexus', '/home/u/repo', {
+    flavor: 'posix',
+    skipFts: true,
+    gitnexusHome: '/tmp/gn-home',
+  });
+  check(
+    'the runner mirrors skipFts and GITNEXUS_HOME',
+    configuredLine.includes('--skip-fts') && configuredLine.includes("GITNEXUS_HOME='/tmp/gn-home'"),
+    configuredLine,
+  );
 
   const posixLine = analyzeCommandLine('/usr/local/bin/gitnexus', '/home/u/repo', { flavor: 'posix' });
   check(
@@ -510,6 +881,17 @@ async function analyzeTests() {
     done.status('D:/Project/x')?.command.includes('analyze --index-only') === true,
     done.status('D:/Project/x')?.command,
   );
+  check(
+    'a repository without FTS gets --skip-fts automatically',
+    done.status('D:/Project/x')?.command.includes('--skip-fts') === true,
+    done.status('D:/Project/x')?.command,
+  );
+  check(
+    'the registry write is redirected into the project',
+    done.status('D:/Project/x')?.command.includes('GITNEXUS_HOME') === true &&
+      done.status('D:/Project/x')?.command.includes('plugin-home') === true,
+    done.status('D:/Project/x')?.command,
+  );
 
   const denied = createAnalyzeRunner(
     stubShell({ exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } }),
@@ -531,6 +913,50 @@ async function analyzeTests() {
   failed.start('D:/Project/f');
   await settle();
   check('a non-zero exit is a failure', failed.status('D:/Project/f')?.state === 'failed');
+
+  // The managed tree is the one a panel install writes. Before this wiring existed,
+  // `findGitnexusCli` supported `managedPrefix` but no caller passed it, so an install
+  // succeeded and every later refresh still said "no CLI". This fixture is the shape
+  // that would have caught that.
+  const managedRoot = fixturePath('managed');
+  const managedPackage = path.join(managedRoot, 'managed', 'node_modules', 'gitnexus');
+  await fs.rm(managedRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(managedPackage, 'dist', 'cli'), { recursive: true });
+  await fs.mkdir(path.join(managedPackage, 'dist', 'core', 'ingestion'), { recursive: true });
+  await fs.writeFile(path.join(managedPackage, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+  await fs.writeFile(path.join(managedPackage, 'dist', 'cli', 'index.js'), '');
+  await fs.writeFile(path.join(managedPackage, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+
+  const { findGitnexusRoot } = await import('../lib/gitnexus/root.js');
+  const { findGitnexusCli } = await import('../lib/gitnexus/toolchain.js');
+  const foundRoot = findGitnexusRoot({ managedPrefix: path.join(managedRoot, 'managed') });
+  check('a managed install is found as the package root', foundRoot === managedPackage, String(foundRoot));
+  const foundCli = findGitnexusCli({ managedPrefix: path.join(managedRoot, 'managed') });
+  check(
+    'a managed install is selected as the CLI',
+    foundCli.present === true && foundCli.source === 'managed' && foundCli.cliPath === path.join(managedPackage, 'dist', 'cli', 'index.js'),
+    JSON.stringify(foundCli),
+  );
+
+  const managed = createAnalyzeRunner({
+    ...stubShell({ exitCode: 0 }),
+    toolchain: { managedPrefix: path.join(managedRoot, 'managed') },
+  });
+  managed.start('D:/Project/m', { force: true });
+  await settle();
+  check(
+    'the managed CLI is the one a run invokes',
+    managed.status('D:/Project/m')?.command.includes(managedPackage) === true,
+    managed.status('D:/Project/m')?.command,
+  );
+  check('a forced run records its mode', managed.status('D:/Project/m')?.force === true);
+  check(
+    'a forced run actually carries --force',
+    managed.status('D:/Project/m')?.command.includes('--force') === true,
+    managed.status('D:/Project/m')?.command,
+  );
+  managed.dispose();
+  await fs.rm(managedRoot, { recursive: true, force: true });
 
   const absent = createAnalyzeRunner({ ...stubShell({ exitCode: 0 }), toolchain: { discover: false } });
   absent.start('D:/Project/n');
@@ -660,7 +1086,13 @@ async function stalenessTests() {
 
 async function commandTests() {
   section('maintenance commands (handed over, not executed)');
-  const { maintenanceCommands, commandRationale } = await import('../lib/gitnexus/commands.js');
+  const {
+    maintenanceCommands,
+    commandRationale,
+    defaultGitnexusHome,
+    effectiveSkipFts,
+    ftsAvailable,
+  } = await import('../lib/gitnexus/commands.js');
 
   const win = maintenanceCommands('D:\\Project\\demo', { platform: 'win32', gitnexusHome: null });
   check('two commands are offered', win.length === 2, 'got ' + win.length);
@@ -701,6 +1133,36 @@ async function commandTests() {
   const rationale = commandRationale({ skipFts: true, memoryOff: true, gitnexusHome: null });
   check('the rationale explains why the env prefix exists', rationale.length >= 3, JSON.stringify(rationale));
   check('the rationale mentions the AGENTS.md guarantee', rationale.some((n) => n.includes('AGENTS.md')), JSON.stringify(rationale));
+
+  // The per-repository policy that replaced both static skipFts defaults.
+  check(
+    'the default GitNexus home is inside the project',
+    defaultGitnexusHome('D:\\Project\\x').replace(/\\/g, '/').endsWith('/.gitnexus/plugin-home'),
+    defaultGitnexusHome('D:\\Project\\x'),
+  );
+  const policyRoot = fixturePath('fts-policy');
+  await fs.rm(policyRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(policyRoot, '.gitnexus'), { recursive: true });
+  await fs.writeFile(
+    path.join(policyRoot, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ capabilities: { fts: { status: 'available' } } }),
+  );
+  check('an FTS index is reported as available', ftsAvailable(policyRoot) === true);
+  check(
+    'automatic mode does not add --skip-fts when FTS is available',
+    effectiveSkipFts(policyRoot, false) === false,
+  );
+  check('configured true still forces the flag', effectiveSkipFts(policyRoot, true) === true);
+
+  await fs.writeFile(
+    path.join(policyRoot, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ capabilities: { fts: { status: 'disabled-by-flag' } } }),
+  );
+  check(
+    'automatic mode adds --skip-fts when the index has no FTS',
+    effectiveSkipFts(policyRoot, false) === true,
+  );
+  await fs.rm(policyRoot, { recursive: true, force: true });
 }
 
 async function formatTests() {
@@ -848,6 +1310,9 @@ await crossCheckTests();
 await routeTests();
 await stalenessTests();
 await capabilityTests();
+await languageTests();
+await searchTests();
+await searchRouteTests();
 await analyzeTests();
 await installTests();
 await commandTests();

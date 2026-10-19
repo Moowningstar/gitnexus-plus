@@ -29,6 +29,7 @@
  */
 
 import path from 'node:path';
+import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
 
 /** Where a run got to. `unavailable` is decided before anything is spawned. */
@@ -47,6 +48,8 @@ export type AnalyzeState =
 export interface AnalyzeStatus {
   repoPath: string;
   state: AnalyzeState;
+  /** Whether this run was a full rebuild (`--force`). */
+  force: boolean;
   /** The command as run, so a failure can be reproduced by hand. */
   command: string;
   startedAt: number;
@@ -117,12 +120,28 @@ export interface AnalyzeRunnerOptions {
    */
   memoryOff?: boolean;
   heapMb?: number;
+  /**
+   * `true` forces `--skip-fts`. `false`/absent is **automatic**: the runner asks the
+   * index whether FTS exists and skips it when it does not. A static `false` was
+   * measured to fail with `spawn EPERM` on an index without FTS (the extension tries
+   * to install out-of-process), while a static `true` forces a full rebuild on one
+   * that has it.
+   */
+  skipFts?: boolean;
+  /** Override the redirect of the global registry write. */
+  gitnexusHome?: string | null;
   now?: () => number;
 }
 
 export interface AnalyzeRunner {
-  /** Begin a run, or report the one already in flight for this repository. */
-  start(repoPath: string): AnalyzeStatus;
+  /**
+   * Begin a run, or report the one already in flight for this repository.
+   *
+   * `force` selects a full rebuild. It is a request, not a second run: two analyze
+   * processes on one store contend, so a force request while an incremental run is
+   * in flight returns that run.
+   */
+  start(repoPath: string, options?: { force?: boolean }): AnalyzeStatus;
   status(repoPath: string): AnalyzeStatus | null;
   cancel(repoPath: string): boolean;
   /** Abort every in-flight run. Called on plugin teardown. */
@@ -169,7 +188,17 @@ function quoteFor(shell: 'win32' | 'posix', value: string): string {
 export function analyzeCommandLine(
   cliPath: string,
   repoPath: string,
-  options: { flavor?: 'win32' | 'posix'; memoryOff?: boolean; heapMb?: number; viaNode?: boolean } = {},
+  options: {
+    flavor?: 'win32' | 'posix';
+    memoryOff?: boolean;
+    heapMb?: number;
+    viaNode?: boolean;
+    /** Full rebuild. This is the destructive escape hatch; the button must say so. */
+    force?: boolean;
+    /** Must match `maintenanceCommands`; see the note on the runner option. */
+    skipFts?: boolean;
+    gitnexusHome?: string | null;
+  } = {},
 ): string {
   const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
   const memoryOff = options.memoryOff !== false;
@@ -179,19 +208,29 @@ export function analyzeCommandLine(
   // `.cmd`/`.ps1` selection, and therefore no reliance on the shell's call operator.
   const viaNode = options.viaNode === true;
 
-  const args = `analyze --index-only ${quoteFor(flavor, repoPath)}`;
+  const args =
+    `analyze --index-only` +
+    `${options.skipFts === true ? ' --skip-fts' : ''}` +
+    `${options.force === true ? ' --force' : ''} ` +
+    quoteFor(flavor, repoPath);
   const head = viaNode ? `node ${quoteFor(flavor, cliPath)}` : quoteFor(flavor, cliPath);
   // On Windows a `.cmd` or `.ps1` reached by absolute path needs `&`. POSIX needs none,
   // because an absolute path in command position is already a command.
   const invocation = viaNode || flavor !== 'win32' ? `${head} ${args}` : `& ${head} ${args}`;
   const heap = quoteFor(flavor, `--max-old-space-size=${heapMb}`);
+  const home =
+    typeof options.gitnexusHome === 'string' && options.gitnexusHome !== ''
+      ? quoteFor(flavor, options.gitnexusHome)
+      : null;
 
   if (flavor === 'win32') {
     const prefix = memoryOff ? `$env:GITNEXUS_MEMORY='off'; ` : '';
-    return `${prefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
+    const homePrefix = home === null ? '' : `$env:GITNEXUS_HOME=${home}; `;
+    return `${prefix}${homePrefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
   }
   const prefix = memoryOff ? `GITNEXUS_MEMORY='off' ` : '';
-  return `${prefix}NODE_OPTIONS=${heap} ${invocation}`;
+  const homePrefix = home === null ? '' : `GITNEXUS_HOME=${home} `;
+  return `${prefix}${homePrefix}NODE_OPTIONS=${heap} ${invocation}`;
 }
 
 /**
@@ -226,6 +265,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
   /** The shape a status starts from, before any run has touched it. */
   const BLANK: Omit<AnalyzeStatus, 'repoPath'> = {
     state: 'failed',
+    force: false,
     command: '',
     startedAt: 0,
     finishedAt: null,
@@ -250,8 +290,17 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     return next;
   };
 
-  const start = (repoPath: string): AnalyzeStatus => {
+  const start = (repoPath: string, request: { force?: boolean } = {}): AnalyzeStatus => {
     const key = path.resolve(repoPath);
+    // Named `request`, not `options`: the runner's own configuration is the outer
+    // `options`, and shadowing it silently dropped `toolchain`, `memoryOff` and
+    // `heapMb` from every run built after the force argument was added.
+    const force = request.force === true;
+    // Both decisions are per repository, not per plugin: the skip-fts policy depends
+    // on the index's own FTS capability, and the registry redirect belongs beside the
+    // index so it stays inside the workspace the host was granted.
+    const skipFts = effectiveSkipFts(key, options.skipFts === true);
+    const gitnexusHome = options.gitnexusHome ?? defaultGitnexusHome(key);
 
     // One run per repository. Two concurrent `analyze` processes would contend for the
     // same store, and the second would report a failure that says nothing about the
@@ -262,7 +311,8 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     if (shell === null) {
       return finish(key, {
         state: 'unavailable',
-        command: 'gitnexus analyze --index-only',
+        force,
+        command: `gitnexus analyze --index-only${force ? ' --force' : ''}`,
         startedAt: now(),
         output: '',
         message:
@@ -278,7 +328,8 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     if (!cli.present) {
       return finish(key, {
         state: 'unavailable',
-        command: 'gitnexus analyze --index-only',
+        force,
+        command: `gitnexus analyze --index-only${force ? ' --force' : ''}`,
         startedAt: now(),
         output: '',
         message:
@@ -295,6 +346,9 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       memoryOff: options.memoryOff,
       heapMb: options.heapMb,
       viaNode: cli.viaNode,
+      force,
+      skipFts,
+      gitnexusHome,
     });
 
     const controller = new AbortController();
@@ -302,6 +356,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     const started: AnalyzeStatus = {
       repoPath: key,
       state: 'running',
+      force,
       command,
       startedAt: now(),
       finishedAt: null,
