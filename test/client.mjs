@@ -759,6 +759,18 @@ check(
   loadingView.text.slice(0, 300),
 );
 
+const numericLoadingView = render(I.CoverageView, {
+  report: null,
+  ...viewProps,
+  busy: true,
+  progress: { percent: 42, label: '扫描文件 12/30' },
+});
+check(
+  'host progress is rendered as a number and a phase',
+  numericLoadingView.text.includes('42%') && numericLoadingView.text.includes('扫描文件 12/30'),
+  numericLoadingView.text.slice(0, 300),
+);
+
 const refreshingView = render(I.CoverageView, {
   report,
   ...viewProps,

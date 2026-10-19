@@ -482,6 +482,19 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+/** A real phase of the coverage read, reported while the work is still running. */
+export type CoveragePhase = 'manifest' | 'git' | 'scan' | 'large-files' | 'assemble';
+
+/** One numeric progress event. `current`/`total` are real counts where they exist. */
+export interface CoverageProgress {
+  phase: CoveragePhase;
+  /** 0–100, based on completed phases and the real scan/probe counters. */
+  percent: number;
+  label: string;
+  current?: number;
+  total?: number;
+}
+
 /** Options for {@link analyzeCoverage}. */
 export interface AnalyzeOptions {
   /** Environment to read GitNexus settings from. Defaults to `process.env`. */
@@ -498,6 +511,11 @@ export interface AnalyzeOptions {
   minifiedSampleLimit?: number;
   /** Where the plugin installs GitNexus, so the probe finds that copy too. */
   toolchain?: { managedPrefix?: string };
+  /**
+   * Receives real phase/count updates while the report is being built. A thrown
+   * callback is ignored: progress is observability, not a reason to fail the read.
+   */
+  onProgress?: (progress: CoverageProgress) => void;
 }
 
 /**
@@ -511,32 +529,75 @@ export async function analyzeCoverage(
 ): Promise<CoverageReport> {
   const env = options.env ?? process.env;
   const absRepo = path.resolve(repoPath);
+  const emit = (progress: CoverageProgress): void => {
+    try {
+      options.onProgress?.(progress);
+    } catch {
+      // Observability must never be able to fail the report it observes.
+    }
+  };
 
   const managedPrefix = options.toolchain?.managedPrefix;
+  emit({ phase: 'manifest', percent: 2, label: '读取索引清单…' });
   const [meta, registryEntry, detector] = await Promise.all([
     readIndexMeta(absRepo),
     findRegistryEntry(absRepo, { env }),
     loadLanguageDetector({ env, managedPrefix }),
   ]);
+  emit({ phase: 'manifest', percent: 10, label: '索引清单已读取' });
 
   // Read after the manifest, because classifying staleness needs the indexed commit.
+  emit({ phase: 'git', percent: 12, label: '读取 Git 状态…' });
   const git = await readGitState(absRepo, meta?.lastCommit ?? null);
   const staleness = classifyStaleness({ lastCommit: meta?.lastCommit ?? null, git });
+  emit({ phase: 'git', percent: 16, label: 'Git 状态已读取' });
 
   // When the index recorded the cap it was built under, judge it by that cap —
   // not by today's default, which would report files as "skipped" that the index
   // in fact covers.
+  emit({ phase: 'scan', percent: 18, label: '扫描工作区…' });
+  let lastScanPercent = -1;
+  let lastScanAt = 0;
   const scan = await scanRepository(absRepo, {
     env,
     capBytes: meta?.coverageMaxFileSizeBytes ?? undefined,
     managedPrefix,
+    onProgress: (done, total) => {
+      const percent = 18 + Math.round((done / Math.max(total, 1)) * 42);
+      const at = Date.now();
+      if (done < total && percent === lastScanPercent && at - lastScanAt < 120) return;
+      lastScanPercent = percent;
+      lastScanAt = at;
+      emit({
+        phase: 'scan',
+        percent,
+        label: `扫描文件 ${done}/${total}`,
+        current: done,
+        total,
+      });
+    },
+  });
+  emit({
+    phase: 'scan',
+    percent: 60,
+    label: `扫描完成：${scan.scannedCount} 个文件`,
+    current: scan.scannedCount,
+    total: scan.scannedCount,
   });
 
   const largeFiles: LargeFile[] = [];
   const minifiedBudget = options.minifiedSampleLimit ?? 40;
   let minifiedProbes = 0;
 
-  for (const file of scan.large) {
+  emit({
+    phase: 'large-files',
+    percent: 62,
+    label: scan.large.length === 0 ? '没有超大文件' : `检查超大文件 0/${scan.large.length}`,
+    current: 0,
+    total: scan.large.length,
+  });
+  for (let index = 0; index < scan.large.length; index += 1) {
+    const file = scan.large[index];
     const lang = classifyFile(file.path, detector);
     /** @type {FileShape | null} */
     let minified = null;
@@ -558,6 +619,13 @@ export async function analyzeCoverage(
       // documented contract and no code path ever assigned it.
       shareOfScanned: 0,
       shareOfLanguage: 0,
+    });
+    emit({
+      phase: 'large-files',
+      percent: 62 + Math.round(((index + 1) / Math.max(scan.large.length, 1)) * 28),
+      label: `检查超大文件 ${index + 1}/${scan.large.length}`,
+      current: index + 1,
+      total: scan.large.length,
     });
   }
 
@@ -718,6 +786,7 @@ export async function analyzeCoverage(
   // Git activity, crossed with both sets so each touched file gets a three-way
   // verdict rather than a bare "in the index / not in the index". Both sets are
   // already computed above, so this costs one git call and no extra filesystem work.
+  emit({ phase: 'assemble', percent: 90, label: '汇总 Git 活动与报告…' });
   const activity =
     options.includeActivity === false
       ? null
@@ -755,6 +824,7 @@ export async function analyzeCoverage(
     });
   }
 
+  emit({ phase: 'assemble', percent: 99, label: '报告已汇总' });
   return {
     repo: {
       path: absRepo,

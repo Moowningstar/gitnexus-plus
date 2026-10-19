@@ -102,7 +102,11 @@ function redundantDeclarations(entries: ScannedFile[], selectedPaths: string[]):
  * Unreadable files are skipped rather than failing the scan: a file that
  * disappears mid-scan is normal, not an error.
  */
-async function statAll(repoPath: string, relativePaths: string[]): Promise<ScannedFile[]> {
+async function statAll(
+  repoPath: string,
+  relativePaths: string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<ScannedFile[]> {
   const out: ScannedFile[] = [];
   for (let i = 0; i < relativePaths.length; i += STAT_CONCURRENCY) {
     const batch = relativePaths.slice(i, i + STAT_CONCURRENCY);
@@ -115,6 +119,7 @@ async function statAll(repoPath: string, relativePaths: string[]): Promise<Scann
     for (const result of settled) {
       if (result.status === 'fulfilled') out.push(result.value);
     }
+    onProgress?.(Math.min(i + batch.length, relativePaths.length), relativePaths.length);
   }
   return out;
 }
@@ -133,6 +138,8 @@ export async function scanRepository(
     env?: NodeJS.ProcessEnv;
     primitives?: ScanPrimitives | null;
     managedPrefix?: string;
+    /** Called after each stat batch with the number of files examined. */
+    onProgress?: (done: number, total: number) => void;
   } = {},
 ): Promise<ScanReport> {
   const env = options.env ?? process.env;
@@ -174,7 +181,7 @@ export async function scanRepository(
     matched = await fallbackWalk(repoPath);
   }
 
-  const scanned = await statAll(repoPath, matched);
+  const scanned = await statAll(repoPath, matched, options.onProgress);
   scanned.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
   const large: ScannedFile[] = [];

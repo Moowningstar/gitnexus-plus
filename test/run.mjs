@@ -303,6 +303,13 @@ async function routeTests() {
   const dispose = mountCoverageRoute(shimServer, {
     get: async (repoPath, options) => {
       freshnessRequests.push(options?.fresh === true);
+      options?.onProgress?.({
+        phase: 'scan',
+        percent: 42,
+        label: '扫描文件 1/2',
+        current: 1,
+        total: 2,
+      });
       return { stub: true, repoPath, totals: { large: 0 } };
     },
     maintenance: (repoPath) => ({ commands: [{ mode: 'init', shell: "gitnexus analyze '" + repoPath + "'" }], rationale: [] }),
@@ -341,6 +348,33 @@ async function routeTests() {
     'the response carries when it was read',
     typeof refreshed.body?.readAt === 'string' && !Number.isNaN(Date.parse(refreshed.body.readAt)),
     String(refreshed.body?.readAt),
+  );
+
+  // The numeric-progress channel: NDJSON lines, a real progress event forwarded from
+  // the engine, and one final report object. Plain JSON callers keep the old path.
+  const streamRes = await fetch(
+    'http://127.0.0.1:' + port + '/api/gitnexus/coverage?repo=' +
+      encodeURIComponent(known.path) + '&stream=1',
+  );
+  const streamType = streamRes.headers.get('content-type') ?? '';
+  const streamLines = (await streamRes.text())
+    .trim()
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+  check('stream answers ndjson', streamType.includes('application/x-ndjson'), streamType);
+  check(
+    'stream forwards a real numeric progress event',
+    streamLines.some(
+      (line) => line.type === 'progress' && line.percent === 42 && line.current === 1,
+    ),
+    JSON.stringify(streamLines.slice(0, 3)),
+  );
+  check(
+    'stream ends with the report object',
+    streamLines[streamLines.length - 1]?.type === 'report' &&
+      streamLines[streamLines.length - 1]?.report?.stub === true,
+    JSON.stringify(streamLines.slice(-1)),
   );
 
   const missing = await hit('/api/gitnexus/coverage');
@@ -1311,6 +1345,34 @@ async function realRepoSmoke() {
   check('every language row has a class', report.languages.rows.every((r) => ['parsed', 'recognized', 'other'].includes(r.klass)));
   check('cap came from the index record', report.cap.source === 'index', `source=${report.cap.source}`);
   check('completes under 3s', elapsed < 3000, `${elapsed}ms`);
+
+  // Progress is real work, not a timer: the scan event carries the actual file
+  // counter, and every event's percentage is monotonic up to the final assembly.
+  const progressEvents = [];
+  await analyzeCoverage(repo, {
+    includeActivity: false,
+    onProgress: (event) => progressEvents.push(event),
+  });
+  check(
+    'progress reports the real scan counter',
+    progressEvents.some(
+      (event) => event.phase === 'scan' && event.total > 0 && event.current === event.total,
+    ),
+    JSON.stringify(progressEvents.slice(0, 6)),
+  );
+  check(
+    'progress percentages never go backwards',
+    progressEvents.every(
+      (event, index) => index === 0 || event.percent >= progressEvents[index - 1].percent,
+    ),
+    JSON.stringify(progressEvents),
+  );
+  check(
+    'progress ends at the assembly phase',
+    progressEvents[progressEvents.length - 1]?.phase === 'assemble' &&
+      progressEvents[progressEvents.length - 1]?.percent === 99,
+    JSON.stringify(progressEvents.slice(-2)),
+  );
   console.log(
     `      ${report.languages.rows.length} languages, ${report.totals.selected} selected, ` +
       `${report.totals.large} large, ${formatBytes(report.languages.totalBytes)} total, ${elapsed}ms`,

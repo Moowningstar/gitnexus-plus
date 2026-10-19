@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { analyzeCoverage, type CoverageReport } from './gitnexus/coverage.js';
+import { analyzeCoverage, type CoverageProgress, type CoverageReport } from './gitnexus/coverage.js';
 import { formatReport } from './gitnexus/format.js';
 import {
   commandRationale,
@@ -194,7 +194,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
    * copy makes the control look broken —which is exactly how it was reported. A
    * background poll is the case the TTL exists for; a click is not.
    */
-  const coverageFor = async (repoPath: string, options: { fresh?: boolean } = {}): Promise<CoverageReport> => {
+  const coverageFor = async (
+    repoPath: string,
+    options: { fresh?: boolean; onProgress?: (progress: CoverageProgress) => void } = {},
+  ): Promise<CoverageReport> => {
     const key = String(repoPath);
     if (options.fresh !== true) {
       const hit = cache.get(key);
@@ -203,6 +206,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     const report = await analyzeCoverage(key, {
       minifiedSampleLimit: config.minifiedSampleLimit,
       toolchain: managedToolchain,
+      onProgress: options.onProgress,
     });
     cache.set(key, { at: Date.now(), report });
     return report;

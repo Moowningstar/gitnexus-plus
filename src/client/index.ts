@@ -2387,6 +2387,8 @@ interface CoverageViewProps {
   projectPath: string | null;
   context: ContextDiagnostic | null;
   busy: boolean;
+  /** Numeric progress from the host, or null before the first event/for an old host. */
+  progress?: LoadingProgress | null;
   error: string | null;
   /** When the report was read from the host, ISO. */
   readAt: string | null;
@@ -2420,7 +2422,27 @@ interface CoverageViewProps {
  * label is also the accessible value, so a screen reader gets the state, not just
  * a spinning rectangle.
  */
-function LoadingBar({ label }: { label: string }) {
+/** Real progress reported by the host while a read is in flight. */
+interface LoadingProgress {
+  /** 0–100, based on completed phases and real scan/probe counters. */
+  percent: number;
+  /** The phase or file counter the host is currently in. */
+  label: string;
+}
+
+/** The final NDJSON object from the streaming coverage route. */
+interface StreamReportPayload {
+  report: ClientReport;
+  maintenance: ClientMaintenance | null;
+  readAt: string | null;
+}
+
+function LoadingBar({ label, percent }: { label: string; percent?: number | null }) {
+  const value =
+    percent === null || percent === undefined
+      ? undefined
+      : Math.max(0, Math.min(100, Math.round(percent)));
+  const text = value === undefined ? label : `${label} · ${value}%`;
   return h(
     'div',
     {
@@ -2432,8 +2454,11 @@ function LoadingBar({ label }: { label: string }) {
       },
     },
     h('progress', {
+      value,
+      max: 100,
       'aria-label': label,
-      'aria-valuetext': label,
+      'aria-valuetext': text,
+      'aria-valuenow': value,
       style: {
         width: '100%',
         height: '4px',
@@ -2445,7 +2470,7 @@ function LoadingBar({ label }: { label: string }) {
         color: 'var(--dsw-alias-brand-primary, #4f8cff)',
       },
     }),
-    h('div', { style: { ...MUTED, fontSize: '10px' } }, label),
+    h('div', { style: { ...MUTED, fontSize: '10px' } }, text),
   );
 }
 
@@ -2455,6 +2480,7 @@ function CoverageView({
   projectPath,
   context,
   busy,
+  progress,
   error,
   readAt,
   run,
@@ -2506,12 +2532,15 @@ function CoverageView({
 
   // A report already on screen stays readable while a manual refresh runs; the bar
   // rides above it. Before the first report exists, the bar is the whole body.
-  const progress =
-    report === null
-      ? h(LoadingBar, { label: '正在读取索引…' })
-      : busy
-        ? h(LoadingBar, { label: '正在刷新索引…' })
-        : null;
+  // `percent` is null when the host does not stream (old host, or a cached read):
+  // the native progress element is then indeterminate, not a made-up number.
+  const progressBar =
+    report === null || busy
+      ? h(LoadingBar, {
+          label: progress?.label ?? (report === null ? '正在读取索引…' : '正在刷新索引…'),
+          percent: progress?.percent ?? null,
+        })
+      : null;
 
   // "I cannot tell which project this is" and "this project has no index" are
   // different facts, and the first revision conflated them: an unresolved project
@@ -2568,7 +2597,7 @@ function CoverageView({
   }
 
   if (report === null) {
-    return h('div', { style: styles.root }, header, progress);
+    return h('div', { style: styles.root }, header, progressBar);
   }
 
   // Defaults are resolved before the no-index branch: a scan-only report still has
@@ -2593,7 +2622,7 @@ function CoverageView({
       'div',
       { style: styles.root },
       h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
-      progress,
+      progressBar,
       h(ToolchainNotice, {
         toolchain: report.toolchain,
         run: installRun,
@@ -2656,7 +2685,7 @@ function CoverageView({
     // The header and the two status lines span everything: they describe the whole
     // panel, so giving them a column would make them look like one card's heading.
     h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
-    progress,
+    progressBar,
 
     // Immediately after the header, before any index content. If GitNexus is missing,
     // that single fact explains everything the panel is about to show or fail to show,
@@ -2936,6 +2965,7 @@ function CoveragePanel(props: SlotProps) {
   const [maintenance, setMaintenance] = React.useState<ClientMaintenance | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [progress, setProgress] = React.useState<LoadingProgress | null>(null);
   const [reloadToken, setReloadToken] = React.useState(0);
   // When the report on screen was read. Without it a refresh of an unchanged
   // repository produces a byte-identical panel, so the control looks inert even
@@ -3274,31 +3304,114 @@ function CoveragePanel(props: SlotProps) {
     const controller = new AbortController();
     setBusy(true);
     setError(null);
+    setProgress({ percent: 0, label: '连接索引服务…' });
     const query =
-      `/api/gitnexus/coverage?repo=${encodeURIComponent(projectPath)}` + (wantsFresh ? '&refresh=1' : '');
-    fetch(routeUrl(query), {
-      signal: controller.signal,
-    })
-      .then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
-      .then(({ status, body }) => {
+      `/api/gitnexus/coverage?repo=${encodeURIComponent(projectPath)}` +
+      (wantsFresh ? '&refresh=1' : '') +
+      '&stream=1';
+
+    const load = async (): Promise<void> => {
+      try {
+        const res = await fetch(routeUrl(query), { signal: controller.signal });
+        const contentType = res.headers.get('content-type') ?? '';
+        if (contentType.includes('application/x-ndjson') && res.body !== null) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          const reports: StreamReportPayload[] = [];
+          let buffer = '';
+          const consume = (line: string): void => {
+            if (line.trim() === '' || controller.signal.aborted) return;
+            let message: Record<string, unknown>;
+            try {
+              message = JSON.parse(line) as Record<string, unknown>;
+            } catch {
+              return;
+            }
+            if (message.type === 'progress') {
+              const raw = typeof message.percent === 'number' ? message.percent : 0;
+              const percent = Math.max(0, Math.min(100, Math.round(raw)));
+              const label = typeof message.label === 'string' ? message.label : '读取索引…';
+              setProgress({ percent, label });
+              return;
+            }
+            if (message.type === 'report') {
+              reports.push(message as unknown as StreamReportPayload);
+              return;
+            }
+            if (message.type === 'error') {
+              throw new Error(
+                typeof message.message === 'string' ? message.message : '读取索引失败。',
+              );
+            }
+          };
+
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            let newline = buffer.indexOf('\n');
+            while (newline >= 0) {
+              const line = buffer.slice(0, newline);
+              buffer = buffer.slice(newline + 1);
+              consume(line);
+              newline = buffer.indexOf('\n');
+            }
+          }
+          buffer += decoder.decode();
+          if (buffer.trim() !== '') consume(buffer);
+
+          const payload = reports[0];
+          if (payload === undefined) throw new Error('读取中断：没有收到完整报告。');
+          if (controller.signal.aborted) return;
+          setReport(payload.report);
+          setMaintenance(payload.maintenance ?? null);
+          setReadAt(
+            typeof payload.readAt === 'string' ? payload.readAt : new Date().toISOString(),
+          );
+          return;
+        }
+
+        // An older host ignores `stream=1` and answers plain JSON. Drop the numeric
+        // channel and let the native progress element go indeterminate rather than
+        // leaving a frozen 0%.
+        setProgress(null);
+        const body = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          code?: string;
+          message?: string;
+          report?: ClientReport;
+          maintenance?: ClientMaintenance | null;
+          readAt?: string;
+        } | null;
         // `not-indexed` is a state the panel renders, not a failure: the whole
         // point of leading with the initialize command is that reaching it is
         // expected on a project that has never been analysed.
-        if (status === 404 && body?.code === 'not-indexed') {
+        if (res.status === 404 && body?.code === 'not-indexed') {
           setReport({ repo: { indexed: false, path: projectPath } });
           setMaintenance(null);
           setReadAt(body?.readAt ?? new Date().toISOString());
           return;
         }
-        if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${status})`);
+        if (!body?.ok || body.report === undefined) {
+          throw new Error(body?.message ?? `请求失败 (${res.status})`);
+        }
         setReport(body.report);
         setMaintenance(body.maintenance ?? null);
         setReadAt(typeof body.readAt === 'string' ? body.readAt : new Date().toISOString());
-      })
-      .catch((cause) => {
-        if (cause?.name !== 'AbortError') setError(String(cause?.message ?? cause));
-      })
-      .finally(() => setBusy(false));
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        const error = cause as { name?: string; message?: string };
+        if (error?.name === 'AbortError') return;
+        setError(String(error?.message ?? cause));
+      } finally {
+        if (!controller.signal.aborted) {
+          setBusy(false);
+          setProgress(null);
+        }
+      }
+    };
+
+    void load();
     return () => controller.abort();
   }, [projectPath, reloadToken]);
 
@@ -3313,6 +3426,7 @@ function CoveragePanel(props: SlotProps) {
     projectPath,
     context: projectPath === null ? contextDiagnostic(props) : null,
     busy,
+    progress,
     error,
     readAt,
     run,

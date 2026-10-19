@@ -31,7 +31,7 @@ import path from 'node:path';
 import { isProjectRoot } from '../gitnexus/index-meta.js';
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
-import type { CoverageReport } from '../gitnexus/coverage.js';
+import type { CoverageProgress, CoverageReport } from '../gitnexus/coverage.js';
 import type { MaintenanceInfo } from '../index.js';
 
 /**
@@ -45,7 +45,10 @@ export interface CoverageRouteDeps {
    * `fresh` asks the engine to skip its short-lived cache. A manual refresh carries
    * it; a background poll does not, which is the case the cache exists for.
    */
-  get: (repoPath: string, options?: { fresh?: boolean }) => Promise<CoverageReport>;
+  get: (
+    repoPath: string,
+    options?: { fresh?: boolean; onProgress?: (progress: CoverageProgress) => void },
+  ) => Promise<CoverageReport>;
   maintenance?: (repoPath: string) => MaintenanceInfo;
 }
 
@@ -89,10 +92,61 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
     // `refresh=1` comes from the panel's manual refresh control. A background poll
     // omits it and gets the cached copy, which is what the TTL is for.
     const fresh = url.searchParams.get('refresh') === '1';
-    const report = await deps.get(absRepo, { fresh });
     // The maintenance commands ride along with the report because they are
     // config-derived and only meaningful next to the index they would rebuild.
     const maintenance = typeof deps.maintenance === 'function' ? deps.maintenance(absRepo) : null;
+
+    // `stream=1` is the panel's numeric-progress channel. NDJSON rather than SSE:
+    // one JSON object per line needs no event naming and falls back to plain JSON
+    // for any caller that does not ask for it.
+    if (url.searchParams.get('stream') === '1') {
+      const write = (payload: unknown): void => {
+        if (res.writableEnded) return;
+        try {
+          res.write(`${JSON.stringify(payload)}\n`);
+        } catch {
+          // The reader disconnected; the rest of the work is already in flight.
+        }
+      };
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('cache-control', 'no-store');
+      res.setHeader('x-content-type-options', 'nosniff');
+      res.setHeader('referrer-policy', 'no-referrer');
+      res.setHeader('x-accel-buffering', 'no');
+      res.flushHeaders();
+      try {
+        const report = await deps.get(absRepo, {
+          fresh,
+          onProgress: (progress) => write({ type: 'progress', ...progress }),
+        });
+        // The engine ends at 99%; the final boundary is the route having the whole
+        // report in hand, so 100 is emitted here rather than invented earlier.
+        write({
+          type: 'progress',
+          phase: 'assemble',
+          percent: 100,
+          label: '报告已读取',
+        });
+        write({
+          type: 'report',
+          report,
+          maintenance,
+          readAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        write({
+          type: 'error',
+          status: 500,
+          code: 'internal-error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      res.end();
+      return;
+    }
+
+    const report = await deps.get(absRepo, { fresh });
     // `readAt` is what makes a refresh visible: without it two reads of an unchanged
     // repository are byte-identical on screen, so the control looks inert even when
     // it did exactly what it was asked.
