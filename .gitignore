@@ -9,6 +9,13 @@ build/
 # state, not project state.
 node_modules/
 
+# Local-only documentation and logs. `.docs/` holds the design notes and the
+# release-notes drafts; `.logs/` holds test, typecheck and web-run output. Neither
+# is package content (`files` in package.json never includes them) and neither
+# belongs in the repository.
+.docs/
+.logs/
+
 # Local server logs from running the web profile against this checkout.
 web-out.txt
 web-err.txt

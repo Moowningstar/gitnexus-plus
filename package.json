@@ -38,6 +38,7 @@
     "scripts/link-runtime.mjs",
     "cordis.patch.yml",
     "README.md",
+    "README-CN.md",
     "LICENSE"
   ],
   "engines": {
