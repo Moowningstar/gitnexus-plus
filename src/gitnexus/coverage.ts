@@ -794,6 +794,9 @@ export async function analyzeCoverage(
           sinceDays: options.activitySinceDays ?? undefined,
           indexedPaths: Object.keys(meta?.fileHashes ?? {}),
           scannablePaths: scan.selected.map((f) => f.path),
+          // The manifest's commit is the only honest baseline: it says what the
+          // graph was built from, not what HEAD happened to be when the panel opened.
+          baselineRef: meta?.lastCommit ?? null,
         });
 
   if (activity !== null && activity.totals.verdicts.missing > 0) {

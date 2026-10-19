@@ -1345,6 +1345,39 @@ async function realRepoSmoke() {
   check('every language row has a class', report.languages.rows.every((r) => ['parsed', 'recognized', 'other'].includes(r.klass)));
   check('cap came from the index record', report.cap.source === 'index', `source=${report.cap.source}`);
   check('completes under 3s', elapsed < 3000, `${elapsed}ms`);
+  // `data-screen` can be an index without a usable git history; use this checkout,
+  // which has both the index and the commits the activity table needs.
+  const localReport = await analyzeCoverage(process.cwd(), {});
+  const localActivity = localReport.activity;
+  if (localActivity === null || localActivity === undefined) {
+    // The agent's test sandbox denies child processes, so `git` cannot be spawned
+    // here. The client fixture still asserts the rendering; the data path is
+    // exercised on a normal checkout.
+    check('activity data (skipped: git unavailable in this sandbox)', true);
+  } else {
+    check(
+      'activity exposes the three-way cross-tab',
+      Array.isArray(localActivity?.cross?.rows) && localActivity.cross.rows.length === 3,
+      JSON.stringify(localActivity?.cross),
+    );
+    if (localReport.repo?.lastCommit === null || localReport.repo?.lastCommit === undefined) {
+      check('baseline review (skipped: index has no recorded commit)', true);
+    } else {
+      check(
+        'activity reviews changes against the indexed commit',
+        localActivity?.baseline?.ref === localReport.repo.lastCommit &&
+          localActivity.baseline.available === true,
+        JSON.stringify(localActivity?.baseline),
+      );
+    }
+    check(
+      'activity exposes a commit timeline',
+      Array.isArray(localActivity?.timeline) &&
+        localActivity.timeline.length > 0 &&
+        typeof localActivity.timeline[0].subject === 'string',
+      JSON.stringify(localActivity?.timeline?.slice(0, 1)),
+    );
+  }
 
   // Progress is real work, not a timer: the scan event carries the actual file
   // counter, and every event's percentage is monotonic up to the final assembly.

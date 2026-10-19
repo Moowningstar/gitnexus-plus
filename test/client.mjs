@@ -735,6 +735,43 @@ const report = {
         { label: '2026-10-09', commits: 31, insertions: 900, deletions: 120 },
       ],
     },
+    cross: {
+      rows: [
+        { verdict: 'indexed', files: 91, changes: 210, insertions: 9000, deletions: 4000 },
+        { verdict: 'excluded', files: 60, changes: 80, insertions: 300, deletions: 200 },
+        { verdict: 'missing', files: 2, changes: 40, insertions: 120, deletions: 20 },
+      ],
+      totalFiles: 153,
+      totalChanges: 330,
+    },
+    baseline: {
+      ref: 'abc12345def67890',
+      available: true,
+      shortSha: 'abc12345',
+      date: '2026-10-01T00:00:00Z',
+      subject: 'baseline',
+      author: 'Ada',
+      commits: 4,
+      files: 3,
+      insertions: 120,
+      deletions: 30,
+      changedFiles: [
+        { path: 'src/fresh.ts', changes: 1, insertions: 50, deletions: 5, lastChange: '2026-10-01T00:00:00Z', indexed: false, verdict: 'missing' },
+      ],
+    },
+    timeline: [
+      {
+        sha: 'deadbeefcafebabe',
+        shortSha: 'deadbeef',
+        date: '2026-10-16T01:00:00Z',
+        author: 'Ada',
+        subject: 'Add fresh module',
+        files: 2,
+        insertions: 50,
+        deletions: 5,
+        verdict: 'missing',
+      },
+    ],
   },
 };
 
@@ -900,6 +937,23 @@ check(
 );
 check('renders the git activity section title', view.text.includes('Git 活动'), view.text.slice(0, 400));
 check('renders the git activity window in days', view.text.includes('近 90 天'));
+check(
+  'renders the activity × index cross-tab',
+  view.text.includes('活动 × 索引交叉对比') && view.text.includes('330 次变更'),
+  view.text.slice(-800),
+);
+check(
+  'renders the index baseline review',
+  view.text.includes('索引基线审查') && view.text.includes('abc12345') && view.text.includes('4 个提交'),
+  view.text.slice(-800),
+);
+check(
+  'renders the commit timeline',
+  view.text.includes('提交时间线') &&
+    view.text.includes('deadbeef') &&
+    view.text.includes('Add fresh module'),
+  view.text.slice(-800),
+);
 check('renders the three-way verdict labels', view.text.includes('已索引') && view.text.includes('索引缺失') && view.text.includes('有意排除'));
 check('renders a missing-file tag', view.text.includes('缺失'));
 check('renders the author list', view.text.includes('Ada') && view.text.includes('dependabot[bot]'));

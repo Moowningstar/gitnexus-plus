@@ -100,6 +100,50 @@ export interface ActivityBranch {
   current: boolean;
 }
 
+/** One commit in the activity window, with the index verdict of its touched files. */
+export interface ActivityCommit {
+  sha: string;
+  shortSha: string;
+  date: string;
+  author: string;
+  subject: string;
+  files: number;
+  insertions: number;
+  deletions: number;
+  verdict: FileVerdict;
+}
+
+/** One row of the activity × index cross-tab. */
+export interface ActivityCrossRow {
+  verdict: FileVerdict;
+  files: number;
+  changes: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface ActivityCross {
+  rows: ActivityCrossRow[];
+  totalFiles: number;
+  totalChanges: number;
+}
+
+/** What changed since the commit the index was built from. */
+export interface ActivityBaseline {
+  ref: string | null;
+  available: boolean;
+  shortSha: string | null;
+  date: string | null;
+  subject: string | null;
+  author: string | null;
+  commits: number;
+  files: number;
+  insertions: number;
+  deletions: number;
+  changedFiles: ActivityFile[];
+  reason: string | null;
+}
+
 export interface HistogramBucket {
   label: string;
   commits: number;
@@ -152,6 +196,12 @@ export interface ActivityInfo {
   branches: ActivityBranch[];
   histogram: ActivityHistogram;
   currentBranch: string | null;
+  /** Activity × index cross-tab over every file in the window. */
+  cross: ActivityCross;
+  /** Changes since the index's recorded commit, or null when there is no baseline. */
+  baseline: ActivityBaseline | null;
+  /** Newest commits first, capped; each carries its aggregate index verdict. */
+  timeline: ActivityCommit[];
 }
 
 export interface ReadGitActivityOptions {
@@ -162,10 +212,18 @@ export interface ReadGitActivityOptions {
   maxBranches?: number;
   indexedPaths?: Iterable<string>;
   scannablePaths?: Iterable<string>;
+  /** The index's recorded commit; when set, also review HEAD against it. */
+  baselineRef?: string | null;
 }
 
 /** A file row before it is crossed with the index, so no verdict exists yet. */
 type FileTally = Omit<ActivityFile, 'indexed' | 'verdict'>;
+
+/** A commit before its aggregate index verdict is known. */
+type CommitTally = Omit<ActivityCommit, 'files' | 'shortSha' | 'verdict'> & {
+  sha: string;
+  fileSet: Set<string>;
+};
 
 /** An author row before it is emitted: `bot` is decided at emit time. */
 type AuthorEntry = Omit<ActivityAuthor, 'bot'> & { fileSet: Set<string> };
@@ -297,6 +355,7 @@ export async function readGitActivity(
   const authors: ActivityAuthor[] = [];
   const files = new Map<string, FileTally>();
   const authorMap = new Map<string, AuthorEntry>();
+  const commits: CommitTally[] = [];
 
   let commitCount = 0;
   let totalInsertions = 0;
@@ -313,10 +372,19 @@ export async function readGitActivity(
     const body = newline === -1 ? '' : chunk.slice(newline + 1);
     // `split` yields a plain array, so a short header really can leave these
     // undefined even though the declared element type says otherwise.
-    const [sha, author, email, date, _subject]: (string | undefined)[] = header.split(US);
+    const [sha, author, email, date, subject]: (string | undefined)[] = header.split(US);
     if (sha === undefined || date === undefined) continue;
 
     commitCount += 1;
+    const commit: CommitTally = {
+      sha,
+      date,
+      author: author ?? '?',
+      subject: subject ?? '',
+      insertions: 0,
+      deletions: 0,
+      fileSet: new Set(),
+    };
     if (newestCommit === '' || date > newestCommit) newestCommit = date;
     if (oldestCommit === '' || date < oldestCommit) oldestCommit = date;
 
@@ -362,6 +430,9 @@ export async function readGitActivity(
       entry.insertions += ins;
       entry.deletions += del;
       entry.fileSet.add(filePath);
+      commit.insertions += ins;
+      commit.deletions += del;
+      commit.fileSet.add(filePath);
 
       let file = files.get(filePath);
       if (file === undefined) {
@@ -375,11 +446,116 @@ export async function readGitActivity(
     }
 
     stamps.push({ date, insertions: commitInsertions, deletions: commitDeletions });
+    commits.push(commit);
   }
 
   const toActivityFile = (file: FileTally): ActivityFile => {
     const verdict: FileVerdict = classified ? classify(file.path) : 'excluded';
     return { ...file, indexed: verdict === 'indexed', verdict };
+  };
+
+  /**
+   * `HEAD` against the commit the index was built from.
+   *
+   * Deliberately not part of the rolling window: the baseline can be older than
+   * 90 days and the question is still "what changed since we indexed?", so this uses
+   * a direct diff with its own bounded buffer rather than a wider log.
+   */
+  const readBaseline = async (ref: string): Promise<ActivityBaseline> => {
+    const short = ref.slice(0, 8);
+    const show = await git(repoPath, [
+      'show',
+      '-s',
+      `--format=%H${US}%aI${US}%an${US}%s`,
+      ref,
+    ]);
+    if (show === null) {
+      return {
+        ref,
+        available: false,
+        shortSha: short,
+        date: null,
+        subject: null,
+        author: null,
+        commits: 0,
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+        changedFiles: [],
+        reason: '索引记录的基线提交在当前仓库中不可读（可能被 rebase 或 force-push 丢弃）',
+      };
+    }
+    const [sha, date, author, subject]: (string | undefined)[] = show.trim().split(US);
+    const base = {
+      ref,
+      shortSha: (sha ?? ref).slice(0, 8),
+      date: date ?? null,
+      subject: subject ?? null,
+      author: author ?? null,
+    };
+
+    const diff = await git(repoPath, ['diff', '--numstat', '--no-renames', `${ref}..HEAD`]);
+    if (diff === null) {
+      return {
+        ...base,
+        available: false,
+        commits: 0,
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+        changedFiles: [],
+        reason: '基线提交可读，但 diff 超出上限或失败',
+      };
+    }
+
+    const changed = new Map<string, { insertions: number; deletions: number }>();
+    let insertions = 0;
+    let deletions = 0;
+    for (const line of diff.split('\n')) {
+      if (line.trim() === '') continue;
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const [addedRaw, deletedRaw, ...pathParts] = parts;
+      const filePath = pathParts.join('\t');
+      if (filePath === '') continue;
+      const added = Number.parseInt(addedRaw, 10);
+      const deleted = Number.parseInt(deletedRaw, 10);
+      const ins = Number.isFinite(added) ? added : 0;
+      const del = Number.isFinite(deleted) ? deleted : 0;
+      insertions += ins;
+      deletions += del;
+      changed.set(filePath, { insertions: ins, deletions: del });
+    }
+
+    const countRaw = await git(repoPath, ['rev-list', '--count', `${ref}..HEAD`]);
+    const commitCount = countRaw === null ? 0 : Number.parseInt(countRaw.trim(), 10);
+
+    const changedFiles: ActivityFile[] = [...changed.entries()]
+      .sort((a, b) => b[1].insertions + b[1].deletions - (a[1].insertions + a[1].deletions))
+      .slice(0, 50)
+      .map(([filePath, delta]) => {
+        const verdict: FileVerdict = classified ? classify(filePath) : 'excluded';
+        return {
+          path: filePath,
+          changes: 1,
+          insertions: delta.insertions,
+          deletions: delta.deletions,
+          lastChange: base.date ?? '',
+          indexed: verdict === 'indexed',
+          verdict,
+        };
+      });
+
+    return {
+      ...base,
+      available: true,
+      commits: Number.isFinite(commitCount) ? commitCount : 0,
+      files: changed.size,
+      insertions,
+      deletions,
+      changedFiles,
+      reason: null,
+    };
   };
 
   const byChanges = [...files.values()]
@@ -441,6 +617,56 @@ export async function readGitActivity(
     .slice(0, 50)
     .map(toActivityFile);
 
+  // The cross-tab keeps the three-way verdict and adds the volume that made each
+  // row matter: a "missing" file changed once is different from 40 commits.
+  const crossRows: ActivityCrossRow[] = (['indexed', 'excluded', 'missing'] as const).map(
+    (verdict) => ({
+      verdict,
+      files: 0,
+      changes: 0,
+      insertions: 0,
+      deletions: 0,
+    }),
+  );
+  const crossByVerdict = new Map(crossRows.map((row) => [row.verdict, row]));
+  let totalChanges = 0;
+  for (const file of files.values()) {
+    const verdict: FileVerdict = classified ? classify(file.path) : 'excluded';
+    const row = crossByVerdict.get(verdict);
+    if (row === undefined) continue;
+    row.files += 1;
+    row.changes += file.changes;
+    row.insertions += file.insertions;
+    row.deletions += file.deletions;
+    totalChanges += file.changes;
+  }
+  const cross: ActivityCross = { rows: crossRows, totalFiles: files.size, totalChanges };
+
+  const timeline: ActivityCommit[] = commits.slice(0, 50).map((commit) => {
+    let anyMissing = false;
+    let anyIndexed = false;
+    for (const path of commit.fileSet) {
+      if (!classified) continue;
+      const verdict = classify(path);
+      if (verdict === 'missing') anyMissing = true;
+      else if (verdict === 'indexed') anyIndexed = true;
+    }
+    return {
+      sha: commit.sha,
+      shortSha: commit.sha.slice(0, 8),
+      date: commit.date,
+      author: commit.author,
+      subject: commit.subject,
+      files: commit.fileSet.size,
+      insertions: commit.insertions,
+      deletions: commit.deletions,
+      verdict: anyMissing ? 'missing' : anyIndexed ? 'indexed' : 'excluded',
+    };
+  });
+
+  const baselineRef = typeof options.baselineRef === 'string' ? options.baselineRef.trim() : '';
+  const baseline = baselineRef === '' ? null : await readBaseline(baselineRef);
+
   return {
     window: {
       sinceDays,
@@ -474,5 +700,8 @@ export async function readGitActivity(
     branches,
     histogram: buildHistogram(stamps, sinceDays),
     currentBranch: branches.find((b) => b.current)?.name ?? null,
+    cross,
+    baseline,
+    timeline,
   };
 }

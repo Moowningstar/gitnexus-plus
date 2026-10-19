@@ -190,6 +190,44 @@ interface ClientActivityFile {
   verdict: string;
 }
 
+/** One commit in the activity timeline. */
+interface ClientActivityCommit {
+  sha: string;
+  shortSha?: string;
+  date: string;
+  author: string;
+  subject: string;
+  files: number;
+  insertions: number;
+  deletions: number;
+  verdict: string;
+}
+
+/** One activity × index cross-tab row. */
+interface ClientActivityCrossRow {
+  verdict: string;
+  files: number;
+  changes: number;
+  insertions: number;
+  deletions: number;
+}
+
+/** Changes since the index's recorded baseline. */
+interface ClientActivityBaseline {
+  ref?: string | null;
+  available?: boolean;
+  shortSha?: string | null;
+  date?: string | null;
+  subject?: string | null;
+  author?: string | null;
+  commits?: number;
+  files?: number;
+  insertions?: number;
+  deletions?: number;
+  changedFiles?: ClientActivityFile[];
+  reason?: string | null;
+}
+
 /** Recent git activity, crossed with the index. */
 interface ClientActivity {
   window?: { sinceDays?: number; truncated?: boolean };
@@ -209,6 +247,9 @@ interface ClientActivity {
   missingFiles?: ClientActivityFile[];
   branches?: Array<{ name: string; current?: boolean; lastCommitDate?: string | null }>;
   histogram?: { bucketDays: number; buckets: HistogramBucketLike[] } | null;
+  cross?: { rows?: ClientActivityCrossRow[]; totalFiles?: number; totalChanges?: number };
+  baseline?: ClientActivityBaseline | null;
+  timeline?: ClientActivityCommit[];
 }
 
 /** Coverage differences between a fresh scan and the index. */
@@ -1510,6 +1551,193 @@ function ActivityFileRow({ file }: { file: ClientActivityFile }) {
   );
 }
 
+/** Shared labels/tones for the three activity verdicts. */
+function activityVerdict(verdict: string): { label: string; tone: 'solid' | 'outline' | 'neutral'; dot: DotState } {
+  if (verdict === 'indexed') return { label: '已索引', tone: 'solid', dot: 'done' };
+  if (verdict === 'missing') return { label: '索引缺失', tone: 'outline', dot: 'warning' };
+  return { label: '设计排除', tone: 'neutral', dot: 'idle' };
+}
+
+/**
+ * The three-way verdict with the volume behind it.
+ *
+ * The old UI had counts only, which made "2 missing" look as urgent as "2 excluded"
+ * even when the missing files accounted for 40 commits. This table adds the volume
+ * without changing the verdict definition.
+ */
+function ActivityCrossTable({ cross }: { cross: NonNullable<ClientActivity['cross']> }) {
+  const rows = Array.isArray(cross.rows) ? cross.rows : [];
+  if (rows.length === 0) return null;
+  const cell = { padding: '3px 0', textAlign: 'right' as const };
+  return h(
+    'div',
+    null,
+    h(
+      'div',
+      { style: { ...MUTED, marginBottom: '4px' } },
+      `活动 × 索引交叉对比 · ${compactNumber(cross.totalFiles ?? 0)} 文件 / ` +
+        `${compactNumber(cross.totalChanges ?? 0)} 次变更`,
+    ),
+    h(
+      'div',
+      {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.5fr) repeat(4, minmax(0, 0.65fr))',
+          gap: '4px',
+          alignItems: 'center',
+          fontSize: '10px',
+        },
+      },
+      h('span', { style: MUTED }, '分类'),
+      h('span', { style: { ...MUTED, ...cell } }, '文件'),
+      h('span', { style: { ...MUTED, ...cell } }, '变更'),
+      h('span', { style: { ...MUTED, ...cell } }, '+行'),
+      h('span', { style: { ...MUTED, ...cell } }, '−行'),
+      rows.map((row) => {
+        const verdict = activityVerdict(row.verdict);
+        return [
+          h(
+            'span',
+            { key: `${row.verdict}-label`, style: { display: 'flex', alignItems: 'center', gap: '5px' } },
+            h(StateDot, { state: verdict.dot }),
+            verdict.label,
+          ),
+          h('span', { key: `${row.verdict}-files`, style: cell }, compactNumber(row.files)),
+          h('span', { key: `${row.verdict}-changes`, style: cell }, compactNumber(row.changes)),
+          h('span', { key: `${row.verdict}-ins`, style: cell }, `+${compactNumber(row.insertions)}`),
+          h('span', { key: `${row.verdict}-del`, style: cell }, `−${compactNumber(row.deletions)}`),
+        ];
+      }),
+    ),
+  );
+}
+
+/** HEAD against the commit the index was built from. */
+function ActivityBaseline({ baseline }: { baseline: ClientActivityBaseline }) {
+  const changedFiles = Array.isArray(baseline.changedFiles) ? baseline.changedFiles : [];
+  const short = baseline.shortSha ?? baseline.ref?.slice(0, 8) ?? '未知';
+  const date = typeof baseline.date === 'string' ? baseline.date.slice(0, 10) : '';
+  return h(
+    'div',
+    null,
+    h(
+      'div',
+      { style: { ...MUTED, marginBottom: '4px' } },
+      `索引基线审查 · ${short}${date === '' ? '' : ` · ${date}`}`,
+    ),
+    baseline.available === false
+      ? h(
+          'div',
+          { style: { display: 'flex', gap: '6px', alignItems: 'flex-start' } },
+          h(StateDot, { state: 'warning' }),
+          h('span', null, baseline.reason ?? '基线提交不可读'),
+        )
+      : h(
+          'div',
+          { style: { ...MUTED } },
+          (baseline.commits ?? 0) === 0 && (baseline.files ?? 0) === 0
+            ? '工作区与索引基线一致，没有新增变更。'
+            : `自基线以来 ${compactNumber(baseline.commits ?? 0)} 个提交 · ` +
+              `${compactNumber(baseline.files ?? 0)} 个文件 · ` +
+              `+${compactNumber(baseline.insertions ?? 0)} / −${compactNumber(baseline.deletions ?? 0)}`,
+        ),
+    changedFiles.length > 0
+      ? h(
+          'div',
+          { style: { marginTop: '4px' } },
+          changedFiles.slice(0, 8).map((file) => h(ActivityFileRow, { key: file.path, file })),
+        )
+      : null,
+  );
+}
+
+/** Newest-first commit list with per-commit index verdict. */
+function ActivityTimeline({
+  timeline,
+  indexKnown,
+}: {
+  timeline: ClientActivityCommit[];
+  indexKnown: boolean;
+}) {
+  if (timeline.length === 0) return null;
+  return h(
+    'div',
+    null,
+    h('div', { style: { ...MUTED, marginBottom: '4px' } }, `提交时间线 · 最近 ${timeline.length} 个`),
+    timeline.slice(0, 15).map((commit) => {
+      const verdict = indexKnown
+        ? activityVerdict(commit.verdict)
+        : { label: '索引未知', tone: 'neutral' as const, dot: 'idle' as const };
+      return h(
+        'div',
+        {
+          key: commit.sha,
+          style: {
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '2px',
+            padding: '4px 0',
+            borderTop: HAIRLINE,
+            minWidth: 0,
+          },
+        },
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+          h(StateDot, { state: verdict.dot }),
+          h(
+            'span',
+            { style: { ...styles.mono, color: 'inherit', whiteSpace: 'nowrap' } },
+            commit.shortSha ?? commit.sha.slice(0, 8),
+          ),
+          h(
+            'span',
+            {
+              style: {
+                minWidth: 0,
+                flex: '1 1 auto',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              },
+              title: commit.subject,
+            },
+            commit.subject === '' ? '(无提交说明)' : commit.subject,
+          ),
+        ),
+        h(
+          'div',
+          {
+            style: {
+              ...MUTED,
+              fontSize: '10px',
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: '6px',
+              marginLeft: '14px',
+            },
+          },
+          h(Tag, { tone: verdict.tone }, verdict.label),
+          h('span', { style: { whiteSpace: 'nowrap' } }, commit.date.slice(0, 10)),
+          h('span', { style: { whiteSpace: 'nowrap' } }, commit.author),
+          h(
+            'span',
+            { style: { whiteSpace: 'nowrap' } },
+            `+${compactNumber(commit.insertions)}/−${compactNumber(commit.deletions)}`,
+          ),
+          h(
+            'span',
+            { style: { whiteSpace: 'nowrap' } },
+            `${compactNumber(commit.files)} 文件`,
+          ),
+        ),
+      );
+    }),
+  );
+}
+
 /**
  * Git activity, crossed with the index.
  *
@@ -1547,6 +1775,26 @@ function GitActivitySection({ activity: rawActivity }: { activity: ClientActivit
     activity.histogram !== undefined && activity.histogram !== null
       ? h(Histogram, { histogram: activity.histogram })
       : null,
+
+    // Three views over the same window: what the index sees, what changed since the
+    // index baseline, and the individual commits in order. Old hosts omit these
+    // fields; each block disappears rather than rendering a false empty state.
+    activity.totals?.indexKnown === false
+      ? h(
+          'div',
+          { style: { ...MUTED } },
+          '项目尚未建立索引：无法把活动文件与图谱交叉，也没有索引基线可审查。',
+        )
+      : activity.cross !== undefined && activity.cross !== null
+        ? h(ActivityCrossTable, { cross: activity.cross })
+        : null,
+    activity.baseline !== undefined && activity.baseline !== null
+      ? h(ActivityBaseline, { baseline: activity.baseline })
+      : null,
+    h(ActivityTimeline, {
+      timeline: Array.isArray(activity.timeline) ? activity.timeline : [],
+      indexKnown: activity.totals?.indexKnown === true,
+    }),
 
       // Missing files come from their own list, not from the display-capped
       // by-changes slice — otherwise the summary can report a count with no rows.
