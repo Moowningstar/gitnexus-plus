@@ -893,6 +893,21 @@ async function analyzeTests() {
     done.status('D:/Project/x')?.command,
   );
 
+  // GitNexus 1.6.12 creates parsedfile-store from the parse worker. A restricted
+  // host token can be denied that mkdir even when it may write files, so the runner
+  // pre-creates the cache directories from the host before the shell starts.
+  const cacheRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-cache-'));
+  await fs.mkdir(path.join(cacheRepo, '.gitnexus'), { recursive: true });
+  const cacheRun = createAnalyzeRunner(stubShell({ exitCode: 0 }));
+  cacheRun.start(cacheRepo);
+  await settle();
+  const cacheDir = await fs
+    .access(path.join(cacheRepo, '.gitnexus', 'parsedfile-store'))
+    .then(() => true)
+    .catch(() => false);
+  check('analyze pre-creates parsedfile-store before spawning', cacheDir);
+  await fs.rm(cacheRepo, { recursive: true, force: true });
+
   const denied = createAnalyzeRunner(
     stubShell({ exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } }),
   );

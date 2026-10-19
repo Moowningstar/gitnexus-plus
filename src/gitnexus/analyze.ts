@@ -28,6 +28,7 @@
  * the same rule the subagent prompt states, for the same reason.
  */
 
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
@@ -243,6 +244,36 @@ function looksDenied(text: string): boolean {
   return /\[sandbox:[^\]]*denied/i.test(text) || /access is denied|permission denied|EPERM/i.test(text);
 }
 
+/**
+ * GitNexus 1.6.12 creates these cache directories from the parse worker.
+ *
+ * A worker running under a restricted host token can be denied `mkdir` on the
+ * project's inherited `.gitnexus` ACL even though it can write files there. The
+ * failure is EPERM at the first shard write and takes the whole parse phase down
+ * with it. Creating the directories from the host, before the shell starts, makes
+ * the worker use the directories that already exist. Returns an actionable error
+ * instead of letting the worker fail on a path the panel then has to explain.
+ */
+const ANALYZE_CACHE_DIRS = ['parsedfile-store', 'parsedfile-cache', 'parse-cache'] as const;
+
+function prepareAnalyzeCacheDirs(repoPath: string): string | null {
+  const indexDir = path.join(repoPath, '.gitnexus');
+  if (!existsSync(indexDir)) return null;
+  for (const name of ANALYZE_CACHE_DIRS) {
+    const target = path.join(indexDir, name);
+    try {
+      mkdirSync(target, { recursive: true });
+    } catch (cause) {
+      return (
+        `无法创建 GitNexus 缓存目录（${path.join('.gitnexus', name)}）：` +
+        `${String((cause as Error)?.message ?? cause)}。` +
+        '请给项目 .gitnexus 目录写权限，或在普通终端执行下面的命令。'
+      );
+    }
+  }
+  return null;
+}
+
 /** Keep the last `limit` characters, on a line boundary when one is available. */
 function tail(text: string, limit: number): string {
   if (text.length <= limit) return text;
@@ -350,6 +381,18 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       skipFts,
       gitnexusHome,
     });
+
+    const cacheError = prepareAnalyzeCacheDirs(key);
+    if (cacheError !== null) {
+      return finish(key, {
+        state: 'failed',
+        force,
+        command,
+        startedAt: now(),
+        output: '',
+        message: cacheError,
+      });
+    }
 
     const controller = new AbortController();
     inFlight.set(key, controller);
