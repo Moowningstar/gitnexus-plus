@@ -167,6 +167,17 @@ export interface ClientFileHistory {
   readAt?: string;
 }
 
+/** One commit's patch for one file, as returned by `/file-diff`. */
+export interface ClientCommitDiff {
+  path: string;
+  sha: string;
+  available: boolean;
+  patch: string;
+  truncated: boolean;
+  reason?: string | null;
+  readAt?: string;
+}
+
 /** Changes since the index's recorded baseline. */
 export interface ClientActivityBaseline {
   ref?: string | null;

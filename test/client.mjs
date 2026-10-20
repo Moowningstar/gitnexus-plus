@@ -961,25 +961,12 @@ check(
   view.text.includes('Git 活动 · 近 7 天') && !view.text.includes('Git 活动 · 近 90 天'),
   view.text.slice(0, 400),
 );
-// The picker is mounted in the card header, so a file's timeline is one click away
-// instead of requiring a scroll to the bottom of the activity card.
+// The header picker was removed: the rows themselves are the entry point, so the header
+// stays a status line instead of a second navigation control.
 check(
-  'the activity header offers a file picker',
-  view.text.includes('文件时间线…') && view.text.includes('src/fresh.ts'),
+  'the activity header no longer carries a file picker',
+  !view.text.includes('文件时间线…') && view.text.includes('src/fresh.ts'),
   view.text.slice(0, 500),
-);
-check(
-  'activityFileOptions deduplicates and keeps recency first',
-  I.activityFileOptions({
-    byRecency: [{ path: 'b.ts' }],
-    byChanges: [{ path: 'a.ts' }, { path: 'b.ts' }],
-    missingFiles: [{ path: 'c.ts' }],
-  }).join(',') === 'b.ts,a.ts,c.ts',
-  JSON.stringify(I.activityFileOptions({
-    byRecency: [{ path: 'b.ts' }],
-    byChanges: [{ path: 'a.ts' }, { path: 'b.ts' }],
-    missingFiles: [{ path: 'c.ts' }],
-  })),
 );
 check(
   'renders the activity × index cross-tab',

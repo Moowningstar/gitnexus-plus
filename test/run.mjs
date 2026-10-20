@@ -497,6 +497,45 @@ async function fileHistoryRouteTests() {
   const head = await fetch(base + '?repo=' + encodeURIComponent(repo) + '&path=' + encodeURIComponent('src/client/index.ts'), { method: 'HEAD' });
   check('file history HEAD is allowed', head.status === 200, 'status=' + head.status);
 
+  // Same shim, second route: one commit's patch for one file.
+  const { mountFileDiffRoute } = await import('../lib/routes/file-diff.js');
+  const { readCommitDiff } = await import('../lib/gitnexus/git-activity.js');
+  const diffCalls = [];
+  const disposeDiff = mountFileDiffRoute(shimServer, {
+    read: async (repoPath, filePath, sha) => {
+      diffCalls.push({ repoPath, filePath, sha });
+      return {
+        path: filePath,
+        sha,
+        available: true,
+        patch: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b',
+        truncated: false,
+        reason: null,
+      };
+    },
+  });
+  const diffBase = 'http://127.0.0.1:' + port + '/api/gitnexus/file-diff';
+  const diffHit = async (query) => {
+    const res = await fetch(diffBase + query);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  const fileEnc = encodeURIComponent('src/client/index.ts');
+  const diffOk = await diffHit(`?repo=${encodeURIComponent(repo)}&path=${fileEnc}&sha=deadbeef`);
+  check('file diff answers 200', diffOk.status === 200 && diffOk.body?.ok === true, 'status=' + diffOk.status);
+  check('file diff forwards the sha', diffCalls.at(-1)?.sha === 'deadbeef', JSON.stringify(diffCalls.at(-1)));
+  check('file diff carries the patch', String(diffOk.body?.patch ?? '').includes('@@ -1 +1 @@'), JSON.stringify(diffOk.body));
+  const badSha = await diffHit(`?repo=${encodeURIComponent(repo)}&path=${fileEnc}&sha=not-a-hash`);
+  check('a non-hash sha is rejected', badSha.status === 400, 'status=' + badSha.status);
+  const noSha = await diffHit(`?repo=${encodeURIComponent(repo)}&path=${fileEnc}`);
+  check('a missing sha is rejected', noSha.status === 400, 'status=' + noSha.status);
+  disposeDiff();
+  const refused = await readCommitDiff(process.cwd(), 'README.md', 'not-a-sha');
+  check(
+    'readCommitDiff refuses an invalid hash before calling git',
+    refused.available === false && String(refused.reason).includes('不合法'),
+    JSON.stringify(refused),
+  );
+
   await new Promise((resolve) => server.close(resolve));
   dispose();
   check('file history disposer clears the registration', registered.length === 0);

@@ -208,6 +208,54 @@ export interface ActivityInfo {
   timelineTruncated: boolean;
 }
 
+/** One commit's patch for a single file, bounded for the panel. */
+export interface CommitDiff {
+  path: string;
+  sha: string;
+  available: boolean;
+  patch: string;
+  truncated: boolean;
+  reason: string | null;
+}
+
+/** Patch is capped: a minified vendor file can carry megabytes in one commit. */
+const DIFF_LIMIT_BYTES = 120 * 1024;
+
+/**
+ * The change a commit made to one file.
+ *
+ * `git show <sha> -- <path>` is the only command that answers this without checking
+ * out anything, and it is read-only. The path has already been resolved inside the
+ * project by the route; the sha is validated here because it reaches git as an argument.
+ */
+export async function readCommitDiff(
+  repoPath: string,
+  filePath: string,
+  sha: string,
+): Promise<CommitDiff> {
+  const clean = String(sha ?? '').trim();
+  if (!/^[0-9a-fA-F]{7,40}$/.test(clean)) {
+    return { path: filePath, sha: clean, available: false, patch: '', truncated: false, reason: '提交号不合法' };
+  }
+  const out = await git(
+    repoPath,
+    ['show', '--format=', '--no-color', '--unified=3', clean, '--', filePath],
+    DIFF_LIMIT_BYTES * 2,
+  );
+  if (out === null) {
+    return { path: filePath, sha: clean, available: false, patch: '', truncated: false, reason: 'git 无法读取该提交的改动' };
+  }
+  const truncated = Buffer.byteLength(out, 'utf8') > DIFF_LIMIT_BYTES;
+  return {
+    path: filePath,
+    sha: clean,
+    available: true,
+    patch: truncated ? out.slice(0, DIFF_LIMIT_BYTES) : out,
+    truncated,
+    reason: null,
+  };
+}
+
 /** One commit touching a specific file. */
 export interface FileHistoryCommit {
   sha: string;

@@ -34,9 +34,10 @@ import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
 import { mountSearchRoute } from './routes/search.js';
 import { mountFileHistoryRoute } from './routes/file-history.js';
+import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
-import { readFileActivity } from './gitnexus/git-activity.js';
+import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { searchWithFallback } from './gitnexus/search.js';
@@ -483,6 +484,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
         }),
         mountFileHistoryRoute(svcCtx.webServer, {
           read: (repoPath, filePath, options) => readFileActivity(repoPath, filePath, options),
+        }),
+        mountFileDiffRoute(svcCtx.webServer, {
+          read: (repoPath, filePath, sha) => readCommitDiff(repoPath, filePath, sha),
         }),
         mountDeltaRoute(svcCtx.webServer, {
           read: (repoPath) => readDelta(repoPath),

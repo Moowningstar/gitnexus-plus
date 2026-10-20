@@ -34,34 +34,6 @@ export function activityCollapsed(activity: ClientActivity | null | undefined): 
 }
 
 /**
- * Files offered by the card header's picker.
- *
- * Recent work first, then the most-changed files, then the ones the index is missing —
- * a reader opening a timeline is usually asking "what changed lately", and a missing
- * file is the one worth inspecting. Deduplicated and capped: the header is a control,
- * not a file browser.
- */
-export function activityFileOptions(
-  activity: ClientActivity | null | undefined,
-  limit = 40,
-): string[] {
-  if (activity === null || typeof activity !== 'object') return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const list of [activity.byRecency, activity.byChanges, activity.missingFiles]) {
-    if (!Array.isArray(list)) continue;
-    for (const file of list) {
-      const path = file?.path;
-      if (typeof path !== 'string' || seen.has(path)) continue;
-      seen.add(path);
-      out.push(path);
-      if (out.length >= limit) return out;
-    }
-  }
-  return out;
-}
-
-/**
  * All activity numbers in one place, so the view stays a layout decision.
  * @param {any} activity
  * @returns {null | { window: string, totals: string, verdicts: Array<{key:string,label:string,value:number,tone:string}> }}
@@ -480,6 +452,7 @@ export function GitActivitySection({
             },
           },
           h(FileHistorySection, {
+            projectPath,
             filePath: path,
             history: fileHistory,
             busy: fileHistoryBusy,
@@ -514,6 +487,7 @@ export function GitActivitySection({
     // Only for a file that is not in a list below (usually picked in the header).
     unlistedSelection
       ? h(FileHistorySection, {
+          projectPath,
           filePath: selectedFile,
           history: fileHistory,
           busy: fileHistoryBusy,

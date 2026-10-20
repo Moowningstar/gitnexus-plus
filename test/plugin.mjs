@@ -182,13 +182,13 @@ check('output.render returns content blocks', (() => {
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Seven routes now: read the working tree, keyword-search the graph, read one file's
-// commit history, check whether a refresh would change anything, read a bounded graph
-// projection, refresh an index, and install GitNexus when there is none. Separate
-// modules because their privileges differ sharply — reading/searching/history/delta/graph
-// are unprivileged, refreshing writes inside the workspace, and installing runs the
-// dependency tree's build scripts.
-check('exactly seven routes mounted', stub.routes.length === 7, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// Eight routes now: read the working tree, keyword-search the graph, read one file's
+// commit history, read one commit's patch for a file, check whether a refresh would
+// change anything, read a bounded graph projection, refresh an index, and install
+// GitNexus when there is none. Separate modules because their privileges differ sharply —
+// reading/searching/history/patch/delta/graph are unprivileged, refreshing writes inside
+// the workspace, and installing runs the dependency tree's build scripts.
+check('exactly eight routes mounted', stub.routes.length === 8, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
   'the coverage route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
@@ -202,6 +202,11 @@ check(
 check(
   'the file-history route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/file-history'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check(
+  'the file-diff route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/file-diff'),
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check(

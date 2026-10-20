@@ -33,11 +33,10 @@ import {
   Row,
   Section,
   StateDot,
-  SOFT_BG,
   h,
   styles,
 } from '../primitives';
-import { GitActivitySection, activityCollapsed, activityFileOptions, activityView } from '../sections/activity';
+import { GitActivitySection, activityCollapsed, activityView } from '../sections/activity';
 import { CapabilityStrip, ProvenanceBlock, provenanceCollapsed } from '../sections/capabilities';
 import { ToolchainNotice } from '../sections/install';
 import { LanguageSection } from '../sections/languages';
@@ -323,17 +322,13 @@ export function CoverageView({
   const analyzer = report.analyzer ?? ZERO_ANALYZER;
   const largeFiles = report.largeFiles ?? [];
   const languages = report.languages ?? null;
-  // Candidates for the activity card's header picker: recently touched, most changed,
-  // and the ones the index is missing — in that order, deduplicated.
-  const activityFiles = activityFileOptions(report.activity);
 
   const { notable, context: contextWarnings } = splitWarnings(report.warnings);
   const ratio = coverageRatio(report);
 
-  // The activity card's header owns both its window label and its file picker, so the
-  // two states live beside the card rather than inside the section.
+  // The header names the window the timeline is showing; the selection itself lives in
+  // the section, since the rows below are now the only entry point.
   const [activityDays, setActivityDays] = React.useState(7);
-  const [activityFile, setActivityFile] = React.useState<string | null>(null);
 
   // No index yet. This is the state the initialize command exists for, but it is
   // also a state in which the working tree is still readable: file counts, bytes,
@@ -710,35 +705,6 @@ export function CoverageView({
             meta: h(
               'span',
               { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', ...MUTED, fontSize: '11px' } },
-              // The file picker lives here so a file's timeline is one click away,
-              // instead of requiring a scroll to the bottom of the card first.
-              activityFiles.length === 0
-                ? null
-                : h(
-                    'select',
-                    {
-                      value: activityFile ?? '',
-                      'aria-label': '选择文件查看提交时间线',
-                      onChange: (event: React.ChangeEvent<HTMLSelectElement>) => {
-                        const value = event.target.value;
-                        setActivityFile(value === '' ? null : value);
-                      },
-                      style: {
-                        font: 'inherit',
-                        fontSize: '11px',
-                        maxWidth: '180px',
-                        padding: '2px 4px',
-                        border: HAIRLINE,
-                        borderRadius: '4px',
-                        background: SOFT_BG,
-                        color: 'inherit',
-                      },
-                    },
-                    h('option', { value: '' }, '文件时间线…'),
-                    activityFiles.map((path) =>
-                      h('option', { key: path, value: path }, path),
-                    ),
-                  ),
               h(StateDot, {
                 state:
                   activityView(report.activity)?.verdicts.find((v) => v.key === 'missing')?.tone ?? 'done',
@@ -753,9 +719,6 @@ export function CoverageView({
             projectPath,
             days: activityDays,
             onDaysChange: setActivityDays,
-            selectedFile: activityFile,
-            onSelectFile: setActivityFile,
-            onCloseFile: () => setActivityFile(null),
           }),
         ),
 
