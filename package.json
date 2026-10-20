@@ -1,6 +1,6 @@
 {
   "name": "dsh-gitnexus-plus",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DSH plugin: visualize a GitNexus project index, search its symbols by keyword, report what it left out, and run its incremental refresh from a sidebar panel — including detecting a missing GitNexus and installing one on request.",
   "type": "module",
   "license": "MIT",

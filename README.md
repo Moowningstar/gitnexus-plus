@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.2](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.2)** ·
+**Current release: [0.1.3](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.3)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
