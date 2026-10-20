@@ -472,6 +472,22 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
 
   const runs = new Map<string, AnalyzeStatus>();
   const inFlight = new Map<string, AbortController>();
+  // One status per repository, and a long session can touch many. The map used to grow
+  // with every repository ever visited, each entry holding a 4 KB output tail; an idle
+  // panel never needs more than the repositories it can still show.
+  const RUNS_MAX = 32;
+
+  /** Store the latest status, evicting finished entries beyond the cap, oldest first. */
+  const rememberRun = (key: string, status: AnalyzeStatus): void => {
+    runs.delete(key);
+    runs.set(key, status);
+    if (runs.size <= RUNS_MAX) return;
+    for (const [other, entry] of runs) {
+      if (entry.state === 'running') continue;
+      runs.delete(other);
+      if (runs.size <= RUNS_MAX) break;
+    }
+  };
 
   /** The shape a status starts from, before any run has touched it. */
   const BLANK: Omit<AnalyzeStatus, 'repoPath'> = {
@@ -498,7 +514,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       // silent no-op. The spread above cannot express that.
       finishedAt: patch.finishedAt ?? now(),
     };
-    runs.set(repoPath, next);
+    rememberRun(repoPath, next);
     inFlight.delete(repoPath);
     return next;
   };
@@ -613,7 +629,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       message: null,
       output: '',
     };
-    runs.set(key, started);
+    rememberRun(key, started);
 
     // The host resolves the policy; this runner only carries it. Absent when the
     // deployment has no `sandboxPolicy` service, and then the executor's own default
