@@ -25,7 +25,10 @@ import { ClientGraphEdge, ClientGraphNode, GraphViewState } from '../types';
  */
 
 const WIDTH = 720;
-const HEIGHT = 340;
+// 300, not 340: measured against the card grid, the extra 40px was empty canvas above
+// and below the cluster, and the card read as the largest surface in the panel without
+// showing more. The layout rescales to the bounds, so nothing is lost.
+const HEIGHT = 300;
 const ITERATIONS = 140;
 
 /** A small, fixed palette so a symbol's kind keeps its colour between renders. */

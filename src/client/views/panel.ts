@@ -530,6 +530,12 @@ export function CoverageView({
       ),
     ),
 
+    // Shares the overview row: a stacked bar plus its legend is a proportional reading,
+    // and pairing it with the coverage figure puts the two "how much of this
+    // repository" answers side by side. The grid gives them one row on a wide pane and
+    // one column in a narrow sidebar, which is the platform's own behaviour.
+    languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
+
     // The graph is the index's own shape, not a derived statistic: it belongs directly
     // under the overview, before the caveats that explain its omissions.
     graph === undefined || !indexed
@@ -554,12 +560,6 @@ export function CoverageView({
           },
           h(GraphSection, { state: graph }),
         ),
-
-    // Shares a row with the overview card: a bar plus its legend is a proportional
-    // reading, and pairing it with the coverage figure puts the two "how much of
-    // this repository" answers side by side. Order matters — it must directly
-    // follow the overview for the grid to place them in the same row.
-    languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
 
     // Caveats, in one card, sharing a row with the provenance card.
     //

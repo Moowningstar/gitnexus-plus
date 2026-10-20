@@ -51,35 +51,33 @@ export const SOFT_BG = BG_LAYER_2;
 /** Tabular figures, so a column of counts lines up instead of drifting. */
 export const NUMERIC = { fontVariantNumeric: 'tabular-nums' as const };
 
-/** Layout only. Appearance belongs to the primitives, which read `--dsw-*` tokens. */
 /**
  * Layout.
  *
- * The panel is a CARD GRID, not a vertical stack: the surface it lives in can be
- * narrow (a docked sidebar) or very wide (a maximised pane), and a single column of
- * full-width cards reads as broken at the wide end — every metric row stretches
- * across a metre of empty space.
+ * The panel is a CARD GRID: the surface it lives in can be narrow (a docked sidebar)
+ * or wide (a maximised pane), and the platform's own panels use a responsive grid
+ * rather than one column — measured on `dsh-context`, whose cards sit two-up on a wide
+ * pane and stack in the sidebar.
  *
- * A single column is the honest layout for a docked sidebar. The previous
- * `auto-fit` grid asked for two columns whenever the pane was wide enough for
- * `2 × 620px + gap`; in a real narrow sidebar it therefore laid the second column —
- * the entire language breakdown — past the visible edge, and the wide Git-activity
- * card lost its third verdict. Tuning the floor only moves which pane width breaks;
- * one column always fits. On a wide pane the card internals still distribute their
- * metrics, so the space is not wasted.
+ * The floor is 320px, not the 620px an earlier revision used: with 620, a docked
+ * sidebar of ~380px produced a second column laid *past* the visible edge and the
+ * activity card lost its third verdict. 320 fits the narrowest sidebar this panel is
+ * docked into, and two columns only appear when the pane can hold `2 × 320 + gap`.
  *
- * `minmax(0, 1fr)` also removes the min-content floor that let the grid widen its
- * own container. A card that needs the full width still says so with
- * `gridColumn: '1 / -1'`, which is harmless in one column and keeps the markup
- * honest if the layout ever changes.
+ * `alignItems: 'start'` is deliberate now that cards share rows: without it the grid
+ * stretches a short card to the height of its tall neighbour, which is exactly the dead
+ * space the reference layout avoids. With it, a card keeps its natural height and the
+ * row's remaining space stays empty rather than inside a border.
+ *
+ * `minmax(0, 1fr)` keeps the min-content floor from letting a card widen its own
+ * container. A card that needs the full width says so with `gridColumn: '1 / -1'`
+ * (`wide` below).
  */
 export const styles = {
   root: {
     display: 'grid',
-    gridTemplateColumns: 'minmax(0, 1fr)',
-    // No `alignItems: start`: grid items stretch to the row height by default, so
-    // two cards sharing a row end level. With `start` each card took its natural
-    // height and the row showed a ragged bottom edge.
+    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+    alignItems: 'start',
     gap: '8px',
     padding: '12px',
     fontSize: '13px',
