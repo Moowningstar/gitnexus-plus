@@ -992,15 +992,56 @@ async function analyzeTests() {
   check('exit 0 is a completed run', done.status('D:/Project/x')?.state === 'done');
   check('output is kept for the panel', done.status('D:/Project/x')?.output.includes('7.2s'));
 
-  // The load-bearing assertion of the whole feature. Passing `sandboxPolicy` would be
-  // this plugin choosing its own confinement — the escalation the approval service
-  // exists to gate, requested through a door that cannot ask. Leaving it out takes the
-  // deployment's decision.
+  // The refined rule: this runner never constructs a policy — it may only forward one
+  // the host resolved. Without a provider the request carries none, so the executor's
+  // deployment default applies exactly as before.
   check(
-    'the runner never sets sandboxPolicy',
+    'the runner sets no sandboxPolicy when the host provides none',
     captured !== null && !Object.prototype.hasOwnProperty.call(captured, 'sandboxPolicy'),
     JSON.stringify(Object.keys(captured ?? {})),
   );
+
+  // And when the host does resolve one, it must travel unchanged: the workspace root is
+  // the input an agentless route cannot otherwise supply, and the sandbox derives its
+  // write capability SID from it (measured: a plugin route without it is confined to the
+  // DSH application directory and cannot write `.gitnexus` at all).
+  {
+    // `captured` is shared with the assertions below; restore it so this block cannot
+    // make them report on the wrong run.
+    const savedCaptured = captured;
+    const cliRoot = path.join(import.meta.dirname, '.fixtures', `policy-cli-${process.pid}`);
+    const cliPkg = path.join(cliRoot, 'node_modules', 'gitnexus');
+    await fs.mkdir(path.join(cliPkg, 'dist', 'cli'), { recursive: true });
+    await fs.mkdir(path.join(cliPkg, 'dist', 'core', 'ingestion'), { recursive: true });
+    await fs.writeFile(path.join(cliPkg, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+    await fs.writeFile(path.join(cliPkg, 'dist', 'cli', 'index.js'), '');
+    await fs.writeFile(path.join(cliPkg, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+    const policy = { mode: 'workspace-write', workspaceRoot: 'D:\\Project\\policy' };
+    const asked = [];
+    const runner = createAnalyzeRunner({
+      ...stubShell({ exitCode: 0 }),
+      toolchain: { managedPrefix: cliRoot },
+      sandboxPolicy: (repoPath) => {
+        asked.push(repoPath);
+        return policy;
+      },
+    });
+    runner.start('D:/Project/policy');
+    await settle();
+    check(
+      'a host-resolved sandbox policy is forwarded unchanged',
+      captured?.sandboxPolicy === policy,
+      JSON.stringify(captured?.sandboxPolicy),
+    );
+    check(
+      'the policy is resolved for the run repository',
+      asked.length === 1 && path.resolve(String(asked[0])).toLowerCase().endsWith('policy'),
+      JSON.stringify(asked),
+    );
+    runner.dispose();
+    await fs.rm(cliRoot, { recursive: true, force: true });
+    captured = savedCaptured;
+  }
   check('the run is killable at its deadline', captured?.onExpiry === 'kill');
   // The runner resolves the path before using it, so the assertion has to resolve it
   // the same way — comparing against the literal `D:/Project/x` tested the test's own

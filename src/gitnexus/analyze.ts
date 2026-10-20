@@ -21,11 +21,18 @@
  *
  * THE ONE RULE THAT MATTERS
  * -------------------------
- * `sandboxPolicy` is never set here, and must never be. Passing it would be this
- * plugin choosing its own confinement — the escalation the approval service exists to
- * gate, requested through a door that cannot ask. Leaving it undefined takes the
- * deployment's decision. A denial is then reported as a denial, not retried wider:
- * the same rule the subagent prompt states, for the same reason.
+ * This runner never **constructs** a sandbox policy and never chooses a mode. It may
+ * forward a policy the host resolved (`options.sandboxPolicy`), and the host may only
+ * fill in the workspace root — see `src/index.ts`. The reason is measured, not
+ * theoretical: an agentless route has no session, so `sandboxPolicy.resolve()` falls
+ * back to `config.workspaceRoot ?? process.cwd()` and the sandbox derives its write
+ * capability SID from *that* path. The repository's own grant then never applies, and
+ * every write inside `.gitnexus` is refused — the failure this plugin reported as
+ * "sandbox denies .gitnexus". Supplying the workspace root is not escalation: the mode
+ * still comes from the deployment, and a read-only deployment stays read-only.
+ *
+ * A denial is reported as a denial, not retried wider: the same rule the subagent
+ * prompt states, for the same reason.
  */
 
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -83,6 +90,12 @@ export interface ShellRequestLike {
   onExpiry?: 'kill' | 'none';
   stdoutMaxBytes?: number;
   signal?: AbortSignal;
+  /**
+   * A policy the host resolved for this call. The runner forwards it unchanged and
+   * never builds one; see the module comment for why the workspace root has to travel
+   * with the call at all.
+   */
+  sandboxPolicy?: unknown;
 }
 
 export interface ShellResultLike {
@@ -147,6 +160,13 @@ export interface AnalyzeRunnerOptions {
    * production for a scanner that briefly holds `.gitnexus` to let go.
    */
   retryDelayMs?: number;
+  /**
+   * The sandbox policy for one repository, resolved by the host.
+   *
+   * Optional: a deployment without a `sandboxPolicy` service passes nothing, and the
+   * shell keeps its own default. The runner does not inspect or alter the value.
+   */
+  sandboxPolicy?: (repoPath: string) => unknown;
   now?: () => number;
 }
 
@@ -546,6 +566,10 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     };
     runs.set(key, started);
 
+    // The host resolves the policy; this runner only carries it. Absent when the
+    // deployment has no `sandboxPolicy` service, and then the executor's own default
+    // applies — exactly as before.
+    const sandboxPolicy = options.sandboxPolicy?.(key);
     const spec = shell.resolve({
       command,
       workdir: key,
@@ -553,7 +577,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       onExpiry: 'kill',
       stdoutMaxBytes: outputLimit,
       signal: controller.signal,
-      // `sandboxPolicy` is deliberately absent. See the module comment.
+      ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
     });
 
     void (async () => {

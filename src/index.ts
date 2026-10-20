@@ -13,6 +13,8 @@
  * graph itself; the tool above stays read-only.
  */
 
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
@@ -409,10 +411,54 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // read-only half of the panel keeps working either way.
       const shellRaw: unknown = svcCtx.get('shell');
       const searchShell = isShellLike(shellRaw) ? shellRaw : null;
+      /**
+       * The sandbox policy for one repository, with the workspace root this route knows
+       * and the deployment's own mode.
+       *
+       * WHY THIS IS NOT ESCALATION
+       * --------------------------
+       * A panel route has no session, so `sandboxPolicy.resolve()` falls back to
+       * `config.workspaceRoot ?? process.cwd()` — the DSH application directory. The
+       * sandbox derives its write-capability SID from that path, so the repository's
+       * grant never applies and every write inside `.gitnexus` is refused. Measured on
+       * this machine: the ACE `S-1-4-160954772-582561662` on the repository is exactly
+       * `workspaceWriteSid('D:\\Project\\gitnexus-plus')`.
+       *
+       * This function therefore forwards the deployment's resolved policy and replaces
+       * only the root with the repository the caller named. The **mode** is never
+       * touched: read-only stays read-only, and a deployment without a policy service
+       * keeps the executor's own default. What it adds is the one input the agentless
+       * route cannot otherwise supply.
+       */
+      const analyzePolicy = (repoPath: string): unknown => {
+        const raw: unknown = svcCtx.get('sandboxPolicy');
+        if (raw === null || typeof raw !== 'object') return undefined;
+        const service = raw as { resolve?: () => unknown };
+        if (typeof service.resolve !== 'function') return undefined;
+        let base: unknown;
+        try {
+          base = service.resolve();
+        } catch {
+          return undefined;
+        }
+        if (base === null || typeof base !== 'object') return undefined;
+        const policy = base as { mode?: unknown; workspaceRoot?: unknown };
+        if (typeof policy.mode !== 'string') return undefined;
+        // The capability SID is derived from this exact string, so it has to be the
+        // canonical path — the same one a session call would carry.
+        let root = path.resolve(repoPath);
+        try {
+          root = realpathSync.native(root);
+        } catch {
+          /* the resolved path is the best available canonical form */
+        }
+        return { ...(base as Record<string, unknown>), workspaceRoot: root };
+      };
       const analyze = createAnalyzeRunner({
         shell: searchShell,
         timeoutMs: config.analyzeTimeoutMs,
         toolchain: managedToolchain,
+        sandboxPolicy: analyzePolicy,
         // The runner must read the same config as the command text it confirms,
         // otherwise the dialog describes a command the run does not execute. It
         // resolves `false` per repository (automatic), and defaults to the
