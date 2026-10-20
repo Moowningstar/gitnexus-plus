@@ -67,7 +67,7 @@ import {
   Section,
   classifyFileType,
 } from './primitives';
-import { GitActivitySection, activityView } from './sections/activity';
+import { GitActivitySection, activityFileOptions, activityView } from './sections/activity';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
 import { FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
@@ -213,6 +213,7 @@ export const __internals = {
     capabilityRows,
     graphQualitySummary,
     activityView,
+    activityFileOptions,
     compactNumber,
     useProjectPath,
     contextDiagnostic,

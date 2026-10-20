@@ -954,7 +954,33 @@ check(
   view.text.slice(0, 400),
 );
 check('renders the git activity section title', view.text.includes('Git 活动'), view.text.slice(0, 400));
-check('renders the git activity window in days', view.text.includes('近 90 天'));
+// The header must name the window the reader is looking at (the timeline's 7-day
+// default), not the 90-day fetch window the data was collected over.
+check(
+  'renders the git activity window in days',
+  view.text.includes('Git 活动 · 近 7 天') && !view.text.includes('Git 活动 · 近 90 天'),
+  view.text.slice(0, 400),
+);
+// The picker is mounted in the card header, so a file's timeline is one click away
+// instead of requiring a scroll to the bottom of the activity card.
+check(
+  'the activity header offers a file picker',
+  view.text.includes('文件时间线…') && view.text.includes('src/fresh.ts'),
+  view.text.slice(0, 500),
+);
+check(
+  'activityFileOptions deduplicates and keeps recency first',
+  I.activityFileOptions({
+    byRecency: [{ path: 'b.ts' }],
+    byChanges: [{ path: 'a.ts' }, { path: 'b.ts' }],
+    missingFiles: [{ path: 'c.ts' }],
+  }).join(',') === 'b.ts,a.ts,c.ts',
+  JSON.stringify(I.activityFileOptions({
+    byRecency: [{ path: 'b.ts' }],
+    byChanges: [{ path: 'a.ts' }, { path: 'b.ts' }],
+    missingFiles: [{ path: 'c.ts' }],
+  })),
+);
 check(
   'renders the activity × index cross-tab',
   view.text.includes('活动 × 索引交叉对比') && view.text.includes('330 次变更'),

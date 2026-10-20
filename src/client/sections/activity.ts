@@ -34,6 +34,34 @@ export function activityCollapsed(activity: ClientActivity | null | undefined): 
 }
 
 /**
+ * Files offered by the card header's picker.
+ *
+ * Recent work first, then the most-changed files, then the ones the index is missing —
+ * a reader opening a timeline is usually asking "what changed lately", and a missing
+ * file is the one worth inspecting. Deduplicated and capped: the header is a control,
+ * not a file browser.
+ */
+export function activityFileOptions(
+  activity: ClientActivity | null | undefined,
+  limit = 40,
+): string[] {
+  if (activity === null || typeof activity !== 'object') return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const list of [activity.byRecency, activity.byChanges, activity.missingFiles]) {
+    if (!Array.isArray(list)) continue;
+    for (const file of list) {
+      const path = file?.path;
+      if (typeof path !== 'string' || seen.has(path)) continue;
+      seen.add(path);
+      out.push(path);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
+/**
  * All activity numbers in one place, so the view stays a layout decision.
  * @param {any} activity
  * @returns {null | { window: string, totals: string, verdicts: Array<{key:string,label:string,value:number,tone:string}> }}
@@ -321,15 +349,33 @@ export function ActivityTimeline({
 export function GitActivitySection({
   activity: rawActivity,
   projectPath,
+  days,
+  onDaysChange,
+  selectedFile: controlledFile,
+  onSelectFile,
+  onCloseFile,
 }: {
   activity: ClientActivity | null | undefined;
   projectPath: string | null;
+  /**
+   * Controlled from the card header, which owns both the window label and the file
+   * picker — the reader should not have to scroll past the whole timeline to open a
+   * file's history. When the props are absent the section keeps its own state, so the
+   * component still renders standalone in tests.
+   */
+  days?: number;
+  onDaysChange?: (days: number) => void;
+  selectedFile?: string | null;
+  onSelectFile?: (path: string) => void;
+  onCloseFile?: () => void;
 }) {
   // The project timeline defaults to 7 days and caps at 30; the file timeline
   // reuses the same range. Hooks are before the "activity unavailable" return so
   // the hook order cannot change with the data.
-  const [timelineDays, setTimelineDays] = React.useState(7);
-  const [selectedFile, setSelectedFile] = React.useState<string | null>(null);
+  const [ownDays, setOwnDays] = React.useState(7);
+  const timelineDays = days ?? ownDays;
+  const [ownFile, setOwnFile] = React.useState<string | null>(null);
+  const selectedFile = controlledFile === undefined ? ownFile : controlledFile;
   const [fileHistory, setFileHistory] = React.useState<ClientFileHistory | null>(null);
   const [fileHistoryBusy, setFileHistoryBusy] = React.useState(false);
   const [fileHistoryError, setFileHistoryError] = React.useState<string | null>(null);
@@ -345,17 +391,23 @@ export function GitActivitySection({
   }
   const missing = view.verdicts.find((v) => v.key === 'missing')?.value ?? 0;
 
-  const requestFileHistory = (path: string, days: number): void => {
-    if (projectPath === null) return;
+  // Fetching is driven by state, not by the click handler: the selected file can now
+  // change from the card header, and the effect keeps both entry points on one path.
+  React.useEffect(() => {
+    if (selectedFile === null || projectPath === null) {
+      setFileHistory(null);
+      setFileHistoryError(null);
+      setFileHistoryBusy(false);
+      return undefined;
+    }
     const seq = fileHistorySeq.current + 1;
     fileHistorySeq.current = seq;
-    setSelectedFile(path);
     setFileHistory(null);
     setFileHistoryError(null);
     setFileHistoryBusy(true);
     const query =
       `/api/gitnexus/file-history?repo=${encodeURIComponent(projectPath)}` +
-      `&path=${encodeURIComponent(path)}&days=${days}`;
+      `&path=${encodeURIComponent(selectedFile)}&days=${timelineDays}`;
     fetch(routeUrl(query))
       .then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
       .then(({ status, body }) => {
@@ -363,10 +415,7 @@ export function GitActivitySection({
         // The client bundle can hot-reload before the host does. An unregistered
         // route comes back as the desktop carrier's 401/404, not the route's own
         // not-a-project JSON; say that instead of a generic status.
-        if (
-          (status === 404 && body?.code !== 'not-a-project') ||
-          status === 401
-        ) {
+        if ((status === 404 && body?.code !== 'not-a-project') || status === 401) {
           throw new Error('当前宿主没有文件时间线路由；重启 DSH 后再试。');
         }
         if (!body?.ok) {
@@ -383,19 +432,24 @@ export function GitActivitySection({
       .finally(() => {
         if (seq === fileHistorySeq.current) setFileHistoryBusy(false);
       });
-  };
+    return undefined;
+  }, [selectedFile, timelineDays, projectPath]);
 
-  const openFileHistory = (path: string): void => requestFileHistory(path, timelineDays);
+  const openFileHistory = (path: string): void => {
+    if (onSelectFile) onSelectFile(path);
+    else setOwnFile(path);
+  };
   const closeFileHistory = (): void => {
     fileHistorySeq.current += 1;
-    setSelectedFile(null);
+    if (onCloseFile) onCloseFile();
+    else setOwnFile(null);
     setFileHistory(null);
     setFileHistoryError(null);
     setFileHistoryBusy(false);
   };
-  const changeTimelineDays = (days: number): void => {
-    setTimelineDays(days);
-    if (selectedFile !== null) requestFileHistory(selectedFile, days);
+  const changeTimelineDays = (value: number): void => {
+    if (onDaysChange) onDaysChange(value);
+    else setOwnDays(value);
   };
 
   const cutoff = Date.now() - timelineDays * 86_400_000;
@@ -409,6 +463,15 @@ export function GitActivitySection({
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '4px' } },
+    // First, not last: the header picker opens this, and a file's timeline that appears
+    // below the whole project activity is only findable by scrolling.
+    h(FileHistorySection, {
+      filePath: selectedFile,
+      history: fileHistory,
+      busy: fileHistoryBusy,
+      error: fileHistoryError,
+      onClose: closeFileHistory,
+    }),
     h('div', { style: MUTED }, view.totals),
     view.truncated
       ? h('div', { style: MUTED }, `活动窗口达到提交上限，更早的改动未统计`)
@@ -564,13 +627,5 @@ export function GitActivitySection({
             ),
           )
         : null,
-
-      h(FileHistorySection, {
-        filePath: selectedFile,
-        history: fileHistory,
-        busy: fileHistoryBusy,
-        error: fileHistoryError,
-        onClose: closeFileHistory,
-      }),
   );
 }
