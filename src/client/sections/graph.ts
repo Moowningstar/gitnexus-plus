@@ -25,15 +25,59 @@ import { ClientGraphEdge, ClientGraphNode, GraphViewState } from '../types';
  */
 
 const WIDTH = 720;
-// 300, not 340: measured against the card grid, the extra 40px was empty canvas above
-// and below the cluster, and the card read as the largest surface in the panel without
-// showing more. The layout rescales to the bounds, so nothing is lost.
+// The drawing is laid out in this fixed space and then fitted uniformly into whatever box
+// the card gives it, so a wide card gets a wider picture instead of a stretched one.
 const HEIGHT = 300;
 const ITERATIONS = 140;
 
 /** A small, fixed palette so a symbol's kind keeps its colour between renders. */
 const KIND_COLORS = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7', '#7dcfff', '#f7768e'];
 const COMMUNITY_COLOR = '#7aa2f7';
+
+/**
+ * Community colours from a greedy graph colouring.
+ *
+ * Adjacent communities get different colours, so the cluster graph stops reading as a
+ * field of identical dots. Greedy is not guaranteed to need only four colours — that is
+ * a theorem about planar graphs, and a projection is not planar — so the palette extends
+ * to six and then cycles. Neighbours still differ in the common case; when the graph
+ * genuinely needs more than six, two distant communities may share one.
+ */
+const COMMUNITY_PALETTE = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7', '#7dcfff', '#f7768e'];
+
+export function communityColors(
+  nodes: ClientGraphNode[],
+  edges: Array<{ source: string; target: string }>,
+): Map<string, string> {
+  const adjacency = new Map<string, Set<string>>();
+  for (const node of nodes) adjacency.set(node.id, new Set());
+  for (const edge of edges) {
+    if (edge.source === edge.target) continue;
+    adjacency.get(edge.source)?.add(edge.target);
+    adjacency.get(edge.target)?.add(edge.source);
+  }
+  // Highest degree first: colouring the busiest communities while the palette is free
+  // keeps the total number of colours down.
+  const order = [...nodes].sort(
+    (a, b) => (adjacency.get(b.id)?.size ?? 0) - (adjacency.get(a.id)?.size ?? 0),
+  );
+  const assigned = new Map<string, number>();
+  for (const node of order) {
+    const used = new Set<number>();
+    for (const neighbour of adjacency.get(node.id) ?? []) {
+      const colour = assigned.get(neighbour);
+      if (colour !== undefined) used.add(colour);
+    }
+    let colour = 0;
+    while (used.has(colour)) colour += 1;
+    assigned.set(node.id, colour);
+  }
+  const out = new Map<string, string>();
+  for (const [id, colour] of assigned) {
+    out.set(id, COMMUNITY_PALETTE[colour % COMMUNITY_PALETTE.length] as string);
+  }
+  return out;
+}
 
 interface Point {
   x: number;
@@ -168,25 +212,69 @@ export function GraphSection({ state }: { state: GraphViewState }) {
     () => layout(projection?.nodes ?? [], projection?.edges ?? []),
     [projection],
   );
+  const colorsByCommunity = React.useMemo(
+    () => communityColors(projection?.nodes ?? [], projection?.edges ?? []),
+    [projection],
+  );
+
+  /**
+   * Map a client point into the layout's 720×300 space.
+   *
+   * The canvas is sized by CSS and the drawing is fitted into it uniformly — a wide card
+   * gets a wider picture rather than a horizontally stretched one, so pointer maths has
+   * to undo both the fit and the pan/zoom.
+   */
+  const toLayout = React.useCallback((clientX: number, clientY: number): { x: number; y: number; fit: number } => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return { x: 0, y: 0, fit: 1 };
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(1, rect.width);
+    const cssH = Math.max(1, rect.height);
+    const fit = Math.min(cssW / WIDTH, cssH / HEIGHT);
+    const ox = (cssW - WIDTH * fit) / 2;
+    const oy = (cssH - HEIGHT * fit) / 2;
+    return {
+      x: (clientX - rect.left - ox) / fit,
+      y: (clientY - rect.top - oy) / fit,
+      fit,
+    };
+  }, []);
 
   const draw = React.useCallback(() => {
     const canvas = canvasRef.current;
     if (canvas === null) return;
     const ctx = canvas.getContext('2d');
     if (ctx === null) return;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(1, rect.width || WIDTH);
+    const cssH = Math.max(1, rect.height || HEIGHT);
     const ratio = typeof window === 'undefined' ? 1 : Math.min(2, window.devicePixelRatio || 1);
-    if (canvas.width !== WIDTH * ratio || canvas.height !== HEIGHT * ratio) {
-      canvas.width = WIDTH * ratio;
-      canvas.height = HEIGHT * ratio;
+    const backingW = Math.round(cssW * ratio);
+    const backingH = Math.round(cssH * ratio);
+    if (canvas.width !== backingW || canvas.height !== backingH) {
+      canvas.width = backingW;
+      canvas.height = backingH;
     }
+    // Uniform fit of the layout space into the CSS box: `min`, not per-axis scaling.
+    const fit = Math.min(cssW / WIDTH, cssH / HEIGHT);
+    const ox = (cssW - WIDTH * fit) / 2;
+    const oy = (cssH - HEIGHT * fit) / 2;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    ctx.clearRect(0, 0, cssW, cssH);
 
     const nodes = projection?.nodes ?? [];
     const edges = projection?.edges ?? [];
     const { x, y, k } = transform.current;
+    const scale = fit * k;
     ctx.save();
-    ctx.setTransform(ratio * k, 0, 0, ratio * k, ratio * x, ratio * y);
+    ctx.setTransform(
+      ratio * scale,
+      0,
+      0,
+      ratio * scale,
+      ratio * (ox + fit * x),
+      ratio * (oy + fit * y),
+    );
 
     for (const edge of edges) {
       const from = points.get(edge.source);
@@ -206,7 +294,10 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       const radius = radiusFor(node);
       ctx.beginPath();
       ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = node.kind === 'Community' ? COMMUNITY_COLOR : colorFor(node.kind);
+      ctx.fillStyle =
+        node.kind === 'Community'
+          ? colorsByCommunity.get(node.id) ?? COMMUNITY_COLOR
+          : colorFor(node.kind);
       ctx.globalAlpha = 0.9;
       ctx.fill();
       ctx.globalAlpha = 1;
@@ -233,12 +324,23 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       ctx.fillText(node.name.slice(0, 18), point.x, point.y + radiusFor(node) + 2);
     }
     ctx.restore();
-  }, [points, projection]);
+  }, [points, projection, colorsByCommunity]);
 
   React.useEffect(() => {
     transform.current = fitTransform(points);
     draw();
   }, [draw, points]);
+
+  // The drawing is fitted to the canvas's CSS box, so a card resize has to redraw:
+  // otherwise the bitmap keeps the previous width and the picture is distorted again
+  // until the next interaction.
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [draw]);
 
   // Wheel zoom is registered imperatively because React's `onWheel` is passive: without
   // `preventDefault` the sidebar scrolls while the graph zooms.
@@ -247,11 +349,7 @@ export function GraphSection({ state }: { state: GraphViewState }) {
     if (canvas === null) return undefined;
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = WIDTH / Math.max(1, rect.width);
-      const scaleY = HEIGHT / Math.max(1, rect.height);
-      const px = (event.clientX - rect.left) * scaleX;
-      const py = (event.clientY - rect.top) * scaleY;
+      const { x: px, y: py } = toLayout(event.clientX, event.clientY);
       const current = transform.current;
       const nextK = Math.max(0.4, Math.min(4, current.k * Math.exp(-event.deltaY * 0.0012)));
       // Keep the point under the cursor fixed while zooming.
@@ -263,15 +361,13 @@ export function GraphSection({ state }: { state: GraphViewState }) {
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [draw]);
+  }, [draw, toLayout]);
 
   /** Map a pointer event to the nearest node within its drawn radius, in logical units. */
   const nodeAt = (event: React.PointerEvent<HTMLCanvasElement>): ClientGraphNode | null => {
     const canvas = canvasRef.current;
     if (canvas === null || projection === null) return null;
-    const rect = canvas.getBoundingClientRect();
-    const px = ((event.clientX - rect.left) * WIDTH) / Math.max(1, rect.width);
-    const py = ((event.clientY - rect.top) * HEIGHT) / Math.max(1, rect.height);
+    const { x: px, y: py } = toLayout(event.clientX, event.clientY);
     const { x, y, k } = transform.current;
     const wx = (px - x) / k;
     const wy = (py - y) / k;
@@ -301,12 +397,9 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       const dy = event.clientY - drag.current.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) drag.current.moved = true;
       if (drag.current.moved) {
-        const canvas = canvasRef.current;
-        const rect = canvas?.getBoundingClientRect();
-        const scaleX = rect === undefined ? 1 : WIDTH / Math.max(1, rect.width);
-        const scaleY = rect === undefined ? 1 : HEIGHT / Math.max(1, rect.height);
-        transform.current.x += dx * scaleX;
-        transform.current.y += dy * scaleY;
+        const { fit } = toLayout(event.clientX, event.clientY);
+        transform.current.x += dx / fit;
+        transform.current.y += dy / fit;
         drag.current.x = event.clientX;
         drag.current.y = event.clientY;
         draw();
@@ -385,7 +478,9 @@ export function GraphSection({ state }: { state: GraphViewState }) {
         style: {
           position: 'relative',
           width: '100%',
-          height: `${HEIGHT}px`,
+          // Responsive height: a fixed 300px box made a wide card letterbox the drawing,
+          // and stretching the bitmap to fill it distorted every circle instead.
+          height: 'clamp(260px, 32vw, 420px)',
           border: HAIRLINE,
           borderRadius: '6px',
           background: SOFT_BG,
@@ -461,7 +556,23 @@ export function GraphSection({ state }: { state: GraphViewState }) {
                 variant: 'ghost',
                 onClick: () => (node.kind === 'Community' ? onOpenCommunity(node.id) : onOpenSymbol(node)),
               },
-              node.kind === 'Community' ? `${node.name} · ${node.symbolCount ?? 0}` : node.name,
+              node.kind === 'Community'
+                ? [
+                    h('span', {
+                      key: 'dot',
+                      style: {
+                        display: 'inline-block',
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        marginRight: '5px',
+                        verticalAlign: 'middle',
+                        background: colorsByCommunity.get(node.id) ?? COMMUNITY_COLOR,
+                      },
+                    }),
+                    `${node.name} · ${node.symbolCount ?? 0}`,
+                  ]
+                : node.name,
             ),
           ),
           nodes.length > listed.length

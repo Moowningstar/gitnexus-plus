@@ -1441,6 +1441,35 @@ check(
   overview.text.slice(-700),
 );
 
+// Community colours come from a greedy colouring of the community graph, so adjacent
+// dots stop looking identical.
+{
+  const coloured = I.communityColors(
+    [
+      { id: 'a', kind: 'Community' },
+      { id: 'b', kind: 'Community' },
+      { id: 'c', kind: 'Community' },
+    ],
+    [
+      { source: 'a', target: 'b' },
+      { source: 'b', target: 'c' },
+      { source: 'c', target: 'a' },
+    ],
+  );
+  check(
+    'adjacent communities receive different colours',
+    coloured.get('a') !== coloured.get('b') &&
+      coloured.get('b') !== coloured.get('c') &&
+      coloured.get('c') !== coloured.get('a'),
+    JSON.stringify([...coloured]),
+  );
+  check(
+    'the colouring covers every node',
+    coloured.size === 3 && [...coloured.values()].every((c) => /^#[0-9a-f]{6}$/.test(c)),
+    JSON.stringify([...coloured]),
+  );
+}
+
 const drilled = render(I.CoverageView, {
   report,
   ...viewProps,
