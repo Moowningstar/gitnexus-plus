@@ -1133,6 +1133,32 @@ async function analyzeTests() {
     check('the stale init lock is cleared before the retry', staleGone);
     retrying.dispose();
 
+    // The other EPERM measured in this deployment, and the opposite verdict: the
+    // confined token can create files in `.gitnexus` but not directories, so the worker
+    // cannot make its shard store. Retrying cannot grant that right.
+    const storeMessage =
+      "Error: EPERM: operation not permitted, mkdir 'D:\\Project\\r\\.gitnexus\\parsedfile-store'";
+    const storeDenied = sequenceShell([
+      { exitCode: 1, stderr: { text: storeMessage } },
+      { exitCode: 0 },
+    ]);
+    const deniedStore = createAnalyzeRunner({ shell: storeDenied.shell, retryDelayMs: 5, toolchain });
+    deniedStore.start(lockRepo);
+    await new Promise((r) => setTimeout(r, 80));
+    check('a denied cache-directory creation is not retried', storeDenied.calls() === 1, String(storeDenied.calls()));
+    check(
+      'it is reported as a sandbox refusal, not a transient lock',
+      deniedStore.status(lockRepo)?.state === 'denied',
+      JSON.stringify(deniedStore.status(lockRepo)),
+    );
+    check(
+      'the message says the sandbox forbids the directory and points at the terminal',
+      deniedStore.status(lockRepo)?.message?.includes('创建缓存目录') === true &&
+        deniedStore.status(lockRepo)?.message?.includes('普通终端') === true,
+      deniedStore.status(lockRepo)?.message,
+    );
+    deniedStore.dispose();
+
     const stillLocked = sequenceShell([
       { exitCode: 1, stderr: { text: lockMessage } },
       { exitCode: 1, stderr: { text: lockMessage } },

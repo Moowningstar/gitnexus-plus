@@ -281,12 +281,34 @@ const RETRY_DELAY_MS = 1500;
  * `lbug.init.lock`, opened with `O_CREAT | O_EXCL`, and Windows can refuse it with
  * `EPERM` while another scanner or a previous process holds the directory. The same
  * class produces `unable to acquire init lock` when a crashed run left the file behind.
- * Both are worth one retry; a sandbox marker never is.
+ * Both are worth one retry; a sandbox marker never is, and neither is a denied
+ * directory creation — see {@link isSandboxStoreDenied}.
  */
 function isTransientLock(text: string): boolean {
   if (/\[sandbox:[^\]]*denied/i.test(text)) return false;
+  // The parse store is a directory the analyzer must create; a retry cannot grant a
+  // right the confined token does not have, so that class is handled separately.
+  if (isSandboxStoreDenied(text)) return false;
   if (/unable to acquire init lock/i.test(text)) return true;
   return /(EPERM|EBUSY|resource busy)/i.test(text) && /\.gitnexus|init\.lock|lbug/i.test(text);
+}
+
+/**
+ * Whether the parse worker was refused permission to create its cache directories.
+ *
+ * Measured in a confined DSH profile: the token can create **files** under `.gitnexus`
+ * (`lbug.init.lock` succeeds) but not **directories**, so `persistParsedFileShardSync`
+ * dies at `mkdir .gitnexus/parsedfile-store` and the pool trips its circuit breaker.
+ * Pre-creating the directory does not help either — GitNexus deletes it at the start of
+ * every parse, and that delete is refused for the same reason (0.1.3 shipped exactly
+ * that workaround and produced `EPERM … rmdir`). This is a property of the deployment,
+ * so the honest answer is one precise message pointing at the terminal, not a retry.
+ */
+function isSandboxStoreDenied(text: string): boolean {
+  return (
+    /EPERM[^\n]*mkdir[^\n]*\.gitnexus[\\/](parsedfile-store|parsedfile-cache|parse-cache)/i.test(text) ||
+    /mkdir[^\n]*\.gitnexus[\\/](parsedfile-store|parsedfile-cache|parse-cache)[^\n]*EPERM/i.test(text)
+  );
 }
 
 /**
@@ -603,6 +625,19 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
             exitCode,
             output: body,
             message: `超过 ${Math.round(timeoutMs / 1000)} 秒上限已终止。大仓库的全量重建可能需要更长时间。`,
+          });
+        } else if (isSandboxStoreDenied(combined)) {
+          // Deterministic, not transient: the confined token may create files in
+          // `.gitnexus` but not directories, and the parse worker needs a directory.
+          // Retrying would only spend another parse; say what to do instead.
+          finish(key, {
+            state: 'denied',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message:
+              '分析器的解析阶段要在 .gitnexus 下创建缓存目录，当前沙箱不允许（可以建文件、不能建目录），' +
+              '预建目录也会被 GitNexus 在解析开始时删除。请在普通终端执行下面的命令，再回到面板刷新。',
           });
         } else if (looksDenied(combined)) {
           finish(key, {
