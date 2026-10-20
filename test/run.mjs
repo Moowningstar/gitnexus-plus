@@ -1486,6 +1486,31 @@ async function deltaTests() {
 
   const sha = (text) => createHash('sha256').update(text).digest('hex');
 
+  // The wording branches are pure, so they run even where spawning is denied. The
+  // distinction they encode is the whole point of `certain`: a clean worktree is not a
+  // clean index.
+  {
+    const report = (patch) => ({
+      comparable: true,
+      certain: true,
+      needsRefresh: false,
+      counts: { checked: 0, hashed: 0, unchanged: 0, modified: 0, added: 0, deleted: 0, excluded: 0 },
+      entries: [],
+      notes: ['工作区与索引记录一致'],
+      durationMs: 5,
+      ...patch,
+    });
+    check('a certain clean verdict says 无需刷新', describeDelta(report({})).includes('无需刷新'), describeDelta(report({})));
+    check(
+      'an uncertain clean verdict says 无法确认 instead',
+      (() => {
+        const text = describeDelta(report({ certain: false, notes: ['索引没有记录可用的提交基线'] }));
+        return text.includes('无法确认') && !text.includes('无需刷新');
+      })(),
+      describeDelta(report({ certain: false, notes: ['索引没有记录可用的提交基线'] })),
+    );
+  }
+
   // A confined DSH process cannot spawn a child over piped stdio (`spawn EPERM`), and
   // every fixture here needs a real `git`. That is a property of the environment, not
   // of the engine, so it is reported as a skip with the same wording the search-helper
@@ -1506,6 +1531,7 @@ async function deltaTests() {
     await deltaRouteTests();
     return;
   }
+
 
   /** @param {string} name @param {Record<string,string>} files */
   const build = async (name, files) => {
@@ -1559,6 +1585,7 @@ async function deltaTests() {
     check('a clean tree is comparable', report.comparable === true, JSON.stringify(report.notes));
     check('the baseline is the indexed commit', report.basis === 'index', String(report.basis));
     check('a clean tree needs no refresh', report.needsRefresh === false);
+    check('the verdict is anchored to the index commit', report.certain === true, JSON.stringify(report));
     check('a clean tree reads no file content', report.counts.hashed === 0, JSON.stringify(report.counts));
     check('a clean tree has no candidates', report.counts.checked === 0, JSON.stringify(report.counts));
     check(
@@ -1630,6 +1657,32 @@ async function deltaTests() {
     const report = await readDelta(root);
     check('a project without an index is not comparable', report.comparable === false && report.indexed === false);
     check('it says what to do instead', (report.notes[0] ?? '').includes('索引'), JSON.stringify(report.notes));
+  }
+
+  // --- a manifest with no commit baseline -----------------------------------------
+  // Measured on this repository: a rebuild wrote an empty `lastCommit`, the tree was
+  // clean, and a naive gate said 无需刷新 — while the next commit would have made the
+  // index stale and the comparison still empty. A clean worktree is not a clean index.
+  {
+    const fixture = await build('no-commit', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.writeManifest({ 'src/a.ts': sha('export const a = 1;\n') }, '');
+    const report = await readDelta(fixture.root);
+    check(
+      'a manifest without a commit is comparable but not certain',
+      report.comparable === true && report.certain === false,
+      JSON.stringify({ comparable: report.comparable, certain: report.certain }),
+    );
+    check(
+      'a clean worktree alone does not claim the index is current',
+      report.needsRefresh === false && report.certain === false,
+      JSON.stringify({ needsRefresh: report.needsRefresh, certain: report.certain }),
+    );
+    check('the one-line verdict says it cannot confirm', describeDelta(report).includes('无法确认'), describeDelta(report));
+    check(
+      'the notes name the missing baseline and the consequence',
+      report.notes.join(' ').includes('提交基线') && report.notes.join(' ').includes('无法确认索引'),
+      JSON.stringify(report.notes),
+    );
   }
 
   // --- a legacy manifest with no hashes -------------------------------------------
@@ -2017,7 +2070,12 @@ async function realRepoSmoke() {
       Array.isArray(localActivity?.cross?.rows) && localActivity.cross.rows.length === 3,
       JSON.stringify(localActivity?.cross),
     );
-    if (localReport.repo?.lastCommit === null || localReport.repo?.lastCommit === undefined) {
+    // `''` is how the index reports "no commit recorded" — 0.1.3's null/undefined check
+    // missed it, and an index rebuilt from a dirty tree hits exactly that case. The
+    // engine then falls back to the activity-window baseline, which is the honest
+    // behaviour this branch asserts.
+    const recordedCommit = localReport.repo?.lastCommit;
+    if (typeof recordedCommit !== 'string' || recordedCommit === '') {
       check(
         'baseline review falls back to the activity window',
         localActivity?.baseline?.source === 'window' &&
@@ -2027,7 +2085,7 @@ async function realRepoSmoke() {
     } else {
       check(
         'activity reviews changes against the indexed commit',
-        localActivity?.baseline?.ref === localReport.repo.lastCommit &&
+        localActivity?.baseline?.ref === recordedCommit &&
           localActivity.baseline.available === true,
         JSON.stringify(localActivity?.baseline),
       );

@@ -329,6 +329,11 @@ export interface ClientDelta {
     excluded: number;
   };
   needsRefresh: boolean;
+  /**
+   * Whether the verdict is anchored to the index's own commit. Absent on an older
+   * host; treat that as `true` so a missing field cannot disable the gate by accident.
+   */
+  certain?: boolean;
   truncated: boolean;
   notes: string[];
   durationMs: number;

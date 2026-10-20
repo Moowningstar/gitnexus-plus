@@ -1194,6 +1194,35 @@ check(
   missingRoute.text.slice(-600),
 );
 
+// The verdict measured on this repository: the index recorded no commit, so the
+// comparison could only see the working tree. It must not be presented as "current".
+const uncertainGate = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  delta: withDelta({
+    certain: false,
+    notes: [
+      '索引没有记录可用的提交基线：只比较了工作区相对 HEAD 的改动，索引建立之后已提交的改动看不到',
+      '工作区相对 HEAD 没有改动，但无法确认索引已包含当前提交 —— 需要刷新才能确定',
+    ],
+  }),
+});
+check(
+  'an unanchored verdict does not claim the index is current',
+  !uncertainGate.text.includes('索引已是最新') && !uncertainGate.text.includes('无需刷新'),
+  uncertainGate.text.slice(-700),
+);
+check(
+  'an unanchored verdict explains the missing baseline',
+  uncertainGate.text.includes('提交基线') && uncertainGate.text.includes('无法确认索引'),
+  uncertainGate.text.slice(-700),
+);
+check(
+  'an unanchored verdict leaves the refresh enabled',
+  uncertainGate.text.includes('执行增量刷新'),
+  uncertainGate.text.slice(-700),
+);
+
 section('maintenance: FTS repair');
 
 const repairCommand = {

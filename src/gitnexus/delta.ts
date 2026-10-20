@@ -126,8 +126,21 @@ export interface DeltaReport {
   /**
    * Whether a refresh would plausibly change the index. Excluded files do not count:
    * re-running the analyzer would skip them again.
+   *
+   * Only meaningful together with {@link certain}. A `false` from a worktree-basis
+   * comparison means "no uncommitted change", not "the index is current".
    */
   needsRefresh: boolean;
+  /**
+   * Whether the answer is anchored to the index's own commit.
+   *
+   * When the manifest records no usable commit, the comparison degrades to
+   * working-tree-vs-HEAD, which cannot see commits made after the index was built. That
+   * is exactly the case a staleness gate must not report as clean — measured on this
+   * repository: a rebuild wrote an empty `lastCommit`, the tree was clean, and the gate
+   * said 无需刷新 while any later commit would have made it stale.
+   */
+  certain: boolean;
   /** the candidate set hit the cap; entries may be incomplete */
   truncated: boolean;
   /** operator-facing explanation of the verdict, in order of importance */
@@ -232,6 +245,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     entries: [],
     counts: { ...ZERO_COUNTS },
     needsRefresh: false,
+    certain: false,
     truncated: false,
     notes: [],
     durationMs: now() - startedAt,
@@ -393,21 +407,27 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
   for (const entry of entries) counts[entry.kind] += 1;
 
   const actionable = counts.modified + counts.added + counts.deleted;
+  const certain = basis === 'index';
   const notes: string[] = [];
   if (basis === 'worktree') {
     notes.push(
-      '索引没有可用的提交基线：只比较了工作区相对 HEAD 的改动，索引建立之前的已提交改动不在比较范围内',
+      '索引没有记录可用的提交基线：只比较了工作区相对 HEAD 的改动，索引建立之后已提交的改动看不到',
     );
   }
   if (truncated) {
     notes.push(`候选文件超过 ${maxFiles} 个，只检查了前 ${maxFiles} 个 —— 建议直接刷新`);
   }
   if (actionable === 0) {
-    notes.unshift(
-      counts.checked === 0
-        ? '工作区与索引记录一致：没有任何文件相对索引提交发生改动'
-        : `工作区与索引记录一致：${counts.checked} 个候选文件中 ${counts.unchanged} 个内容哈希匹配` +
-            (counts.excluded > 0 ? `，${counts.excluded} 个属索引策略排除` : ''),
+    // A clean worktree is not the same claim as a clean index. Saying "一致" on the
+    // worktree basis is how a stale index gets reported as current: the next commit
+    // makes it stale and this comparison will still be empty.
+    notes.push(
+      certain
+        ? counts.checked === 0
+          ? '工作区与索引记录一致：没有任何文件相对索引提交发生改动'
+          : `工作区与索引记录一致：${counts.checked} 个候选文件中 ${counts.unchanged} 个内容哈希匹配` +
+              (counts.excluded > 0 ? `，${counts.excluded} 个属索引策略排除` : '')
+        : '工作区相对 HEAD 没有改动，但无法确认索引已包含当前提交 —— 需要刷新才能确定',
     );
     if (counts.excluded > 0) {
       notes.push('被排除的文件刷新也会再次跳过，因此不需要为它们刷新索引');
@@ -430,6 +450,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     entries,
     counts,
     needsRefresh: actionable > 0,
+    certain,
     truncated,
     notes,
     durationMs: now() - startedAt,
@@ -443,7 +464,9 @@ export function describeDelta(report: DeltaReport): string {
     return `无法差量判断：${report.notes[0] ?? '原因未知'}`;
   }
   if (!report.needsRefresh) {
-    return `无需刷新（${report.counts.checked} 个候选，${report.counts.hashed} 次哈希，${report.durationMs}ms）`;
+    return report.certain
+      ? `无需刷新（${report.counts.checked} 个候选，${report.counts.hashed} 次哈希，${report.durationMs}ms）`
+      : `无法确认（${report.counts.checked} 个候选，${report.durationMs}ms）：${report.notes[0] ?? '索引没有记录提交基线'}`;
   }
   const changed = report.entries.filter((entry) => entry.kind !== 'excluded');
   const preview = changed

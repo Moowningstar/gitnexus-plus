@@ -163,7 +163,8 @@ check(
 check(
   'delta tool reports the verdict fields',
   deltaTool?.output?.schema?.properties?.needsRefresh !== undefined &&
-    deltaTool?.output?.schema?.properties?.comparable !== undefined,
+    deltaTool?.output?.schema?.properties?.comparable !== undefined &&
+    deltaTool?.output?.schema?.properties?.certain !== undefined,
   JSON.stringify(deltaTool?.output?.schema)?.slice(0, 200),
 );
 check('tool has a description', typeof tool?.description === 'string' && tool.description.length > 50);

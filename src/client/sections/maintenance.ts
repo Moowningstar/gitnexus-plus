@@ -92,7 +92,11 @@ export function MaintenanceSection({
    *                     cannot justify
    */
   const gate = delta ?? null;
-  const gateKnown = gate !== null && gate.comparable;
+  // `certain` is what separates "measured against the index snapshot" from "the working
+  // tree happens to be clean". Only the first can support a 无需刷新 verdict: a manifest
+  // without a recorded commit cannot see a commit made after it was written, so treating
+  // the second as clean is how a stale index gets reported as current.
+  const gateKnown = gate !== null && gate.comparable && gate.certain !== false;
   const gateClean = gateKnown && gate.needsRefresh === false;
   const changed = gate === null ? [] : gate.entries.filter((entry) => entry.kind !== 'excluded');
   const excludedCount = gate?.counts.excluded ?? 0;
@@ -318,9 +322,15 @@ export function MaintenanceSection({
                 : null,
             )
         : gate !== null && Array.isArray(gate.notes) && gate.notes.length > 0
-          ? // Comparable is false: there is no gate, and the reason matters — a legacy
-            // manifest and a missing git history are different operator problems.
-            h('div', { style: MUTED }, gate.notes[0])
+          ? // No gate: either the comparison was impossible (legacy manifest, no git) or
+            // it was not anchored to the index's commit. Both are "cannot prove it is
+            // current", and the notes say which — print them all, because the first one
+            // alone explains the cause but not the consequence.
+            h(
+              'div',
+              { style: { ...MUTED, display: 'flex', flexDirection: 'column', gap: '2px' } },
+              gate.notes.slice(0, 3).map((note, index) => h('div', { key: index }, `· ${note}`)),
+            )
           : null,
 
     commands.map((command) => {

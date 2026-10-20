@@ -183,6 +183,12 @@ interface DeltaToolArgs {
 interface DeltaToolResult {
   text: string;
   comparable: boolean;
+  /**
+   * Whether the verdict is anchored to the index's commit. `false` means the working
+   * tree is clean but the index may still predate the current commit — a `needsRefresh:
+   * false` must not be read as "the index is current" in that case.
+   */
+  certain: boolean;
   needsRefresh: boolean;
   modified: number;
   added: number;
@@ -344,8 +350,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
         'Compare a repository working tree with what its GitNexus index recorded (sha256 per file, ' +
         'read from .gitnexus/gitnexus.json) and report whether a refresh would change anything. ' +
         'Returns modified/added/deleted file lists without running the analyzer; a clean tree ' +
-        'returns needsRefresh=false in milliseconds. Read-only. Ask this before scheduling a ' +
-        're-index, or to explain why an index is stale.',
+        'returns needsRefresh=false in milliseconds. Check `certain` before concluding the index ' +
+        'is current: when the manifest records no commit baseline the comparison degrades to ' +
+        'working-tree-vs-HEAD, and needsRefresh=false then only means "nothing uncommitted". ' +
+        'Read-only. Ask this before scheduling a re-index, or to explain why an index is stale.',
       parameters: {
         repo: {
           type: 'string',
@@ -360,6 +368,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           properties: {
             text: { type: 'string', required: true },
             comparable: { type: 'boolean', required: true },
+            certain: { type: 'boolean', required: true },
             needsRefresh: { type: 'boolean', required: true },
             modified: { type: 'integer', required: true },
             added: { type: 'integer', required: true },
@@ -374,6 +383,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         return {
           text: `${describeDelta(report)}\n${report.notes.join('\n')}`.trim(),
           comparable: report.comparable,
+          certain: report.certain,
           needsRefresh: report.needsRefresh,
           modified: report.counts.modified,
           added: report.counts.added,

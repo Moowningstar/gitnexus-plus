@@ -15,7 +15,7 @@
 
 ## 插件做什么
 
-- **刷新门禁（Tier 0）**：在给出刷新按钮之前，用工作区文件与索引记录的 sha256（`.gitnexus/gitnexus.json` 的 `fileHashes`）比对，报告真正变化的内容：改 / 增 / 删，以及被索引策略排除的文件。工作区没变时毫秒级给出结论、**不启动分析器**，按钮直接说明"无需刷新"，而不是让你等一次几分钟的重建。
+- **刷新门禁（Tier 0）**：在给出刷新按钮之前，用工作区文件与索引记录的 sha256（`.gitnexus/gitnexus.json` 的 `fileHashes`）比对，报告真正变化的内容：改 / 增 / 删，以及被索引策略排除的文件。工作区没变时毫秒级给出结论、**不启动分析器**，按钮直接说明"无需刷新"，而不是让你等一次几分钟的重建。只有比对**锚定在索引记录的提交**上时才会说"已是最新"；索引没记录提交时会退化为工作区与 `HEAD` 比较，并明确说"无法确认"，而不是冒充新鲜。
 - **图视图**：把索引里的社区画在 canvas 上，跨社区关系按权重聚合；点社区看成员符号及它们之间的关系，点符号在文件查看器里定位到行。节点与边预算由宿主限制，并明确写出省略了多少。
 - **索引覆盖**：列出被 `gitnexus analyze` 跳过的超大文件，给出大小、语言占比，以及生成物/压缩文件的判断信号。
 - **索引新鲜度**：索引提交与 `HEAD` 对比，分为 `current` / `behind` / `diverged` / `unknown`，并给出未提交变更数。
@@ -120,7 +120,7 @@ npm test
 | 增量分析卡住，或数据库报 `Maximum database size … has been reached` | 用 **全量重建**（`--force`），或按 clean slate 清理后重建。 | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus)、[`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | 搜索报 `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | 图查询在 `lib/bin/search-helper.js` 里跑，不在 Electron 宿主里加载原生模块；升级后重启 DSH，并确保 shell PATH 上有 `node`。helper 起不来时会回退源码。 | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Windows 上搜索命中很少，或面板提示 FTS 不可用 | 索引是 `--skip-fts` 建的，或 FTS 扩展加载不了。关键词搜索仍按名称/路径匹配，源码回退按行匹配。此时面板提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不动图。若扩展文件本身缺失，修复同样会失败——那是上游安装问题。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
-| 刷新按钮显示“无需刷新”且不可点 | 这是 Tier 0 的判断，不是故障：索引记录的文件内容哈希全部没变，再跑分析器也不会改变索引。**仍然刷新** 可以强制跑一次（例如 GitNexus 升级或 schema 变化后）。判断依据不对时，按钮上方会写明原因。 | 本插件的差量引擎；无上游 GitNexus 路径。 |
+| 刷新按钮显示“无需刷新”且不可点 | 这是 Tier 0 的判断，不是故障：索引记录的文件内容哈希全部没变，再跑分析器也不会改变索引。**仍然刷新** 可以强制跑一次（例如 GitNexus 升级或 schema 变化后）。如果索引没有记录提交基线，面板**不会**说“无需刷新”，而是显示“无法确认”并保持按钮可用。 | 本插件的差量引擎；无上游 GitNexus 路径。 |
 | 图视图空白，或报 404 | 404 说明宿主还没有 `/api/gitnexus/graph` 路由，重启 DSH，而不是只刷新页面。空白画布但下面有说明，通常是索引还没有社区（旧索引）或索引忙：刷新索引即可。节点数按预算截断，卡片会写明省略了多少。 | 本插件宿主路由；图数据本身来自 GitNexus 索引。 |
 | 点击搜索结果没有打开文件 | 点击依赖 `ctx.sidebarRight.openResourceIn`；没有该服务的 profile 会退回复制 `path:line`。重启 DSH；仍不行就用“复制”。 | 面板/DSH 边界，无上游 GitNexus 路径。 |
 | 文件时间线报 404/401 | 客户端先热更新了，宿主还没加载 `/api/gitnexus/file-history` 路由。重启 DSH，不是只刷新页面。 | 本插件宿主路由；无上游 GitNexus 路径。 |
