@@ -90,7 +90,7 @@ export function effectiveSkipFts(repoPath: string, configured: boolean): boolean
   return configured || !ftsAvailable(repoPath);
 }
 
-export type MaintenanceMode = 'init' | 'full';
+export type MaintenanceMode = 'init' | 'full' | 'repair-fts';
 
 export interface MaintenanceCommand {
   mode: MaintenanceMode;
@@ -115,6 +115,13 @@ export interface MaintenanceOptions {
   skipFts?: boolean;
   memoryOff?: boolean;
   gitnexusHome?: string | null;
+  /**
+   * Offer the FTS repair command. The caller decides from the index's own
+   * `capabilities.fts.status`, because this module is deliberately filesystem-free:
+   * the exact command text is what a test asserts on, and a hidden manifest read
+   * would make the output depend on whatever repository happened to be on disk.
+   */
+  includeRepair?: boolean;
 }
 
 /** The resolved form of {@link MaintenanceOptions}, after defaults are applied. */
@@ -207,6 +214,26 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
       destructive: true,
       caveat: '--force 重建图与 FTS，未变更文件的解析产物仍会复用。',
     },
+    // Offered only when the index says FTS is unavailable — otherwise it is a no-op
+    // that looks like a feature. Deliberately **not** built on `common`: that array
+    // carries `--skip-fts` in the deployment where FTS is missing, and passing
+    // `--skip-fts --repair-fts` asks to repair what it was just told to skip.
+    ...(options.includeRepair === true
+      ? [
+          {
+            mode: 'repair-fts' as const,
+            label: '修复搜索索引（FTS）',
+            when: '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。',
+            argv: `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
+            shell:
+              envPrefix() +
+              `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
+            destructive: false,
+            caveat:
+              '只修复搜索索引，不改图。若 FTS 扩展文件本身缺失（Windows 上常见），修复也会失败 —— 那是上游安装问题。',
+          },
+        ]
+      : []),
   ];
 }
 

@@ -2,18 +2,21 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：0.1.3** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：0.1.4** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
 [上游 GitNexus 文档](#上游-gitnexus-文档路径)
 
-一个 DeepSeek Harness 插件：查看 GitNexus 索引**覆盖了什么、漏掉了什么**，在右侧栏刷新索引，并按关键词搜索图里的符号。
+一个 DeepSeek Harness 插件：查看 GitNexus 索引**覆盖了什么、漏掉了什么**，判断这次刷新值不值得跑，
+看图，在右侧栏刷新索引，并按关键词搜索图里的符号。
 
 它不 fork GitNexus、不重写解析器、不打包或再分发 GitNexus。`gitnexus` 是 **peer**，需要你自己提供。
 
 ## 插件做什么
 
+- **刷新门禁（Tier 0）**：在给出刷新按钮之前，用工作区文件与索引记录的 sha256（`.gitnexus/gitnexus.json` 的 `fileHashes`）比对，报告真正变化的内容：改 / 增 / 删，以及被索引策略排除的文件。工作区没变时毫秒级给出结论、**不启动分析器**，按钮直接说明"无需刷新"，而不是让你等一次几分钟的重建。
+- **图视图**：把索引里的社区画在 canvas 上，跨社区关系按权重聚合；点社区看成员符号及它们之间的关系，点符号在文件查看器里定位到行。节点与边预算由宿主限制，并明确写出省略了多少。
 - **索引覆盖**：列出被 `gitnexus analyze` 跳过的超大文件，给出大小、语言占比，以及生成物/压缩文件的判断信号。
 - **索引新鲜度**：索引提交与 `HEAD` 对比，分为 `current` / `behind` / `diverged` / `unknown`，并给出未提交变更数。
 - **图构成**：节点、边、社区、流程、embedding、边/节点比。
@@ -22,7 +25,7 @@
 - **关键词搜索**：按图节点的 `name` / `filePath` 匹配，返回 kind、path、line；点击结果打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
 - **源码回退**：图查询子进程起不来时（无可用 shell 沙箱、DLL/ABI、索引忙），在索引清单内的文件里做有界源码行匹配，结果标为 `mode: "text"`。
 - **无索引也有信息**：git 项目尚未建索引时，显示扫描概览、语言分布和初始化命令，而不是空白面板。
-- **维护**：初始化、增量刷新、全量重建（`--force`）都通过 DSH 的 shell 执行器运行，不自行请求提权。
+- **维护**：初始化、增量刷新、全量重建（`--force`）都通过 DSH 的 shell 执行器运行，不自行请求提权。索引报告 FTS 不可用时，面板另外提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不重跑分析。
 
 ## 安装
 
@@ -73,11 +76,16 @@ npm install --prefix <DSH_HOME>/gitnexus-plus/gitnexus gitnexus@^1.6.12
 DSH 内暴露：
 
 - 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }`
+- 工具 `gitnexus_delta`：`{ repo }` —— 这次刷新会不会改变索引
 - 路由 `GET /api/gitnexus/coverage?repo=<project>`
 - 路由 `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - 路由 `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7`：单个文件的
   有界提交时间线
-- 路由 `POST/GET/DELETE /api/gitnexus/analyze`（唯一会改动索引的入口）
+- 路由 `GET /api/gitnexus/delta?repo=<project>`：Tier 0 差量判断
+- 路由 `GET /api/gitnexus/graph?repo=<project>&view=communities|community&id=<community>`：
+  有界图投影
+- 路由 `POST/GET/DELETE /api/gitnexus/analyze`（唯一会改动索引的入口；`force=1` 全量重建，
+  `mode=repair-fts` 只修搜索索引）
 - 右侧栏 tab `gitnexus`
 
 CLI：
@@ -111,7 +119,9 @@ npm test
 | 刷新报 `EPERM … mkdir '<repo>\.gitnexus\parsedfile-store'` | GitNexus 1.6.12 会从 parse worker 创建这个缓存目录。插件现在在启动 analyze 前由宿主预建缓存目录；升级后重启 DSH。仍失败说明沙箱令牌不能写 `.gitnexus`，把复制出的命令放到普通终端执行。 | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors)、[`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus) |
 | 增量分析卡住，或数据库报 `Maximum database size … has been reached` | 用 **全量重建**（`--force`），或按 clean slate 清理后重建。 | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus)、[`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | 搜索报 `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | 图查询在 `lib/bin/search-helper.js` 里跑，不在 Electron 宿主里加载原生模块；升级后重启 DSH，并确保 shell PATH 上有 `node`。helper 起不来时会回退源码。 | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
-| Windows 上搜索命中很少，或面板提示 FTS 不可用 | 索引是 `--skip-fts` 建的，或 FTS 扩展加载不了。关键词搜索仍按名称/路径匹配，源码回退按行匹配；修复 FTS 是上游操作。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| Windows 上搜索命中很少，或面板提示 FTS 不可用 | 索引是 `--skip-fts` 建的，或 FTS 扩展加载不了。关键词搜索仍按名称/路径匹配，源码回退按行匹配。此时面板提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不动图。若扩展文件本身缺失，修复同样会失败——那是上游安装问题。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| 刷新按钮显示“无需刷新”且不可点 | 这是 Tier 0 的判断，不是故障：索引记录的文件内容哈希全部没变，再跑分析器也不会改变索引。**仍然刷新** 可以强制跑一次（例如 GitNexus 升级或 schema 变化后）。判断依据不对时，按钮上方会写明原因。 | 本插件的差量引擎；无上游 GitNexus 路径。 |
+| 图视图空白，或报 404 | 404 说明宿主还没有 `/api/gitnexus/graph` 路由，重启 DSH，而不是只刷新页面。空白画布但下面有说明，通常是索引还没有社区（旧索引）或索引忙：刷新索引即可。节点数按预算截断，卡片会写明省略了多少。 | 本插件宿主路由；图数据本身来自 GitNexus 索引。 |
 | 点击搜索结果没有打开文件 | 点击依赖 `ctx.sidebarRight.openResourceIn`；没有该服务的 profile 会退回复制 `path:line`。重启 DSH；仍不行就用“复制”。 | 面板/DSH 边界，无上游 GitNexus 路径。 |
 | 文件时间线报 404/401 | 客户端先热更新了，宿主还没加载 `/api/gitnexus/file-history` 路由。重启 DSH，不是只刷新页面。 | 本插件宿主路由；无上游 GitNexus 路径。 |
 | 分析内存不足 | 保留面板的 `NODE_OPTIONS` / `GITNEXUS_MEMORY`，或手动提高 heap；必要时全量重建。 | [`gitnexus/README.md` — Analysis runs out of memory](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analysis-runs-out-of-memory)、[`RUNBOOK.md` — Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
@@ -146,7 +156,8 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
   gitnexus analyze --index-only '<repo>'
 ```
 
-全量重建再加 `--force`。
+全量重建再加 `--force`；只修搜索索引用 `--repair-fts`（面板在索引报告 FTS 不可用时提供
+**修复搜索索引（FTS）**，不会重跑分析）。
 
 - `GITNEXUS_MEMORY=off`：阻止 CLI 通过管道重新 spawn 自己（受限沙箱会 `spawn EPERM`）。
 - `NODE_OPTIONS=--max-old-space-size=8192`：补上它本来想通过 respawn 拿到的 heap。
@@ -168,6 +179,8 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 ## 边界
 
 - 覆盖与搜索是只读的；维护是单独确认的写操作，不会自动触发。
+- 刷新门禁比对的是索引记录过的文件内容哈希。它看不到分析器因自身原因必须重跑的情况（schema 升级、新的分析特性）；**仍然刷新** 就是为这种情况留的。
+- 图视图画的是社区，不是全部符号：总览是社区图，下钻最多显示一个社区的节点预算那么多成员。两者都会标注是否截断。
 - 只报告 GitNexus 索引的事实，不重写解析器，不重新实现图数据库。
 - 搜索的 graph 模式是名称/路径匹配，不搜正文；text 模式才按行匹配，且有上限。
 - 源码回退只覆盖索引清单里的文件，新文件需先刷新索引。

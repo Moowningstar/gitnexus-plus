@@ -1093,5 +1093,273 @@ check(
   oldHost.text.slice(-500),
 );
 
+// ---------------------------------------------------------------------------
+// Tier 0 gate and the FTS repair control
+// ---------------------------------------------------------------------------
+
+section('maintenance: the refresh is gated by the delta verdict');
+
+/** @param {Record<string, unknown>} patch */
+const withDelta = (patch) => ({
+  indexed: true,
+  comparable: true,
+  basis: 'index',
+  indexedCommit: 'a'.repeat(40),
+  headCommit: 'b'.repeat(40),
+  entries: [],
+  counts: { checked: 0, hashed: 0, unchanged: 0, modified: 0, added: 0, deleted: 0, excluded: 0 },
+  needsRefresh: false,
+  truncated: false,
+  notes: ['工作区与索引记录一致：没有任何文件相对索引提交发生改动'],
+  durationMs: 12,
+  readAt: new Date().toISOString(),
+  ...patch,
+});
+
+const cleanGate = render(I.CoverageView, { report, ...viewProps, delta: withDelta({}) });
+check(
+  'a clean tree disables the normal refresh and says why',
+  cleanGate.text.includes('无需刷新') && cleanGate.text.includes('索引已是最新'),
+  cleanGate.text.slice(-600),
+);
+check(
+  'a clean tree keeps an escape hatch instead of removing the decision',
+  cleanGate.text.includes('仍然刷新'),
+  cleanGate.text.slice(-600),
+);
+
+const dirtyGate = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  delta: withDelta({
+    needsRefresh: true,
+    counts: { checked: 3, hashed: 2, unchanged: 1, modified: 1, added: 1, deleted: 1, excluded: 0 },
+    entries: [
+      { path: 'src/a.ts', kind: 'modified', reason: null },
+      { path: 'src/c.ts', kind: 'added', reason: null },
+      { path: 'src/b.ts', kind: 'deleted', reason: null },
+    ],
+    notes: ['索引内容已落后：1 个修改、1 个新增、1 个删除'],
+  }),
+});
+check(
+  'a dirty tree explains what changed before asking',
+  dirtyGate.text.includes('索引内容已落后') && dirtyGate.text.includes('1 改 / 1 增 / 1 删'),
+  dirtyGate.text.slice(-800),
+);
+check(
+  'the changed paths are listed with their kind',
+  dirtyGate.text.includes('M src/a.ts') &&
+    dirtyGate.text.includes('A src/c.ts') &&
+    dirtyGate.text.includes('D src/b.ts'),
+  dirtyGate.text.slice(-800),
+);
+
+const excludedGate = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  delta: withDelta({
+    needsRefresh: false,
+    counts: { checked: 1, hashed: 0, unchanged: 0, modified: 0, added: 0, deleted: 0, excluded: 1 },
+    entries: [{ path: 'assets/big.bin', kind: 'excluded', reason: '超过索引记录的大小上限（512 KB）' }],
+    notes: ['工作区与索引记录一致：1 个候选文件中 0 个内容哈希匹配，1 个属索引策略排除'],
+  }),
+});
+check(
+  'an excluded-only change says it is not a reason to refresh',
+  excludedGate.text.includes('刷新也不会收录'),
+  excludedGate.text.slice(-600),
+);
+
+// A legacy index (or a host without the route) has no verdict. The control must keep
+// working rather than block a refresh it cannot justify.
+const unknownGate = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  delta: withDelta({
+    comparable: false,
+    notes: ['该索引没有记录文件哈希（旧格式 manifest），无法判断内容是否变化 —— 直接刷新'],
+  }),
+});
+check(
+  'an incomparable index explains itself and still allows a refresh',
+  unknownGate.text.includes('没有记录文件哈希') && unknownGate.text.includes('执行增量刷新'),
+  unknownGate.text.slice(-600),
+);
+
+const missingRoute = render(I.CoverageView, { report, ...viewProps, delta: null, deltaError: null });
+check(
+  'a host without the delta route behaves as before',
+  missingRoute.text.includes('执行增量刷新') && !missingRoute.text.includes('无需刷新'),
+  missingRoute.text.slice(-600),
+);
+
+section('maintenance: FTS repair');
+
+const repairCommand = {
+  mode: 'repair-fts',
+  label: '修复搜索索引（FTS）',
+  when: '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。',
+  argv: "gitnexus analyze --index-only --repair-fts 'D:\\demo'",
+  shell: "$env:GITNEXUS_MEMORY='off'; gitnexus analyze --index-only --repair-fts 'D:\\demo'",
+  destructive: false,
+  caveat: null,
+};
+const withRepair = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  maintenance: {
+    ...maintenance,
+    supportsRepair: true,
+    commands: [...maintenance.commands, repairCommand],
+  },
+  delta: withDelta({}),
+});
+check(
+  'the repair control is offered when the host supports it',
+  withRepair.text.includes('修复搜索索引') && withRepair.text.includes('--repair-fts'),
+  withRepair.text.slice(-900),
+);
+
+const repairFromOldHost = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  maintenance: {
+    ...maintenance,
+    commands: [...maintenance.commands, repairCommand],
+  },
+  delta: withDelta({}),
+});
+check(
+  'a host without repair support does not get a repair button',
+  !repairFromOldHost.text.includes('修复搜索索引'),
+  repairFromOldHost.text.slice(-900),
+);
+
+const repairRun = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  run: {
+    state: 'done',
+    force: false,
+    repairFts: true,
+    command: 'gitnexus analyze --index-only --repair-fts',
+    startedAt: Date.now() - 3000,
+    finishedAt: Date.now(),
+    exitCode: 0,
+    message: null,
+    output: '',
+  },
+  delta: withDelta({}),
+});
+check('a repair run is labelled as such', repairRun.text.includes('修复 FTS'), repairRun.text.slice(-900));
+
+// ---------------------------------------------------------------------------
+// Graph card
+// ---------------------------------------------------------------------------
+
+section('graph: bounded projection card');
+
+const graphEdge = { source: 'comm_43', target: 'comm_8', type: 'CALLS', weight: 2 };
+const graphState = (patch) => ({
+  projection: {
+    view: 'communities',
+    scope: null,
+    total: 39,
+    nodes: [
+      { id: 'comm_43', kind: 'Community', name: 'Test', filePath: null, startLine: null, symbolCount: 26 },
+      { id: 'comm_8', kind: 'Community', name: 'Routes', filePath: null, startLine: null, symbolCount: 18 },
+    ],
+    edges: [graphEdge],
+    truncated: true,
+    budget: { nodes: 220, edges: 800 },
+    notes: ['共 39 个社区，显示符号数最多的 2 个'],
+    readAt: new Date().toISOString(),
+  },
+  loading: false,
+  error: null,
+  scope: null,
+  onOpenCommunity: () => {},
+  onBack: () => {},
+  onReload: () => {},
+  onOpenSymbol: () => {},
+  ...patch,
+});
+
+const overview = render(I.CoverageView, { report, ...viewProps, graph: graphState({}) });
+check(
+  'the graph card names the overview and its coverage',
+  overview.text.includes('社区总览') && overview.text.includes('2 / 39 个社区'),
+  overview.text.slice(-700),
+);
+check(
+  'a truncated view says how much it left out',
+  overview.text.includes('已截断') && overview.text.includes('共 39 个社区'),
+  overview.text.slice(-700),
+);
+check(
+  'the reachable list mirrors the drawn nodes',
+  overview.text.includes('Test · 26') && overview.text.includes('Routes · 18'),
+  overview.text.slice(-700),
+);
+check(
+  'the card explains the interaction and the budget',
+  overview.text.includes('滚轮缩放') && overview.text.includes('220'),
+  overview.text.slice(-700),
+);
+
+const drilled = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  graph: graphState({
+    scope: 'comm_43',
+    projection: {
+      view: 'community',
+      scope: 'comm_43',
+      total: 26,
+      nodes: [
+        {
+          id: 'Function:test/run.mjs:check',
+          kind: 'Function',
+          name: 'check',
+          filePath: 'test/run.mjs',
+          startLine: 30,
+        },
+      ],
+      edges: [],
+      truncated: false,
+      budget: { nodes: 220, edges: 800 },
+      notes: [],
+      readAt: new Date().toISOString(),
+    },
+  }),
+});
+check(
+  'a drill-down names its scope and offers a way back',
+  drilled.text.includes('社区 comm_43') && drilled.text.includes('← 全部社区'),
+  drilled.text.slice(-700),
+);
+check(
+  'a symbol member is listed with its name',
+  drilled.text.includes('check'),
+  drilled.text.slice(-700),
+);
+check(
+  'the drill-down explains that a symbol opens its file',
+  drilled.text.includes('打开它并定位到行'),
+  drilled.text.slice(-700),
+);
+
+const graphFailed = render(I.CoverageView, { report, ...viewProps, graph: graphState({ projection: null, error: '图查询失败：索引被占用' }) });
+check('a graph error is surfaced', graphFailed.text.includes('图查询失败'), graphFailed.text.slice(-500));
+
+const graphLoading = render(I.CoverageView, { report, ...viewProps, graph: graphState({ projection: null, loading: true }) });
+check('an empty graph says it is still reading', graphLoading.text.includes('读取中'), graphLoading.text.slice(-500));
+
+// A host without the route leaves the state undefined; the card must simply not appear
+// rather than showing an empty frame in every profile that has not restarted yet.
+const noGraph = render(I.CoverageView, { report, ...viewProps });
+check('a host without the graph route renders no graph card', !noGraph.text.includes('社区总览'));
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

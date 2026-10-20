@@ -51,6 +51,12 @@ export interface AnalyzeStatus {
   state: AnalyzeState;
   /** Whether this run was a full rebuild (`--force`). */
   force: boolean;
+  /**
+   * Whether this run repaired the search indexes (`--repair-fts`) instead of
+   * re-analysing. Mutually exclusive with `force`: they ask for opposite things, and
+   * the route never sets both.
+   */
+  repairFts: boolean;
   /** The command as run, so a failure can be reproduced by hand. */
   command: string;
   startedAt: number;
@@ -127,6 +133,9 @@ export interface AnalyzeRunnerOptions {
    * measured to fail with `spawn EPERM` on an index without FTS (the extension tries
    * to install out-of-process), while a static `true` forces a full rebuild on one
    * that has it.
+   *
+   * Ignored when `repairFts` is requested: that run exists to build the FTS indexes,
+   * so skipping them would make it a no-op with a success exit code.
    */
   skipFts?: boolean;
   /** Override the redirect of the global registry write. */
@@ -138,11 +147,12 @@ export interface AnalyzeRunner {
   /**
    * Begin a run, or report the one already in flight for this repository.
    *
-   * `force` selects a full rebuild. It is a request, not a second run: two analyze
-   * processes on one store contend, so a force request while an incremental run is
-   * in flight returns that run.
+   * `force` selects a full rebuild and `repairFts` selects an FTS-only repair. They are
+   * requests, not additional runs: two analyze processes on one store contend, so a
+   * request while a run is in flight returns that run — and `repairFts` wins over
+   * `force` when a caller passes both, because repairing is the smaller claim.
    */
-  start(repoPath: string, options?: { force?: boolean }): AnalyzeStatus;
+  start(repoPath: string, options?: { force?: boolean; repairFts?: boolean }): AnalyzeStatus;
   status(repoPath: string): AnalyzeStatus | null;
   cancel(repoPath: string): boolean;
   /** Abort every in-flight run. Called on plugin teardown. */
@@ -196,6 +206,8 @@ export function analyzeCommandLine(
     viaNode?: boolean;
     /** Full rebuild. This is the destructive escape hatch; the button must say so. */
     force?: boolean;
+    /** Repair the search (FTS) indexes only. Never combined with `skipFts`. */
+    repairFts?: boolean;
     /** Must match `maintenanceCommands`; see the note on the runner option. */
     skipFts?: boolean;
     gitnexusHome?: string | null;
@@ -208,11 +220,18 @@ export function analyzeCommandLine(
   // is spawned through `node`. This is the better shape when available: no shim, no
   // `.cmd`/`.ps1` selection, and therefore no reliance on the shell's call operator.
   const viaNode = options.viaNode === true;
+  // Repair and skip are contradictory, and both flags are accepted by the CLI without
+  // complaining: `--skip-fts --repair-fts` exits 0 having done nothing. Guard here
+  // rather than trusting callers to keep them apart.
+  const repairFts = options.repairFts === true;
+  const skipFts = options.skipFts === true && !repairFts;
+  const force = options.force === true && !repairFts;
 
   const args =
     `analyze --index-only` +
-    `${options.skipFts === true ? ' --skip-fts' : ''}` +
-    `${options.force === true ? ' --force' : ''} ` +
+    `${repairFts ? ' --repair-fts' : ''}` +
+    `${skipFts ? ' --skip-fts' : ''}` +
+    `${force ? ' --force' : ''} ` +
     quoteFor(flavor, repoPath);
   const head = viaNode ? `node ${quoteFor(flavor, cliPath)}` : quoteFor(flavor, cliPath);
   // On Windows a `.cmd` or `.ps1` reached by absolute path needs `&`. POSIX needs none,
@@ -297,6 +316,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
   const BLANK: Omit<AnalyzeStatus, 'repoPath'> = {
     state: 'failed',
     force: false,
+    repairFts: false,
     command: '',
     startedAt: 0,
     finishedAt: null,
@@ -321,16 +341,26 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     return next;
   };
 
-  const start = (repoPath: string, request: { force?: boolean } = {}): AnalyzeStatus => {
+  const start = (
+    repoPath: string,
+    request: { force?: boolean; repairFts?: boolean } = {},
+  ): AnalyzeStatus => {
     const key = path.resolve(repoPath);
     // Named `request`, not `options`: the runner's own configuration is the outer
     // `options`, and shadowing it silently dropped `toolchain`, `memoryOff` and
     // `heapMb` from every run built after the force argument was added.
-    const force = request.force === true;
+    //
+    // Repair wins over force: a caller asking for both wants the smaller, more targeted
+    // operation, and running a full rebuild to fix FTS would be a much larger change
+    // than the button said. `analyzeCommandLine` enforces the same precedence so the
+    // displayed command cannot disagree with the one executed.
+    const repairFts = request.repairFts === true;
+    const force = repairFts ? false : request.force === true;
     // Both decisions are per repository, not per plugin: the skip-fts policy depends
     // on the index's own FTS capability, and the registry redirect belongs beside the
-    // index so it stays inside the workspace the host was granted.
-    const skipFts = effectiveSkipFts(key, options.skipFts === true);
+    // index so it stays inside the workspace the host was granted. A repair run never
+    // skips FTS — that would be the one flag combination that does nothing at all.
+    const skipFts = repairFts ? false : effectiveSkipFts(key, options.skipFts === true);
     const gitnexusHome = options.gitnexusHome ?? defaultGitnexusHome(key);
 
     // One run per repository. Two concurrent `analyze` processes would contend for the
@@ -339,11 +369,20 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     const running = runs.get(key);
     if (running !== undefined && running.state === 'running') return running;
 
+    // The command as a human would type it, for the states that never reach a real
+    // invocation. Kept in one place so an early return cannot describe a different
+    // operation than the one the request asked for.
+    const previewCommand =
+      `gitnexus analyze --index-only` +
+      `${repairFts ? ' --repair-fts' : ''}` +
+      `${force ? ' --force' : ''}`;
+
     if (shell === null) {
       return finish(key, {
         state: 'unavailable',
         force,
-        command: `gitnexus analyze --index-only${force ? ' --force' : ''}`,
+        repairFts,
+        command: previewCommand,
         startedAt: now(),
         output: '',
         message:
@@ -360,7 +399,8 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       return finish(key, {
         state: 'unavailable',
         force,
-        command: `gitnexus analyze --index-only${force ? ' --force' : ''}`,
+        repairFts,
+        command: previewCommand,
         startedAt: now(),
         output: '',
         message:
@@ -378,6 +418,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       heapMb: options.heapMb,
       viaNode: cli.viaNode,
       force,
+      repairFts,
       skipFts,
       gitnexusHome,
     });
@@ -387,6 +428,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       return finish(key, {
         state: 'failed',
         force,
+        repairFts,
         command,
         startedAt: now(),
         output: '',
@@ -400,6 +442,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       repoPath: key,
       state: 'running',
       force,
+      repairFts,
       command,
       startedAt: now(),
       finishedAt: null,

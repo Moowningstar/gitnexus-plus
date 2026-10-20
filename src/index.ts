@@ -23,6 +23,7 @@ import {
   commandRationale,
   defaultGitnexusHome,
   effectiveSkipFts,
+  ftsAvailable,
   maintenanceCommands,
   type MaintenanceCommand,
 } from './gitnexus/commands.js';
@@ -31,7 +32,11 @@ import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
 import { mountSearchRoute } from './routes/search.js';
 import { mountFileHistoryRoute } from './routes/file-history.js';
+import { mountDeltaRoute } from './routes/delta.js';
+import { mountGraphRoute } from './routes/graph.js';
 import { readFileActivity } from './gitnexus/git-activity.js';
+import { describeDelta, readDelta } from './gitnexus/delta.js';
+import { projectViaHelper } from './gitnexus/graph.js';
 import { searchWithFallback } from './gitnexus/search.js';
 import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
 import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
@@ -146,6 +151,12 @@ export interface MaintenanceInfo {
    * ignored and the button would silently run an incremental refresh instead.
    */
   supportsForce: true;
+  /**
+   * Whether this host understands `mode=repair-fts` and offers the repair command.
+   * Same job as `supportsForce`: a client that hot-reloaded ahead of the host must not
+   * render a control the route would silently treat as a plain refresh.
+   */
+  supportsRepair: true;
 }
 
 /** What the `gitnexus_coverage` tool returns to the model. */
@@ -161,6 +172,22 @@ interface CoverageToolResult {
 interface CoverageToolArgs {
   repo: string;
   includeLanguages?: boolean;
+}
+
+/** Arguments the model supplies to `gitnexus_delta`. */
+interface DeltaToolArgs {
+  repo: string;
+}
+
+/** What the `gitnexus_delta` tool returns to the model. */
+interface DeltaToolResult {
+  text: string;
+  comparable: boolean;
+  needsRefresh: boolean;
+  modified: number;
+  added: number;
+  deleted: number;
+  excluded: number;
 }
 
 export function apply(ctx: Context, config: PluginConfig): void {
@@ -183,6 +210,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Resolved at boot so a search never depends on the host's working directory. The
   // file is run by the system Node (see `searchViaHelper`); this process only names it.
   const searchHelperPath = fileURLToPath(new URL('./bin/search-helper.js', import.meta.url));
+  // Same execution boundary for the graph projection: the native store cannot load in
+  // this process, so the query runs in the helper and only JSON comes back.
+  const graphHelperPath = fileURLToPath(new URL('./bin/graph-helper.js', import.meta.url));
 
   /**
    * Resolve a coverage report, from cache when it is recent enough.
@@ -220,6 +250,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
    * pure function of the repository.
    */
   const maintenanceFor = (repoPath: string): MaintenanceInfo => {
+    // Read once: the repair command is offered only when the index itself says FTS is
+    // missing, so an operator never sees "repair" as a permanent third button that
+    // does nothing. `ftsAvailable` reads the manifest synchronously; the coverage
+    // engine has already read the same file for this request.
+    const hasFts = ftsAvailable(repoPath);
     const options = {
       // `skipFts: false` means automatic, not "attempt FTS": if the index has no FTS,
       // attempting the install dies with `spawn EPERM` in a confined host.
@@ -228,11 +263,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // Default to a plugin-owned home inside the project so the global registry
       // write stays within the workspace. The explicit config still wins.
       gitnexusHome: config.gitnexusHome === '' ? defaultGitnexusHome(repoPath) : config.gitnexusHome,
+      includeRepair: !hasFts,
     };
     return {
       commands: maintenanceCommands(repoPath, options),
       rationale: commandRationale(options),
       supportsForce: true,
+      supportsRepair: true,
     };
   };
 
@@ -291,6 +328,67 @@ export function apply(ctx: Context, config: PluginConfig): void {
     }),
   );
 
+  /**
+   * The "should I refresh?" tool.
+   *
+   * Separate from `gitnexus_coverage` rather than a flag on it: coverage is a scan of
+   * the working tree and costs a walk over every file, while this one hashes only the
+   * files git says differ from the indexed commit — usually none. They answer
+   * different questions at different costs, and the model should be able to ask the
+   * cheap one first.
+   */
+  ctx.tools.register(
+    defineTool<DeltaToolArgs, DeltaToolResult>({
+      name: 'gitnexus_delta',
+      description:
+        'Compare a repository working tree with what its GitNexus index recorded (sha256 per file, ' +
+        'read from .gitnexus/gitnexus.json) and report whether a refresh would change anything. ' +
+        'Returns modified/added/deleted file lists without running the analyzer; a clean tree ' +
+        'returns needsRefresh=false in milliseconds. Read-only. Ask this before scheduling a ' +
+        're-index, or to explain why an index is stale.',
+      parameters: {
+        repo: {
+          type: 'string',
+          required: true,
+          description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            text: { type: 'string', required: true },
+            comparable: { type: 'boolean', required: true },
+            needsRefresh: { type: 'boolean', required: true },
+            modified: { type: 'integer', required: true },
+            added: { type: 'integer', required: true },
+            deleted: { type: 'integer', required: true },
+            excluded: { type: 'integer', required: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.text }],
+      },
+      async execute(args) {
+        const report = await readDelta(args.repo);
+        return {
+          text: `${describeDelta(report)}\n${report.notes.join('\n')}`.trim(),
+          comparable: report.comparable,
+          needsRefresh: report.needsRefresh,
+          modified: report.counts.modified,
+          added: report.counts.added,
+          deleted: report.counts.deleted,
+          excluded: report.counts.excluded,
+        };
+      },
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `GitNexus delta · ${String(args.repo).split(/[\\/]/).pop()}`,
+        kind: 'read',
+      }),
+    }),
+  );
+
   if (config.serveRoutes) {
     // Optional carrier: absent on headless profiles, so the tool above still works.
     ctx.inject(['webServer'], (svcCtx) => {
@@ -330,6 +428,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
         mountFileHistoryRoute(svcCtx.webServer, {
           read: (repoPath, filePath, options) => readFileActivity(repoPath, filePath, options),
         }),
+        mountDeltaRoute(svcCtx.webServer, {
+          read: (repoPath) => readDelta(repoPath),
+        }),
         mountAnalyzeRoute(svcCtx.webServer, {
           start: (repoPath, options) => analyze.start(repoPath, options),
           status: (repoPath) => analyze.status(repoPath),
@@ -347,6 +448,14 @@ export function apply(ctx: Context, config: PluginConfig): void {
               shell: searchShell,
               helperPath: searchHelperPath,
               limit: options?.limit,
+              managedPrefix: installPrefix,
+            }),
+        }),
+        mountGraphRoute(svcCtx.webServer, {
+          project: (repoPath, view, id) =>
+            projectViaHelper(repoPath, view, id, {
+              shell: searchShell,
+              helperPath: graphHelperPath,
               managedPrefix: installPrefix,
             }),
         }),

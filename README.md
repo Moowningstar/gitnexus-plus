@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.3](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.3)** ·
+**Current release: [0.1.4](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.4)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -10,13 +10,23 @@
 [Upstream GitNexus docs](#upstream-gitnexus-documentation)
 
 A DeepSeek Harness plugin: see what a GitNexus index **covers and what it leaves out**,
-refresh it from the sidebar, and search its symbols by keyword.
+decide whether a refresh is worth running, browse the graph, refresh it from the sidebar,
+and search its symbols by keyword.
 
 It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitnexus` is a
 **peer**; you provide it.
 
 ## What it does
 
+- **Refresh gate (Tier 0)** — before offering a refresh, the panel compares the working
+  tree with the sha256 hashes the index recorded in `.gitnexus/gitnexus.json` and reports
+  what actually differs: modified / added / deleted, plus files the index's own policy
+  excludes. A clean tree answers in milliseconds without starting the analyzer, and the
+  button says so instead of running a minutes-long rebuild.
+- **Graph view** — the index's communities drawn on a canvas, with aggregated
+  cross-community edges; click a community to see its member symbols and the relations
+  among them, click a symbol to open its file at the line. Node and edge budgets are
+  applied by the host, and the view states what it left out.
 - **Index coverage** — lists the oversized files `gitnexus analyze` skipped, with size,
   language share, and generated/minified signals.
 - **Index freshness** — indexed commit vs `HEAD`, classified `current` / `behind` /
@@ -39,7 +49,9 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **No-index visibility** — a git project without an index shows a scan overview,
   language split and the initialize command instead of an empty panel.
 - **Maintenance** — initialize, incremental refresh and full rebuild (`--force`) run
-  through DSH's shell executor, with no self-escalation.
+  through DSH's shell executor, with no self-escalation. When the index reports FTS as
+  unavailable, a **修复搜索索引（FTS）** action runs `analyze --repair-fts` — the search
+  indexes only, without re-analysing the repository.
 
 ## Install
 
@@ -95,11 +107,16 @@ it cannot become a filesystem probe.
 Inside DSH:
 
 - tool `gitnexus_coverage`: `{ repo, includeLanguages? }`
+- tool `gitnexus_delta`: `{ repo }` — would a refresh change anything?
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's
   bounded commit timeline
-- route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index)
+- route `GET /api/gitnexus/delta?repo=<project>` — Tier 0 comparison against the index
+- route `GET /api/gitnexus/graph?repo=<project>&view=communities|community&id=<community>`
+  — a bounded graph projection
+- route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index;
+  `force=1` for a full rebuild, `mode=repair-fts` for the search indexes only)
 - right-sidebar tab `gitnexus`
 
 CLI:
@@ -141,7 +158,9 @@ GitNexus path owns the rest.
 | Refresh fails with `EPERM … mkdir '<repo>\.gitnexus\parsedfile-store'` | GitNexus 1.6.12 creates this cache directory from the parse worker. The plugin pre-creates the cache directories before spawning; restart DSH after upgrading. If it still fails, the sandbox token cannot write `.gitnexus`; run the copied command in a normal terminal. | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors), [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus) |
 | Incremental analyze hangs, or the database reports `Maximum database size … has been reached` | Use **全量重建** (`--force`), or the clean-slate steps. | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus), [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Search fails with `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | Graph search runs in `lib/bin/search-helper.js`, never in the Electron host. Restart DSH after upgrading and keep `node` on the shell PATH. If the helper cannot start at all, search falls back to source text. | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
-| Windows search returns very few hits, or the panel warns FTS is unavailable | The index was built with `--skip-fts`, or the FTS extension cannot load. Keyword search still matches names and paths; the source fallback matches lines. Repairing FTS is an upstream action. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| Windows search returns very few hits, or the panel warns FTS is unavailable | The index was built with `--skip-fts`, or the FTS extension cannot load. Keyword search still matches names and paths; the source fallback matches lines. The panel then offers **修复搜索索引（FTS）**, which runs `analyze --repair-fts` and leaves the graph alone. If the extension file itself is missing, the repair fails too — installing it is upstream. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| The refresh button says 无需刷新 and is disabled | That is the Tier 0 verdict, not a failure: every file the index recorded still hashes the same, so re-running the analyzer would change nothing. **仍然刷新** forces it anyway (useful after a schema or GitNexus upgrade). If the verdict itself is wrong, the reason is printed above the button. | This plugin's delta engine; no upstream GitNexus path. |
+| The graph card is empty, or fails with 404 | A 404 means the host predates `/api/gitnexus/graph` — restart DSH, not just the page. An empty canvas with a message means the index has no communities yet (an old index), or the store is busy: refresh the index. Nodes are capped by design; the card states how much it left out. | This plugin's host route; graph data itself comes from the GitNexus index. |
 | Clicking a search hit does not open a file | The click uses `ctx.sidebarRight.openResourceIn`; a profile without that service falls back to copying `path:line`. Restart DSH; if it persists, use the Copy button. | This panel/DSH boundary; no upstream GitNexus path. |
 | The file timeline fails with 404/401 | The client hot-reloaded before the host did, so `/api/gitnexus/file-history` is not mounted yet. Restart DSH (not just refresh the page). | This plugin's host route; no upstream GitNexus path. |
 | Analyze runs out of memory | Keep the panel's `NODE_OPTIONS` / `GITNEXUS_MEMORY` settings, or raise the heap manually; the index may need a full rebuild. | [`gitnexus/README.md` — Analysis runs out of memory](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analysis-runs-out-of-memory), [`RUNBOOK.md` — Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
@@ -177,7 +196,9 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
   gitnexus analyze --index-only '<repo>'
 ```
 
-Add `--force` for a full rebuild.
+Add `--force` for a full rebuild, or `--repair-fts` alone to rebuild the search indexes
+without touching the graph (the panel offers that as **修复搜索索引（FTS）** when the index
+reports FTS as unavailable).
 
 - `GITNEXUS_MEMORY=off` — stops the CLI from re-spawning itself over piped stdio, which a
   confined sandbox denies (`spawn EPERM`).
@@ -190,7 +211,8 @@ Add `--force` for a full rebuild.
 `--skip-fts` is **adaptive per index**: no flag when the manifest says FTS is available,
 and the flag when it is not. `skipFts: true` can force the flag; there is no config that
 forces FTS on, because enabling it is a repair (`gitnexus analyze --repair-fts`), not an
-incremental refresh.
+incremental refresh — so the panel exposes it as its own action, and a repair run never
+carries `--skip-fts` (the CLI accepts that pair and exits 0 having done nothing).
 
 ## License (read before commercial use)
 
@@ -211,6 +233,12 @@ the related features puts that use under it.**
 
 - Coverage and search are read-only; maintenance is a separately confirmed write and
   never starts by itself.
+- The refresh gate compares content hashes of the files the index recorded. It cannot
+  see a change the analyzer would make for its own reasons (a schema upgrade, a new
+  feature mode); **仍然刷新** exists for exactly that case.
+- The graph view draws communities, not every symbol: the overview is the community
+  graph, and a drill-down shows at most the configured node budget of one community's
+  members. Both say when they are truncated.
 - The plugin reports facts about a GitNexus index; it does not rewrite the parser or
   reimplement the graph database.
 - Graph search matches names/paths, not bodies; the text fallback matches lines and is

@@ -900,6 +900,19 @@ async function analyzeTests() {
   check('--force is appended after --index-only', forcedLine.includes('analyze --index-only --force'), forcedLine);
   check('a normal command is not forced', !winLine.includes('--force'), winLine);
 
+  // The repair flag is a different operation, and the builder is the last place that
+  // can keep the two contradictory flags apart: `--skip-fts --repair-fts` exits 0
+  // having repaired nothing.
+  const repairLine = analyzeCommandLine('C:\\tools\\gitnexus.cmd', 'D:\\repo', {
+    flavor: 'win32',
+    repairFts: true,
+    skipFts: true,
+    force: true,
+  });
+  check('--repair-fts is appended after --index-only', repairLine.includes('analyze --index-only --repair-fts'), repairLine);
+  check('a repair run never also skips FTS', !repairLine.includes('--skip-fts'), repairLine);
+  check('a repair run is never also forced', !repairLine.includes('--force'), repairLine);
+
   // The runner reads the same config as the command text. Without this, the panel
   // confirms `GITNEXUS_HOME=… --skip-fts` and the process runs without either.
   const configuredLine = analyzeCommandLine('/usr/local/bin/gitnexus', '/home/u/repo', {
@@ -1092,6 +1105,26 @@ async function analyzeTests() {
     managed.status('D:/Project/m')?.command.includes('--force') === true,
     managed.status('D:/Project/m')?.command,
   );
+
+  // The repair run is the narrow write: FTS indexes only. Two flags must never ride
+  // along — `--force` (that is a full rebuild, a much larger change than the button
+  // says) and `--skip-fts` (which asks to skip the very thing being repaired; the CLI
+  // accepts the pair and exits 0 having done nothing).
+  const repaired = createAnalyzeRunner({
+    ...stubShell({ exitCode: 0 }),
+    toolchain: { managedPrefix: path.join(managedRoot, 'managed') },
+  });
+  repaired.start('D:/Project/r', { repairFts: true });
+  await settle();
+  check('a repair run records its mode', repaired.status('D:/Project/r')?.repairFts === true);
+  check(
+    'a repair run carries --repair-fts and never --skip-fts',
+    repaired.status('D:/Project/r')?.command.includes('--repair-fts') === true &&
+      repaired.status('D:/Project/r')?.command.includes('--skip-fts') === false,
+    repaired.status('D:/Project/r')?.command,
+  );
+  check('a repair run is not a forced rebuild', repaired.status('D:/Project/r')?.force === false);
+  repaired.dispose();
   managed.dispose();
   await fs.rm(managedRoot, { recursive: true, force: true });
 
@@ -1267,6 +1300,28 @@ async function commandTests() {
   const single = maintenanceCommands("/home/o'brien/x", { platform: 'linux' });
   check('single quotes in a path are escaped', single[0].argv.includes("'\\''"), single[0].argv);
 
+  // The FTS repair is offered only when the index says FTS is missing, so it is opt-in
+  // at this layer rather than a permanent third button that usually does nothing.
+  const withRepair = maintenanceCommands('/x', { platform: 'linux', includeRepair: true });
+  check('three commands are offered when FTS is missing', withRepair.length === 3, 'got ' + withRepair.length);
+  check('the repair command uses its own mode', withRepair[2]?.mode === 'repair-fts', String(withRepair[2]?.mode));
+  check('the repair command carries --repair-fts', withRepair[2]?.argv.includes('--repair-fts') === true, withRepair[2]?.argv);
+  check(
+    'the repair command does not ask to skip what it repairs',
+    withRepair[2]?.argv.includes('--skip-fts') === false,
+    withRepair[2]?.argv,
+  );
+  check('the repair command is not destructive', withRepair[2]?.destructive === false);
+  check('repair is absent unless requested', maintenanceCommands('/x', { platform: 'linux' }).length === 2);
+  check(
+    'the repair command is offered in the deployment that also skips FTS',
+    (() => {
+      const commands = maintenanceCommands('/x', { platform: 'win32', skipFts: true, includeRepair: true });
+      const repair = commands.find((c) => c.mode === 'repair-fts');
+      return repair !== undefined && repair.argv.includes('--repair-fts') && !repair.argv.includes('--skip-fts');
+    })(),
+  );
+
   const rationale = commandRationale({ skipFts: true, memoryOff: true, gitnexusHome: null });
   check('the rationale explains why the env prefix exists', rationale.length >= 3, JSON.stringify(rationale));
   check('the rationale mentions the AGENTS.md guarantee', rationale.some((n) => n.includes('AGENTS.md')), JSON.stringify(rationale));
@@ -1410,6 +1465,451 @@ async function binaryTests() {
   await fs.rm(root, { recursive: true, force: true });
 }
 
+/**
+ * Tier 0 delta: does the working tree still match what the index recorded?
+ *
+ * These build a real git repository rather than a plain directory, because the whole
+ * feature is a comparison against the *indexed commit* — the candidate set comes from
+ * `git diff <lastCommit>` and `ls-files --others`. A stubbed git would test the stub.
+ *
+ * The manifest is written by the test, not by `gitnexus analyze`: it needs to control
+ * `fileHashes` exactly (including the case where the index was built from a dirty
+ * tree), and running the analyzer here would take minutes and hide which side drifted.
+ */
+async function deltaTests() {
+  section('delta: tier 0 comparison against the index snapshot');
+  const { readDelta, describeDelta } = await import('../lib/gitnexus/delta.js');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { createHash } = await import('node:crypto');
+  const exec = promisify(execFile);
+
+  const sha = (text) => createHash('sha256').update(text).digest('hex');
+
+  // A confined DSH process cannot spawn a child over piped stdio (`spawn EPERM`), and
+  // every fixture here needs a real `git`. That is a property of the environment, not
+  // of the engine, so it is reported as a skip with the same wording the search-helper
+  // test uses — the unconfined run covers it.
+  let gitSpawnable = false;
+  try {
+    await exec('git', ['--version'], { windowsHide: true, timeout: 10_000 });
+    gitSpawnable = true;
+  } catch {
+    gitSpawnable = false;
+  }
+  if (!gitSpawnable) {
+    check(
+      'delta engine tests run (skipped: git cannot be spawned in this sandbox)',
+      true,
+      'covered by the unconfined run',
+    );
+    await deltaRouteTests();
+    return;
+  }
+
+  /** @param {string} name @param {Record<string,string>} files */
+  const build = async (name, files) => {
+    const root = fixturePath(`delta-${name}`);
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.mkdir(path.join(root, 'src'), { recursive: true });
+    for (const [relative, content] of Object.entries(files)) {
+      const absolute = path.join(root, relative);
+      await fs.mkdir(path.dirname(absolute), { recursive: true });
+      await fs.writeFile(absolute, content);
+    }
+    const git = async (args) => exec('git', args, { cwd: root, windowsHide: true, timeout: 30_000 });
+    // `-c` per command rather than `git config`: a developer machine may have no
+    // identity configured, and the fixture must not depend on it.
+    const identity = ['-c', 'user.email=test@example.com', '-c', 'user.name=delta-test'];
+    await git(['init']);
+    await git([...identity, 'add', '-A']);
+    await git([...identity, 'commit', '-m', 'fixture']);
+    const { stdout } = await git(['rev-parse', 'HEAD']);
+
+    /** @param {Record<string,string>} hashes @param {string} commit */
+    const writeManifest = async (hashes, commit) => {
+      await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
+      await fs.writeFile(
+        path.join(root, '.gitnexus', 'gitnexus.json'),
+        JSON.stringify({
+          repoPath: root,
+          indexedAt: new Date().toISOString(),
+          lastCommit: commit,
+          stats: { files: Object.keys(hashes).length, nodes: 1, edges: 1, communities: 1, processes: 0, embeddings: 0 },
+          fileHashes: hashes,
+          indexCoverage: { maxFileSizeBytes: 512, dirtyPaths: [] },
+        }),
+      );
+    };
+    /** @param {Record<string,string>} [hashed] paths to record; defaults to every file */
+    const index = async (hashed = files) => {
+      const hashes = {};
+      for (const [relative, content] of Object.entries(hashed)) hashes[relative] = sha(content);
+      await writeManifest(hashes, stdout.trim());
+      return hashes;
+    };
+    return { root, git, identity, head: stdout.trim(), index, writeManifest };
+  };
+
+  // --- a clean tree costs nothing -------------------------------------------------
+  {
+    const fixture = await build('clean', { 'src/a.ts': 'export const a = 1;\n', 'src/b.ts': 'export const b = 2;\n' });
+    await fixture.index();
+    const report = await readDelta(fixture.root);
+    check('a clean tree is comparable', report.comparable === true, JSON.stringify(report.notes));
+    check('the baseline is the indexed commit', report.basis === 'index', String(report.basis));
+    check('a clean tree needs no refresh', report.needsRefresh === false);
+    check('a clean tree reads no file content', report.counts.hashed === 0, JSON.stringify(report.counts));
+    check('a clean tree has no candidates', report.counts.checked === 0, JSON.stringify(report.counts));
+    check(
+      'the verdict explains itself',
+      report.notes.length > 0 && report.notes[0].includes('一致'),
+      JSON.stringify(report.notes),
+    );
+    check('the one-line verdict says no refresh', describeDelta(report).includes('无需刷新'), describeDelta(report));
+  }
+
+  // --- a dirty-at-index file is NOT drift ----------------------------------------
+  // The index recorded the file's current content, so nothing would change on a
+  // refresh even though `git diff <lastCommit>` lists it. This is the case a naive
+  // HEAD comparison gets wrong.
+  {
+    const fixture = await build('dirty', { 'src/a.ts': 'export const a = 1;\n' });
+    const dirtyContent = 'export const a = 1; // edited but already indexed\n';
+    await fs.writeFile(path.join(fixture.root, 'src', 'a.ts'), dirtyContent);
+    const hashes = { 'src/a.ts': sha(dirtyContent) };
+    await fixture.writeManifest(hashes, fixture.head);
+    const report = await readDelta(fixture.root);
+    check('a file git reports as changed can still match the index', report.needsRefresh === false, JSON.stringify(report.entries));
+    check('it is counted as checked and hashed', report.counts.checked === 1 && report.counts.hashed === 1, JSON.stringify(report.counts));
+    check('it is counted as unchanged', report.counts.unchanged === 1, JSON.stringify(report.counts));
+  }
+
+  // --- the three actionable kinds -------------------------------------------------
+  {
+    const fixture = await build('change', {
+      'src/a.ts': 'export const a = 1;\n',
+      'src/b.ts': 'export const b = 2;\n',
+    });
+    await fixture.index();
+    await fs.writeFile(path.join(fixture.root, 'src', 'a.ts'), 'export const a = 100;\n');
+    await fs.writeFile(path.join(fixture.root, 'src', 'c.ts'), 'export const c = 3;\n');
+    await fs.rm(path.join(fixture.root, 'src', 'b.ts'));
+    const report = await readDelta(fixture.root);
+    const kinds = report.entries.map((entry) => `${entry.kind}:${entry.path}`).sort();
+    check('a modified file is reported as modified', kinds.includes('modified:src/a.ts'), JSON.stringify(kinds));
+    check('a new file is reported as added', kinds.includes('added:src/c.ts'), JSON.stringify(kinds));
+    check('a deleted file is reported as deleted', kinds.includes('deleted:src/b.ts'), JSON.stringify(kinds));
+    check('the verdict needs a refresh', report.needsRefresh === true);
+    check(
+      'the counts agree',
+      report.counts.modified === 1 && report.counts.added === 1 && report.counts.deleted === 1,
+      JSON.stringify(report.counts),
+    );
+    check('describeDelta lists the change markers', /M src\/a\.ts/.test(describeDelta(report)), describeDelta(report));
+  }
+
+  // --- the index's own policy is respected ---------------------------------------
+  {
+    const fixture = await build('excluded', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index();
+    await fs.writeFile(path.join(fixture.root, 'src', 'huge.ts'), 'x'.repeat(2048));
+    const report = await readDelta(fixture.root);
+    check('an oversized new file is classified as excluded', report.entries[0]?.kind === 'excluded', JSON.stringify(report.entries));
+    check('the exclusion says why', (report.entries[0]?.reason ?? '').includes('上限'), String(report.entries[0]?.reason));
+    check('an excluded-only change does not ask for a refresh', report.needsRefresh === false, JSON.stringify(report.counts));
+  }
+
+  // --- no index at all ------------------------------------------------------------
+  {
+    const root = fixturePath('delta-absent');
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.mkdir(path.join(root, 'src'), { recursive: true });
+    await fs.writeFile(path.join(root, 'src', 'a.ts'), 'export const a = 1;\n');
+    await exec('git', ['init'], { cwd: root, windowsHide: true });
+    const report = await readDelta(root);
+    check('a project without an index is not comparable', report.comparable === false && report.indexed === false);
+    check('it says what to do instead', (report.notes[0] ?? '').includes('索引'), JSON.stringify(report.notes));
+  }
+
+  // --- a legacy manifest with no hashes -------------------------------------------
+  {
+    const fixture = await build('no-hashes', { 'src/a.ts': 'export const a = 1;\n' });
+    await fs.mkdir(path.join(fixture.root, '.gitnexus'), { recursive: true });
+    await fs.writeFile(
+      path.join(fixture.root, '.gitnexus', 'meta.json'),
+      JSON.stringify({ repoPath: fixture.root, indexedAt: new Date().toISOString(), lastCommit: fixture.head }),
+    );
+    const report = await readDelta(fixture.root);
+    check('a manifest without fileHashes falls back to asking the analyzer', report.comparable === false && report.indexed === true);
+    check('the reason names the missing hashes', (report.notes[0] ?? '').includes('哈希'), JSON.stringify(report.notes));
+  }
+
+  // --- the index directory itself is never "new content" --------------------------
+  {
+    const fixture = await build('self', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index();
+    // The manifest is untracked and lives inside the tree; without the filter it would
+    // be reported as an added file on every single read.
+    const report = await readDelta(fixture.root);
+    check(
+      'the untracked index manifest is not reported as a change',
+      report.entries.every((entry) => !entry.path.startsWith('.gitnexus/')),
+      JSON.stringify(report.entries),
+    );
+    check('so a freshly indexed tree still needs no refresh', report.needsRefresh === false, JSON.stringify(report.counts));
+  }
+
+  await deltaRouteTests();
+}
+
+/**
+ * The route half of the delta feature. Split out because it needs no git: it asserts
+ * the guard set, the payload shape and the engine hand-off, all of which are this
+ * module's contract rather than git's behaviour.
+ */
+async function deltaRouteTests() {
+  section('route: /api/gitnexus/delta guards');
+  {
+    const http = await import('node:http');
+    const { mountDeltaRoute } = await import('../lib/routes/delta.js');
+    const registered = [];
+    const shimServer = {
+      register: (route) => {
+        registered.push(route);
+        return () => {};
+      },
+    };
+    const project = fixturePath('delta-route');
+    await fs.rm(project, { recursive: true, force: true });
+    await fs.mkdir(path.join(project, '.gitnexus'), { recursive: true });
+    await fs.writeFile(path.join(project, '.gitnexus', 'gitnexus.json'), '{}');
+    const reads = [];
+    mountDeltaRoute(shimServer, {
+      read: async (repoPath) => {
+        reads.push(repoPath);
+        return { comparable: true, needsRefresh: false, counts: { checked: 0 }, notes: [] };
+      },
+    });
+    check('route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/delta');
+
+    const server = http.createServer((req, res) => {
+      const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
+      if (match !== undefined) {
+        void match.handler(req, res);
+        return;
+      }
+      res.statusCode = 404;
+      res.end('no route');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const hit = async (suffix, init) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/gitnexus/delta${suffix}`, init);
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    const ok = await hit(`?repo=${encodeURIComponent(project)}`);
+    check('a project root is answered', ok.status === 200 && ok.body?.ok === true, `status=${ok.status}`);
+    check('the payload carries the verdict', ok.body?.delta?.comparable === true && typeof ok.body?.readAt === 'string');
+    check('the engine was asked once', reads.length === 1, JSON.stringify(reads));
+
+    const missing = await hit('');
+    check('a missing repo is a 400', missing.status === 400 && missing.body?.code === 'missing-repo', `status=${missing.status}`);
+
+    const outside = await hit(`?repo=${encodeURIComponent(path.join(import.meta.dirname, '..'))}`);
+    check('the repository itself is answerable', outside.status === 200, `status=${outside.status}`);
+
+    const notProject = await hit(`?repo=${encodeURIComponent(os.tmpdir())}`);
+    check(
+      'a non-project directory is refused',
+      notProject.status === 404 && notProject.body?.code === 'not-a-project',
+      `status=${notProject.status}`,
+    );
+
+    const post = await hit(`?repo=${encodeURIComponent(project)}`, { method: 'POST' });
+    check('the delta route does not accept POST', post.status === 405, `status=${post.status}`);
+
+    server.close();
+  }
+}
+
+/**
+ * The graph projection: whitelisted views, bounded output, and ids that cannot become
+ * Cypher. The database-backed cases run against this repository's own index (like the
+ * search tests) and skip when there is no store on the machine.
+ */
+async function graphTests() {
+  section('graph: bounded projection');
+  const { projectGraph, sanitizeGraphId, isGraphView, GraphError } = await import('../lib/gitnexus/graph.js');
+
+  check('a community id is accepted', sanitizeGraphId('comm_8') === 'comm_8');
+  check(
+    'a symbol id is accepted',
+    sanitizeGraphId('Function:src/client/index.ts:apply@1:2') === 'Function:src/client/index.ts:apply@1:2',
+    String(sanitizeGraphId('Function:src/client/index.ts:apply@1:2')),
+  );
+  // The safety property: nothing that could terminate or escape the Cypher literal.
+  check('a quote is refused', sanitizeGraphId("comm_8' OR 1=1 --") === null);
+  check('a backslash is refused', sanitizeGraphId('comm_8\\') === null);
+  check('an empty id is refused', sanitizeGraphId('   ') === null);
+  check('an overlong id is refused', sanitizeGraphId('c'.repeat(300)) === null);
+  check('only the two views are known', isGraphView('communities') && isGraphView('community') && !isGraphView('neighbors'));
+
+  const repo = process.cwd();
+  const hasStore = await fs
+    .access(path.join(repo, '.gitnexus', 'lbug'))
+    .then(() => true)
+    .catch(() => false);
+
+  if (!hasStore) {
+    check('graph projection runs against an indexed repository (skipped)', true, 'no .gitnexus/lbug on this machine');
+  } else {
+    const overview = await projectGraph(repo, { view: 'communities', nodeBudget: 10 });
+    check('the overview returns community nodes', overview.nodes.length > 0 && overview.nodes[0].kind === 'Community', JSON.stringify(overview.nodes.slice(0, 2)));
+    check('the overview reports the true total', overview.total >= overview.nodes.length, `${overview.total} vs ${overview.nodes.length}`);
+    check('the node budget is applied', overview.nodes.length <= 10, String(overview.nodes.length));
+    check('a truncated overview says so', overview.truncated === overview.total > overview.nodes.length);
+    check(
+      'every edge has both endpoints in the node list',
+      (() => {
+        const ids = new Set(overview.nodes.map((node) => node.id));
+        return overview.edges.every((edge) => ids.has(edge.source) && ids.has(edge.target));
+      })(),
+      JSON.stringify(overview.edges.slice(0, 3)),
+    );
+    check(
+      'the overview aggregates relation types',
+      overview.edges.every((edge) => typeof edge.type === 'string' && edge.type !== '' && edge.weight >= 1),
+    );
+
+    const scope = overview.nodes[0].id;
+    const detail = await projectGraph(repo, { view: 'community', id: scope, nodeBudget: 50 });
+    check('a drill-down returns the community members', detail.nodes.length > 0, String(detail.nodes.length));
+    check('the scope is reported', detail.scope === scope, String(detail.scope));
+    check(
+      'members carry a kind and a name',
+      detail.nodes.every((node) => node.kind !== '' && node.name !== ''),
+      JSON.stringify(detail.nodes.slice(0, 2)),
+    );
+    check(
+      'a symbol member names its file and line',
+      detail.nodes.some((node) => node.filePath !== null && typeof node.startLine === 'number'),
+      JSON.stringify(detail.nodes.slice(0, 3)),
+    );
+    check('the drill-down reports the member total', detail.total >= detail.nodes.length, `${detail.total} vs ${detail.nodes.length}`);
+
+    // The helper is the process the host actually spawns. Its contract is one JSON
+    // object on stdout, and it must be exercised directly: a broken argument order here
+    // is invisible to the projection tests above, which call the module in-process.
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const helper = path.join(import.meta.dirname, '..', 'lib', 'bin', 'graph-helper.js');
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [helper, repo, 'communities', '', '', '5', '10'],
+        { cwd: repo, timeout: 30_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+      );
+      const body = JSON.parse(stdout.trim());
+      check(
+        'the helper prints one JSON projection',
+        body.ok === true && body.projection?.view === 'communities' && Array.isArray(body.projection?.nodes),
+        stdout.slice(0, 200),
+      );
+      check(
+        'the helper honours the node budget it was given',
+        body.projection?.nodes?.length <= 5,
+        String(body.projection?.nodes?.length),
+      );
+    } catch (error) {
+      const denied = /EPERM|EACCES|spawn/i.test(String(error));
+      check(
+        'the graph helper is spawnable in this environment',
+        denied,
+        denied ? 'spawn denied by this sandbox — covered by the unconfined run' : String(error),
+      );
+    }
+
+    const rejections = async (options, expected) => {
+      try {
+        await projectGraph(repo, options);
+        return false;
+      } catch (error) {
+        return error instanceof GraphError && error.code === expected;
+      }
+    };
+    check('an unknown view is refused', await rejections({ view: 'neighbors' }, 'invalid-view'));
+    check('a drill-down without an id is refused', await rejections({ view: 'community' }, 'invalid-id'));
+    check('an id that could be Cypher is refused', await rejections({ view: 'community', id: "x' OR 1=1 --" }, 'invalid-id'));
+  }
+
+  const notProject = await projectGraph(path.join(import.meta.dirname, '..', 'scripts'), {}).then(
+    () => false,
+    (error) => error instanceof GraphError && error.code === 'not-a-project',
+  );
+  check('a directory that is not a project root is refused', notProject === true);
+
+  section('route: /api/gitnexus/graph guards');
+  {
+    const http = await import('node:http');
+    const { mountGraphRoute } = await import('../lib/routes/graph.js');
+    const registered = [];
+    const shimServer = {
+      register: (route) => {
+        registered.push(route);
+        return () => {};
+      },
+    };
+    const project = fixturePath('graph-route');
+    await fs.rm(project, { recursive: true, force: true });
+    await fs.mkdir(path.join(project, '.gitnexus'), { recursive: true });
+    await fs.writeFile(path.join(project, '.gitnexus', 'gitnexus.json'), '{}');
+    const calls = [];
+    mountGraphRoute(shimServer, {
+      project: async (repoPath, view, id) => {
+        calls.push({ repoPath, view, id });
+        return { view, scope: id, nodes: [], edges: [], total: 0, truncated: false, budget: { nodes: 1, edges: 1 }, notes: [], readAt: '' };
+      },
+    });
+    check('route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/graph');
+
+    const server = http.createServer((req, res) => {
+      const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
+      if (match !== undefined) {
+        void match.handler(req, res);
+        return;
+      }
+      res.statusCode = 404;
+      res.end('no route');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const hit = async (suffix, init) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/gitnexus/graph${suffix}`, init);
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    const plain = await hit(`?repo=${encodeURIComponent(project)}`);
+    check('the view defaults to communities', plain.status === 200 && calls[0]?.view === 'communities', JSON.stringify(calls[0]));
+    check('an absent id is null, not empty string', calls[0]?.id === null, JSON.stringify(calls[0]));
+
+    const drill = await hit(`?repo=${encodeURIComponent(project)}&view=community&id=comm_1`);
+    check('a drill-down passes the id through', drill.status === 200 && calls[1]?.id === 'comm_1', JSON.stringify(calls[1]));
+
+    const badView = await hit(`?repo=${encodeURIComponent(project)}&view=neighbors`);
+    check('an unknown view is a 400', badView.status === 400 && badView.body?.code === 'invalid-view', `status=${badView.status}`);
+
+    const missing = await hit('');
+    check('a missing repo is a 400', missing.status === 400 && missing.body?.code === 'missing-repo', `status=${missing.status}`);
+
+    const post = await hit(`?repo=${encodeURIComponent(project)}`, { method: 'POST' });
+    check('the graph route does not accept POST', post.status === 405, `status=${post.status}`);
+
+    server.close();
+  }
+}
+
 async function realRepoSmoke() {
   section('smoke: report shape on a real indexed repository');
   const repo = 'D:\\project\\data-screen';
@@ -1521,6 +2021,8 @@ await analyzeTests();
 await installTests();
 await commandTests();
 await formatTests();
+await deltaTests();
+await graphTests();
 await realRepoSmoke();
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

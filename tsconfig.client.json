@@ -1,18 +1,30 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "module": "CommonJS",
+    // AMD **because** the browser half is several source files that must ship as one
+    // artifact. The loader wraps a single CommonJS file (`scripts/build-client.mjs`
+    // explains why), so a multi-file client needs *some* way to become one file
+    // without a bundler. `outFile` + AMD is exactly that: TypeScript concatenates
+    // every module into one file, names each `define(...)` after its path, and turns
+    // relative imports into dependency-array entries. Nothing is spawned and nothing
+    // is resolved at build time, so this still works where a native bundler
+    // (esbuild) cannot start at all — which is the environment this repo is built in.
+    "module": "AMD",
     "moduleResolution": "Node10",
     "lib": ["ES2022", "DOM"],
 
-    "outDir": "build/client",
+    "outFile": "build/client/bundle.js",
     "rootDir": "src/client",
 
-    // Off deliberately. `import * as React from 'react'` then compiles to a bare
-    // `const React = require("react")`, which is exactly what the loader factory
-    // expects and adds no helper preamble to the wrapped artifact. With interop on,
-    // tsc injects `__importStar` and the bundle grows boilerplate that the wrapping
-    // step then has to carry into every page load.
+    // `outFile` refuses to run with `isolatedModules`, which the base config sets.
+    // That flag asks that every file be independently transpilable; `outFile` is the
+    // opposite bargain — the whole program is one unit. Only the client opts out.
+    "isolatedModules": false,
+
+    // Off deliberately. `import * as React from 'react'` then compiles to an AMD
+    // dependency named `react` whose value is the loader's own module, and
+    // `import { x } from './y'` compiles to a plain factory parameter — no
+    // `__importStar` preamble and no interop object for the wrapping step to carry.
     "esModuleInterop": false,
     "allowSyntheticDefaultImports": false,
 

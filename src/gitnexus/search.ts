@@ -120,8 +120,12 @@ const adapters = new Map<string, LbugAdapter>();
  * A missing package, a missing native engine, or a reshaped adapter all become the
  * same reported state: search is unavailable here, and the reason is carried in the
  * message rather than hidden behind an empty result list.
+ *
+ * Exported for the graph projection (`./graph.ts`), which needs the same connection
+ * and must not carry a second copy of this probe: the two would drift on exactly the
+ * detail that is hardest to test — which install count as "present".
  */
-async function loadAdapter(options: SearchOptions): Promise<LbugAdapter> {
+export async function loadAdapter(options: SearchOptions): Promise<LbugAdapter> {
   const root = findGitnexusRoot({ env: options.env, managedPrefix: options.managedPrefix });
   if (root === null) {
     throw new SearchError(

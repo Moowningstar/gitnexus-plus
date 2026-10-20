@@ -138,13 +138,34 @@ check(
 check('--skip-fts is not enabled by default', defaults.skipFts === false, JSON.stringify(defaults));
 check('gitnexusHome defaults to empty (no redirect)', defaults.gitnexusHome === '', JSON.stringify(defaults));
 
-section('apply() registers the tool');
+section('apply() registers the tools');
 const stub = makeStubContext();
 plugin.apply(stub.ctx, defaults);
 
-check('exactly one tool registered', stub.registered.length === 1, `got ${stub.registered.length}`);
-const tool = stub.registered[0];
-check('tool name is gitnexus_coverage', tool?.name === 'gitnexus_coverage', String(tool?.name));
+// Two tools now: the coverage scan (walks the working tree) and the delta check
+// (hashes only what git says differs). They are separate because their costs differ
+// by orders of magnitude, and the caller should be able to ask the cheap one first.
+check('exactly two tools registered', stub.registered.length === 2, `got ${stub.registered.length}`);
+const tool = stub.registered.find((entry) => entry.name === 'gitnexus_coverage');
+const deltaTool = stub.registered.find((entry) => entry.name === 'gitnexus_delta');
+check('tool name is gitnexus_coverage', tool !== undefined, JSON.stringify(stub.registered.map((t) => t.name)));
+check(
+  'delta tool is registered',
+  deltaTool !== undefined,
+  JSON.stringify(stub.registered.map((t) => t.name)),
+);
+check(
+  'delta tool takes only repo',
+  deltaTool?.parameters?.required?.includes('repo') === true &&
+    Object.keys(deltaTool?.parameters?.properties ?? {}).join(',') === 'repo',
+  JSON.stringify(deltaTool?.parameters),
+);
+check(
+  'delta tool reports the verdict fields',
+  deltaTool?.output?.schema?.properties?.needsRefresh !== undefined &&
+    deltaTool?.output?.schema?.properties?.comparable !== undefined,
+  JSON.stringify(deltaTool?.output?.schema)?.slice(0, 200),
+);
 check('tool has a description', typeof tool?.description === 'string' && tool.description.length > 50);
 check(
   'parameters compiled to a JSON schema',
@@ -160,12 +181,13 @@ check('output.render returns content blocks', (() => {
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Five routes now: read the working tree, keyword-search the graph, read one file's
-// commit history, refresh an index, and install GitNexus when there is none. Separate
-// modules because their privileges differ sharply — reading/searching/history are
-// unprivileged, refreshing writes inside the workspace, and installing runs the
+// Seven routes now: read the working tree, keyword-search the graph, read one file's
+// commit history, check whether a refresh would change anything, read a bounded graph
+// projection, refresh an index, and install GitNexus when there is none. Separate
+// modules because their privileges differ sharply — reading/searching/history/delta/graph
+// are unprivileged, refreshing writes inside the workspace, and installing runs the
 // dependency tree's build scripts.
-check('exactly five routes mounted', stub.routes.length === 5, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+check('exactly seven routes mounted', stub.routes.length === 7, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
   'the coverage route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
@@ -179,6 +201,16 @@ check(
 check(
   'the file-history route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/file-history'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check(
+  'the delta route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/delta'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
+check(
+  'the graph route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/graph'),
   JSON.stringify(stub.routes.map((r) => r.path)),
 );
 check(
@@ -230,13 +262,27 @@ section('analyze route: force is explicit');
   );
   check('force=1 reaches the runner', forced.run?.force === true, JSON.stringify(forced.run));
   check('the forced run names --force in its command', String(forced.run?.command ?? '').includes('--force'), forced.run?.command);
+
+  // The repair mode is a different write, and it must not be confused with either of
+  // the other two: not forced, and never asking to skip the indexes it repairs.
+  const repair = await call(
+    '/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe') + '&mode=repair-fts',
+  );
+  check('mode=repair-fts reaches the runner', repair.run?.repairFts === true, JSON.stringify(repair.run));
+  check('a repair run is not a forced rebuild', repair.run?.force === false, JSON.stringify(repair.run));
+  check(
+    'the repair run names --repair-fts and not --skip-fts',
+    String(repair.run?.command ?? '').includes('--repair-fts') &&
+      !String(repair.run?.command ?? '').includes('--skip-fts'),
+    repair.run?.command,
+  );
 }
 
 section('serveRoutes=false suppresses the routes');
 const off = makeStubContext();
 plugin.apply(off.ctx, { ...defaults, serveRoutes: false });
 check('no routes when disabled', off.routes.length === 0, `got ${off.routes.length}`);
-check('tool still registered when disabled', off.registered.length === 1);
+check('tool still registered when disabled', off.registered.length === 2, `got ${off.registered.length}`);
 
 section('tool execution against a real repository');
 const repo = 'D:\\project\\data-screen';

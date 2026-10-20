@@ -35,10 +35,10 @@ const ANALYZE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'POST', 'DE
 export interface AnalyzeRouteDeps {
   /**
    * Begin a run, or return the one already in flight for this repository.
-   * `force` selects the destructive full rebuild; it is passed through, never
-   * inferred from the method or the route.
+   * `force` selects the destructive full rebuild and `repairFts` the FTS-only repair;
+   * both are passed through, never inferred from the method or the route.
    */
-  start: (repoPath: string, options?: { force?: boolean }) => AnalyzeStatus;
+  start: (repoPath: string, options?: { force?: boolean; repairFts?: boolean }) => AnalyzeStatus;
   status: (repoPath: string) => AnalyzeStatus | null;
   cancel: (repoPath: string) => boolean;
 }
@@ -68,8 +68,14 @@ export function mountAnalyzeRoute(webServer: WebServerService, deps: AnalyzeRout
       // `force=1` is the full rebuild. It is an explicit query flag rather than a
       // body field because the panel's only other POST parameter is the repo, and a
       // flag in the URL is visible in the run's own command and in a log.
-      const force = url.searchParams.get('force') === '1';
-      sendJson(res, 200, { ok: true, run: deps.start(absRepo, { force }) });
+      //
+      // `mode=repair-fts` is the narrower write: rebuild the search indexes only.
+      // Expressed as a mode rather than a second boolean so the two cannot both be
+      // true — the runner resolves that precedence too, but the route should not
+      // produce an ambiguous request in the first place.
+      const repairFts = url.searchParams.get('mode') === 'repair-fts';
+      const force = !repairFts && url.searchParams.get('force') === '1';
+      sendJson(res, 200, { ok: true, run: deps.start(absRepo, { force, repairFts }) });
       return;
     }
 

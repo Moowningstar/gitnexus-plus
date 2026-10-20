@@ -7,5 +7,12 @@
     "lib": ["ES2022", "DOM"],
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "bin/**/*.ts", "scripts/**/*.ts", "types/**/*.d.ts"]
+  // The browser half is its own project (`tsconfig.client.json`, AMD + `outFile`) and
+  // is deliberately **not** part of this one. Under NodeNext its extensionless relative
+  // imports are errors by design (Node's ESM resolver demands `.js`), while the AMD
+  // project resolves them exactly as intended. Listing `src/client` in both projects
+  // means one of the two has to be wrong; excluding it here leaves each file checked by
+  // the project whose module rules it is written for.
+  "include": ["src/**/*.ts", "bin/**/*.ts", "scripts/**/*.ts", "types/**/*.d.ts"],
+  "exclude": ["src/client/**"]
 }
