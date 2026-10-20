@@ -1028,19 +1028,29 @@ async function analyzeTests() {
     done.status('D:/Project/x')?.command,
   );
 
-  // GitNexus 1.6.12 creates parsedfile-store from the parse worker. A restricted
-  // host token can be denied that mkdir even when it may write files, so the runner
-  // pre-creates the cache directories from the host before the shell starts.
+  // 0.1.3 pre-created parsedfile-store to dodge a worker mkdir. GitNexus deletes that
+  // directory at the start of every parse, so a pre-created one turns each run into an
+  // rmdir on a host-owned directory — the `EPERM … rmdir parsedfile-store` that 0.1.3's
+  // users hit. The runner now removes a leftover and creates only the durable caches.
   const cacheRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-cache-'));
-  await fs.mkdir(path.join(cacheRepo, '.gitnexus'), { recursive: true });
+  await fs.mkdir(path.join(cacheRepo, '.gitnexus', 'parsedfile-store'), { recursive: true });
   const cacheRun = createAnalyzeRunner(stubShell({ exitCode: 0 }));
   cacheRun.start(cacheRepo);
   await settle();
-  const cacheDir = await fs
+  const leftover = await fs
     .access(path.join(cacheRepo, '.gitnexus', 'parsedfile-store'))
     .then(() => true)
     .catch(() => false);
-  check('analyze pre-creates parsedfile-store before spawning', cacheDir);
+  check('analyze clears a leftover run-scoped store before spawning', !leftover);
+  const durable = await Promise.all(
+    ['parsedfile-cache', 'parse-cache'].map((name) =>
+      fs
+        .access(path.join(cacheRepo, '.gitnexus', name))
+        .then(() => true)
+        .catch(() => false),
+    ),
+  );
+  check('analyze pre-creates the durable caches before spawning', durable.every(Boolean), JSON.stringify(durable));
   await fs.rm(cacheRepo, { recursive: true, force: true });
 
   const denied = createAnalyzeRunner(

@@ -28,7 +28,7 @@
  * the same rule the subagent prompt states, for the same reason.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
@@ -264,20 +264,47 @@ function looksDenied(text: string): boolean {
 }
 
 /**
- * GitNexus 1.6.12 creates these cache directories from the parse worker.
+ * The **durable** caches, created from the host before the shell starts.
  *
- * A worker running under a restricted host token can be denied `mkdir` on the
- * project's inherited `.gitnexus` ACL even though it can write files there. The
- * failure is EPERM at the first shard write and takes the whole parse phase down
- * with it. Creating the directories from the host, before the shell starts, makes
- * the worker use the directories that already exist. Returns an actionable error
- * instead of letting the worker fail on a path the panel then has to explain.
+ * A worker running under a restricted host token can be denied `mkdir` on the project's
+ * inherited `.gitnexus` ACL even though it can write files there. The failure is EPERM
+ * at the first shard write and takes the whole parse phase down with it. Creating these
+ * two from the host, before the shell starts, makes the worker use directories that
+ * already exist. They are never cleared between runs, so a pre-created one is inert.
  */
-const ANALYZE_CACHE_DIRS = ['parsedfile-store', 'parsedfile-cache', 'parse-cache'] as const;
+const ANALYZE_CACHE_DIRS = ['parsedfile-cache', 'parse-cache'] as const;
+
+/**
+ * GitNexus's **run-scoped** parsed-file store. Deliberately not pre-created.
+ *
+ * `parse-impl` calls `clearParsedFileStore()` unconditionally at the start of parsing,
+ * which is `fs.rm(dir, { recursive: true, force: true })`. `force` only forgives a
+ * missing directory — not a refusal or a lock. So a directory that exists there must be
+ * deleted before every parse, and 0.1.3 pre-created exactly that: it fixed a worker
+ * `mkdir` and introduced a delete the restricted process has to perform on a directory
+ * the **host** created. When that delete is denied or briefly locked, the parse dies
+ * with `EPERM … rmdir '<repo>\\.gitnexus\\parsedfile-store'` — the failure reported
+ * against 0.1.3.
+ *
+ * Measured against GitNexus 1.6.12: with the directory absent, a cold `--force` parse
+ * succeeds and never creates it, while the durable chunk directories it does create
+ * show the confined process can `mkdir`. So the store is left to GitNexus, and a
+ * leftover from an older plugin version is removed before spawning instead.
+ */
+const RUN_SCOPED_STORE = 'parsedfile-store';
 
 function prepareAnalyzeCacheDirs(repoPath: string): string | null {
   const indexDir = path.join(repoPath, '.gitnexus');
   if (!existsSync(indexDir)) return null;
+
+  // Best effort. If this cannot be removed, GitNexus's own clear gets the next attempt;
+  // failing the run here would only replace one EPERM with a less accurate one.
+  try {
+    rmSync(path.join(indexDir, RUN_SCOPED_STORE), { recursive: true, force: true });
+  } catch {
+    /* the analyzer's clear is the next attempt; do not pre-empt it */
+  }
+
   for (const name of ANALYZE_CACHE_DIRS) {
     const target = path.join(indexDir, name);
     try {
