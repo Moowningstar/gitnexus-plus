@@ -901,12 +901,13 @@ check(
   'sections=' + view.tags.filter((t) => t === 'section').length,
 );
 check(
-  'the two caveat cards are adjacent (they share a grid row)',
-  // `需要注意` and `解析质量与溯源` must be consecutive in the render order, or the
-  // grid puts them in different rows and the pairing is lost. Their text positions
-  // are the only ordering evidence available from a rendered tree.
-  view.text.indexOf('需要注意') < view.text.indexOf('解析质量与溯源') &&
-    view.text.indexOf('解析质量与溯源') < view.text.indexOf('被跳过的超大文件'),
+  'the language and quality cards are adjacent (they stack beside the overview)',
+  // The overview spans two grid rows; `语言分布` lands in the first and `解析质量与溯源`
+  // in the second, so these two must be consecutive in render order. `需要注意` is full
+  // width and comes later, so it must not sit between them. Text positions are the only
+  // ordering evidence available from a rendered tree.
+  view.text.indexOf('语言分布') < view.text.indexOf('解析质量与溯源') &&
+    view.text.indexOf('解析质量与溯源') < view.text.indexOf('需要注意'),
   view.text.slice(0, 400),
 );
 check(

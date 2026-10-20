@@ -454,11 +454,15 @@ export function CoverageView({
     h(
       Section,
       {
+        // Two rows tall on the left, so the two compact readings stack beside it: the
+        // language bar above, the resolver provenance below. Grid auto-placement does
+        // the pairing, and a narrow pane collapses all three into one column.
         title: '索引概览',
+        style: { gridRow: 'span 2' },
         meta:
           report.graph === null || report.graph === undefined
             ? null
-            : h('span', { style: { ...MUTED, fontSize: '11px' } }, `${fixed(report.graph.edgesPerNode, 2)} 边/符号`),
+            : h('span', { style: { ...MUTED, fontSize: '12px' } }, `${fixed(report.graph.edgesPerNode, 2)} 边/符号`),
       },
       h(
         'div',
@@ -536,6 +540,20 @@ export function CoverageView({
     // one column in a narrow sidebar, which is the platform's own behaviour.
     languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
 
+    // Shares the row above. Resolver confidence is what makes the counts above it
+    // lower bounds, so it belongs beside the caveats rather than after the charts.
+    h(
+      Section,
+      {
+        title: '解析质量与溯源',
+        meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, provenanceCollapsed(report.graphQuality ?? null)),
+      },
+      h(ProvenanceBlock, {
+        quality: report.graphQuality ?? null,
+        provenance: report.provenance ?? null,
+      }),
+    ),
+
     // The graph is the index's own shape, not a derived statistic: it belongs directly
     // under the overview, before the caveats that explain its omissions.
     graph === undefined || !indexed
@@ -572,6 +590,9 @@ export function CoverageView({
       ? h(
           Section,
           {
+            // Full width: a list of warnings would otherwise pair with whatever card
+            // happened to follow and leave a hole in the other column.
+            wide: true,
             title: `需要注意 · ${notable.length + contextWarnings.length}`,
             scroll: 300,
           },
@@ -615,20 +636,6 @@ export function CoverageView({
               ),
         )
       : null,
-
-    // Shares the row above. Resolver confidence is what makes the counts above it
-    // lower bounds, so it belongs beside the caveats rather than after the charts.
-    h(
-      Section,
-      {
-        title: '解析质量与溯源',
-        meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, provenanceCollapsed(report.graphQuality ?? null)),
-      },
-      h(ProvenanceBlock, {
-        quality: report.graphQuality ?? null,
-        provenance: report.provenance ?? null,
-      }),
-    ),
 
     // Wide: file paths must keep their tails.
     largeFiles.length > 0
