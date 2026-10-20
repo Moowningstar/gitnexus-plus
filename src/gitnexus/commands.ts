@@ -223,14 +223,15 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
           {
             mode: 'repair-fts' as const,
             label: '修复搜索索引（FTS）',
-            when: '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。',
+            when: '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。修复要在子进程里加载 FTS 扩展，因此系统需要具备原生运行时（Windows：VC++ 2015-2022 x64 与 OpenSSL 3）。',
             argv: `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
             shell:
               envPrefix() +
               `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
             destructive: false,
             caveat:
-              '只修复搜索索引，不改图。若 FTS 扩展文件本身缺失（Windows 上常见），修复也会失败 —— 那是上游安装问题。',
+              '只修复搜索索引，不改图。两种失败要分清：受限沙箱会拒绝子进程（spawn EPERM，需在普通终端执行）；' +
+              '若提示"扩展文件存在但加载不了"，那是系统缺少原生运行时，装好后再修复，重装 GitNexus 通常无用。',
           },
         ]
       : []),

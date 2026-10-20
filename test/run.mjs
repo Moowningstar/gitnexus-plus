@@ -1541,6 +1541,21 @@ async function commandTests() {
     withRepair[2]?.argv,
   );
   check('the repair command is not destructive', withRepair[2]?.destructive === false);
+  // The two ways a repair fails are different problems with different fixes, and both
+  // were measured on this machine: a confined shell refuses the extension's child
+  // process, and an extension that exists but cannot load means a missing runtime.
+  check(
+    'the repair caveat separates the two failure modes',
+    withRepair[2]?.caveat?.includes('子进程') === true &&
+      withRepair[2]?.caveat?.includes('运行时') === true &&
+      withRepair[2]?.caveat?.includes('普通终端') === true,
+    String(withRepair[2]?.caveat),
+  );
+  check(
+    'the repair precondition names the runtime',
+    withRepair[2]?.when?.includes('运行时') === true,
+    String(withRepair[2]?.when),
+  );
   check('repair is absent unless requested', maintenanceCommands('/x', { platform: 'linux' }).length === 2);
   check(
     'the repair command is offered in the deployment that also skips FTS',
