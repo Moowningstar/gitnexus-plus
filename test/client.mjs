@@ -467,7 +467,15 @@ const caps = I.capabilityRows({
 });
 check('capabilityRows keeps a fixed order', caps.map((c) => c.key).join(',') === 'graph,fts,vectorSearch');
 check('available capability is marked ok', caps[0].ok === true);
-check('unavailable capability carries its reason', caps[1].ok === false && caps[1].note === 'extension-unavailable', JSON.stringify(caps[1]));
+// The manifest's machine reason is translated, and the consequence is appended: a
+// reader needs to know what stops working, not the flag name that stopped it.
+check(
+  'unavailable capability carries a readable reason and its consequence',
+  caps[1].ok === false &&
+    caps[1].note.includes('扩展无法加载') &&
+    caps[1].note.includes('仅按名称/路径匹配'),
+  JSON.stringify(caps[1]),
+);
 check('missing capabilities object does not throw', I.capabilityRows(undefined).length === 3);
 
 const quality = I.graphQualitySummary({ counts: { unwrap: 272, map: 163 }, totalSites: 435 });
@@ -931,7 +939,11 @@ check(
 check('the merged card keeps the capability list', view.text.includes('查询能力') && view.text.includes('ladybugdb'));
 check('renders edge-per-node ratio', view.text.includes('1.74'));
 check('renders capability labels', view.text.includes('查询能力') && view.text.includes('关键词搜索'));
-check('renders an unavailable capability reason', view.text.includes('extension-unavailable'));
+check(
+  'renders an unavailable capability reason',
+  view.text.includes('扩展无法加载') && view.text.includes('仅按名称/路径匹配'),
+  view.text.slice(0, 400),
+);
 check('renders staleness as diverged', view.text.includes('diverged'), view.text.slice(0, 400));
 check(
   'staleness does not fake a "behind N" for a diverged head',
@@ -1282,6 +1294,44 @@ const repairRun = render(I.CoverageView, {
   delta: withDelta({}),
 });
 check('a repair run is labelled as such', repairRun.text.includes('修复 FTS'), repairRun.text.slice(-900));
+
+// A raw stack is evidence, not a headline: the verdict is the summary and the text is
+// one click away. The text must still be in the DOM for the disclosure to reveal it.
+const withOutput = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  run: {
+    state: 'failed',
+    force: false,
+    repairFts: false,
+    command: 'gitnexus analyze --index-only',
+    startedAt: Date.now() - 3000,
+    finishedAt: Date.now(),
+    exitCode: 1,
+    message: '沙箱拒绝了这次写入。',
+    output: 'Error: EPERM 第一行\n    at second-line',
+  },
+  delta: withDelta({}),
+});
+check(
+  'the raw output is behind a disclosure, not in front of the verdict',
+  withOutput.text.includes('查看原始输出') && withOutput.text.includes('EPERM 第一行'),
+  withOutput.text.slice(-600),
+);
+
+// An old host without the delta route used to leave the gate silently absent.
+const noDeltaRoute = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  delta: null,
+  deltaError: null,
+  deltaRoute: 'missing',
+});
+check(
+  'a host without the delta route says so',
+  noDeltaRoute.text.includes('未挂载差量路由') && noDeltaRoute.text.includes('刷新按钮仍可使用'),
+  noDeltaRoute.text.slice(-600),
+);
 
 // ---------------------------------------------------------------------------
 // Graph card

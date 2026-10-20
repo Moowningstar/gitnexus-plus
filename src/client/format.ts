@@ -311,6 +311,21 @@ export function stalenessView(staleness: ClientStaleness | undefined): { state: 
 export const CAPABILITY_KEYS = ['graph', 'fts', 'vectorSearch'] as const;
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
 
+/**
+ * Turn a capability's machine reason into something a reader can act on.
+ *
+ * The manifest reports `disabled-by-flag` and friends, which are useful in a bug report
+ * and useless in a panel: the reader needs to know *what stops working*. Unknown values
+ * pass through unchanged — a reason this plugin has not seen is still better than a
+ * blank.
+ */
+const CAPABILITY_REASONS: Record<string, string> = {
+  'disabled-by-flag': '建索引时关闭',
+  'missing-extension': '扩展未安装',
+  'extension-unavailable': '扩展无法加载',
+  unavailable: '不可用',
+};
+
 export function capabilityRows(capabilities: Record<string, ClientCapability> | undefined): Array<{ key: string; label: string; ok: boolean; provider: string; note: string }> {
   const caps = capabilities ?? {};
   // Keyed by the same literal union the loop walks, so the lookup is checked rather
@@ -323,12 +338,16 @@ export function capabilityRows(capabilities: Record<string, ClientCapability> | 
   return CAPABILITY_KEYS.map((key) => {
     const entry: ClientCapability = caps[key] ?? {};
     const ok = entry.status === 'available';
+    const raw = String(entry.skipReason ?? entry.status ?? 'unavailable');
+    const reason = CAPABILITY_REASONS[raw] ?? raw;
     return {
       key,
       label: labels[key],
       ok,
       provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',
-      note: ok ? '' : String(entry.skipReason ?? entry.status ?? 'unavailable'),
+      // The consequence matters more than the cause: an unavailable keyword index means
+      // search matches names and paths only, which is exactly what the search box does.
+      note: ok ? '' : key === 'fts' ? `${reason} · 仅按名称/路径匹配` : reason,
     };
   });
 }

@@ -29,9 +29,27 @@ export const h = React.createElement;
 // Presentation
 // ---------------------------------------------------------------------------
 
-export const MUTED = { opacity: 0.62 };
-export const HAIRLINE = '1px solid color-mix(in srgb, currentColor 16%, transparent)';
-export const SOFT_BG = 'color-mix(in srgb, currentColor 6%, transparent)';
+/**
+ * Theme tokens, with a fallback for a host that predates them.
+ *
+ * Measured against the installed `dsh-context` plugin: the platform's own cards are
+ * `--dsw-alias-bg-layer-1` on `--dsw-alias-border-l2` at radius 10, 13px text, and
+ * secondary text is `--dsw-alias-label-secondary` — not `opacity`, which fades the
+ * text against whatever is behind it instead of using the alias colour the rest of
+ * the app is tuned for.
+ */
+export const LABEL_SECONDARY = 'var(--dsw-alias-label-secondary, currentColor)';
+export const LABEL_PRIMARY = 'var(--dsw-alias-label-primary, inherit)';
+export const BG_LAYER_1 = 'var(--dsw-alias-bg-layer-1, transparent)';
+export const BG_LAYER_2 = 'var(--dsw-alias-bg-layer-2, color-mix(in srgb, currentColor 6%, transparent))';
+export const BORDER_L2 = 'var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 16%, transparent))';
+
+export const MUTED = { color: LABEL_SECONDARY };
+export const HAIRLINE = `1px solid ${BORDER_L2}`;
+export const SOFT_BG = BG_LAYER_2;
+
+/** Tabular figures, so a column of counts lines up instead of drifting. */
+export const NUMERIC = { fontVariantNumeric: 'tabular-nums' as const };
 
 /** Layout only. Appearance belongs to the primitives, which read `--dsw-*` tokens. */
 /**
@@ -62,9 +80,9 @@ export const styles = {
     // No `alignItems: start`: grid items stretch to the row height by default, so
     // two cards sharing a row end level. With `start` each card took its natural
     // height and the row showed a ragged bottom edge.
-    gap: '10px',
+    gap: '8px',
     padding: '12px',
-    fontSize: '12px',
+    fontSize: '13px',
     lineHeight: 1.5,
     width: '100%',
     maxWidth: '100%',
@@ -87,18 +105,20 @@ export const styles = {
    * without breaking the content-based sizing.
    */
   card: {
+    background: BG_LAYER_1,
     border: HAIRLINE,
-    borderRadius: '8px',
-    padding: '10px',
+    borderRadius: '10px',
+    padding: '10px 12px',
     minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
   },
   /** A card that spans every column. */
   cardWide: {
+    background: BG_LAYER_1,
     border: HAIRLINE,
-    borderRadius: '8px',
-    padding: '10px',
+    borderRadius: '10px',
+    padding: '10px 12px',
     minWidth: 0,
     gridColumn: '1 / -1',
     display: 'flex',
@@ -127,9 +147,41 @@ export interface SectionProps {
   wide?: boolean;
   children?: React.ReactNode;
   style?: React.CSSProperties;
+  /**
+   * Cap the card body and scroll inside it, instead of letting the card grow and the
+   * whole panel scroll. A number is the cap in pixels; `true` uses 360.
+   *
+   * Opt-in per card: the platform's own panels do this for long lists (measured on
+   * `dsh-context`: `max-height: min(560px, 80vh)` plus `overflow-y: auto`) while short
+   * cards size to content. Wrapping every card unconditionally would change the
+   * spacing of the ones that already manage their own layout.
+   */
+  scroll?: boolean | number;
+  bodyStyle?: React.CSSProperties;
 }
 
-export function Section({ title, meta, wide = false, children, style }: SectionProps) {
+export function Section({ title, meta, wide = false, children, style, scroll = false, bodyStyle }: SectionProps) {
+  const body =
+    scroll === false || scroll === undefined
+      ? children
+      : h(
+          'div',
+          {
+            style: {
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+              overflowY: 'auto',
+              maxHeight: typeof scroll === 'number' ? `${scroll}px` : '360px',
+              overscrollBehavior: 'contain',
+              paddingRight: '2px',
+              ...bodyStyle,
+            },
+          },
+          children,
+        );
+
   return h(
     'section',
     { style: { ...(wide ? styles.cardWide : styles.card), ...style } },
@@ -137,12 +189,23 @@ export function Section({ title, meta, wide = false, children, style }: SectionP
       ? null
       : h(
           'div',
-          { style: { marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 } },
-          typeof title === 'string' ? h('span', { style: MUTED }, title) : title,
+          {
+            style: {
+              marginBottom: '8px',
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: '8px',
+              minWidth: 0,
+              fontWeight: 600,
+            },
+          },
+          typeof title === 'string' ? h('span', { style: { color: LABEL_PRIMARY } }, title) : title,
           h('span', { style: { flex: 1 } }),
-          meta ?? null,
+          meta === undefined || meta === null
+            ? null
+            : h('span', { style: { ...MUTED, fontWeight: 400, fontSize: '12px', minWidth: 0 } }, meta),
         ),
-    children,
+    body,
   );
 }
 

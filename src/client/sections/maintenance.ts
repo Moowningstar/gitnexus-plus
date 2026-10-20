@@ -35,6 +35,7 @@ export function MaintenanceSection({
   runError,
   delta,
   deltaError,
+  deltaRoute,
   now,
   onStartRun,
   onCancelRun,
@@ -51,6 +52,8 @@ export function MaintenanceSection({
   delta?: ClientDelta | null;
   /** Why the delta could not be read, when it failed for a reason worth showing. */
   deltaError?: string | null;
+  /** `missing` means the host has no delta route — name it instead of showing nothing. */
+  deltaRoute?: 'unknown' | 'ready' | 'missing';
   now: number;
   onStartRun: (mode?: MaintenanceStartMode) => void;
   onCancelRun: () => void;
@@ -199,23 +202,39 @@ export function MaintenanceSection({
                 ),
           ),
           activeRun.message === null ? null : h('div', { style: MUTED }, activeRun.message),
-          // The output is the evidence. A run that reports success with a warning in
-          // its log is a different outcome from one that does not, and hiding the text
-          // would leave the panel's own verdict as the only thing to check.
+          // The output is the evidence, but a failure's first screen was thirty lines of
+          // JavaScript stack with the one useful sentence buried in it. The verdict above
+          // is the summary; the raw text stays one click away.
           activeRun.output === ''
             ? null
             : h(
-                'pre',
-                {
-                  style: {
-                    ...styles.mono,
-                    margin: 0,
-                    whiteSpace: 'pre-wrap',
-                    maxHeight: '9em',
-                    overflow: 'auto',
+                'details',
+                { style: { marginTop: '2px' } },
+                h(
+                  'summary',
+                  {
+                    style: {
+                      ...MUTED,
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      userSelect: 'none',
+                    },
                   },
-                },
-                activeRun.output,
+                  '查看原始输出',
+                ),
+                h(
+                  'pre',
+                  {
+                    style: {
+                      ...styles.mono,
+                      margin: '4px 0 0',
+                      whiteSpace: 'pre-wrap',
+                      maxHeight: '12em',
+                      overflow: 'auto',
+                    },
+                  },
+                  activeRun.output,
+                ),
               ),
         ),
 
@@ -227,9 +246,18 @@ export function MaintenanceSection({
     // without the reason would be the same opacity the gate exists to remove, and
     // showing "clean" without an escape hatch would take a decision away from the
     // operator who has a reason the hashes cannot see (a schema change, a repair).
+    // The verdict, or the reason there is none. An old host without the route is a
+    // deployment state worth naming — otherwise the gate is simply absent and the
+    // operator has no way to tell that from "nothing changed".
     deltaError !== null && deltaError !== undefined
       ? h('div', { style: MUTED }, `差量检查失败：${deltaError} —— 刷新仍可直接执行。`)
-      : gateKnown
+      : deltaRoute === 'missing'
+        ? h(
+            'div',
+            { style: MUTED },
+            '当前宿主未挂载差量路由：重启 DSH 后会显示"是否需要刷新"的依据；刷新按钮仍可使用。',
+          )
+        : gateKnown
         ? gateClean
           ? h(
               'div',

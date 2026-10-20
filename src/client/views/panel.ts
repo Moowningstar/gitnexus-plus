@@ -100,6 +100,8 @@ export interface CoverageViewProps {
    */
   delta?: ClientDelta | null;
   deltaError?: string | null;
+  /** Whether the host mounted the delta route; `missing` is named, not swallowed. */
+  deltaRoute?: 'unknown' | 'ready' | 'missing';
   /** Advances once a second while a run is in flight, so elapsed time moves. */
   now: number;
   onRefresh: () => void;
@@ -194,6 +196,7 @@ export function CoverageView({
   runError,
   delta,
   deltaError,
+  deltaRoute,
   now,
   onRefresh,
   onStartRun,
@@ -299,9 +302,10 @@ export function CoverageView({
             {
               wide: true,
               title: '维护命令',
-              meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
+              meta: h('span', { style: { ...MUTED, fontSize: '12px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
+              scroll: 320,
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, delta, deltaError, now, onStartRun, onCancelRun }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -384,7 +388,7 @@ export function CoverageView({
                   : '重启 DSH 后可执行；当前仅可复制（沙箱与提权由 DSH 处理）',
               ),
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, now, onStartRun, onCancelRun }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -569,7 +573,7 @@ export function CoverageView({
           Section,
           {
             title: `需要注意 · ${notable.length + contextWarnings.length}`,
-            style: { display: 'flex', flexDirection: 'column', gap: '8px' },
+            scroll: 300,
           },
           notable.map((warning, index) =>
             h(
@@ -633,6 +637,9 @@ export function CoverageView({
           {
             wide: true,
             title: `被跳过的超大文件 · ${largeFiles.length} 个 · ${fileSize(totals.largeBytes)}`,
+            // A list of up to 40 paths would push every card below it off screen; the
+            // platform's own panels cap long lists and scroll inside the card.
+            scroll: 280,
           },
           h(LargeFileList, { files: largeFiles.slice(0, 40) }),
           largeFiles.length > 40
@@ -657,6 +664,8 @@ export function CoverageView({
               }),
               activityCollapsed(report.activity),
             ),
+            // Timeline + cross-tab + baseline is the longest card in the panel.
+            scroll: 560,
           },
           h(GitActivitySection, { activity: report.activity, projectPath }),
         ),
@@ -671,15 +680,16 @@ export function CoverageView({
             title: '维护命令',
             meta: h(
               'span',
-              { style: { ...MUTED, fontSize: '11px' } },
+              { style: { ...MUTED, fontSize: '12px' } },
               `${maintenance.commands?.length ?? 0} 条 · ` +
                 (maintenance.supportsForce === true
                   ? '均可直接执行，也可复制到会话'
                   : '重启 DSH 后可执行；当前仅可复制') +
                 '（沙箱与提权由 DSH 处理）',
             ),
+            scroll: 360,
           },
-          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, now, onStartRun, onCancelRun }),
+          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
         ),
   );
 }
@@ -731,6 +741,13 @@ export function CoveragePanel(props: SlotProps) {
   /** The Tier 0 verdict, or null while unknown (no route on this host, or not read yet). */
   const [delta, setDelta] = React.useState<ClientDelta | null>(null);
   const [deltaError, setDeltaError] = React.useState<string | null>(null);
+  /**
+   * Whether the host serves `/api/gitnexus/delta`.
+   *
+   * A 404 here used to be silently swallowed, so an operator on an older host saw no
+   * gate and no explanation. Same lesson as the graph card: absent is a state to name.
+   */
+  const [deltaRoute, setDeltaRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   /** The bounded graph projection, its scope, and the load state around it. */
   const [graphProjection, setGraphProjection] = React.useState<ClientGraphProjection | null>(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
@@ -1185,6 +1202,7 @@ export function CoveragePanel(props: SlotProps) {
     if (projectPath === null) {
       setDelta(null);
       setDeltaError(null);
+      setDeltaRoute('unknown');
       return undefined;
     }
     const controller = new AbortController();
@@ -1197,9 +1215,11 @@ export function CoveragePanel(props: SlotProps) {
           if (!controller.signal.aborted) {
             setDelta(null);
             setDeltaError(null);
+            setDeltaRoute('missing');
           }
           return;
         }
+        setDeltaRoute('ready');
         const body = (await res.json().catch(() => null)) as
           | { ok?: boolean; delta?: ClientDelta; message?: string }
           | null;
@@ -1343,6 +1363,7 @@ export function CoveragePanel(props: SlotProps) {
     runError,
     delta,
     deltaError,
+    deltaRoute,
     // `tick` is read here rather than inside the card, so elapsed seconds re-render
     // even when the host reports nothing new — a run with no output for a minute
     // otherwise looks frozen.

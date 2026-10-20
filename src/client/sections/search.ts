@@ -23,9 +23,11 @@ export function SearchSection({ search }: { search: SearchViewState }) {
       title: '关键词搜索',
       meta: h(
         'span',
-        { style: { ...MUTED, fontSize: '11px' } },
+        { style: { ...MUTED, fontSize: '12px' } },
         search.mode === 'text' ? '源码关键词（回退）' : '符号名 / 文件路径',
       ),
+      // Twenty hits of `path:line` rows is a scroll area, not a page length.
+      scroll: 420,
     },
     h(
       'div',
