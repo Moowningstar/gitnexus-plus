@@ -1378,6 +1378,58 @@ async function analyzeTests() {
     JSON.stringify(foundCli),
   );
 
+  // The PATH probe used to read `env.PATH` from a spread copy of `process.env`, where
+  // Windows spells the key `Path` — so the probe silently looked at nothing. This
+  // fixture puts the package only behind a `Path` entry, which is the shape that failed.
+  const pathRoot = fixturePath('path-probe');
+  const pathPackage = path.join(pathRoot, 'node_modules', 'gitnexus');
+  await fs.rm(pathRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(pathPackage, 'dist', 'core', 'ingestion'), { recursive: true });
+  await fs.writeFile(path.join(pathPackage, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+  await fs.writeFile(path.join(pathPackage, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+  const viaWindowsSpelling = findGitnexusRoot({
+    env: { Path: pathRoot, GITNEXUS_PACKAGE_ROOT: '' },
+  });
+  check(
+    'a PATH entry spelled `Path` is probed',
+    viaWindowsSpelling === pathPackage,
+    String(viaWindowsSpelling),
+  );
+  const viaPosixSpelling = findGitnexusRoot({
+    env: { PATH: pathRoot, GITNEXUS_PACKAGE_ROOT: '' },
+  });
+  check(
+    'a PATH entry spelled `PATH` is probed',
+    viaPosixSpelling === pathPackage,
+    String(viaPosixSpelling),
+  );
+
+  // Two installs on PATH: an older copy first, the shim's own package second. The shim
+  // is what the CLI runs, so its installation must win — otherwise the helper loads a
+  // different native build than the one that wrote the index.
+  const staleEntry = fixturePath('stale-entry');
+  const shimEntry = fixturePath('shim-entry');
+  const stalePackage = path.join(staleEntry, 'node_modules', 'gitnexus');
+  const shimPackage = path.join(shimEntry, 'node_modules', 'gitnexus');
+  for (const pkg of [stalePackage, shimPackage]) {
+    await fs.rm(path.dirname(path.dirname(pkg)), { recursive: true, force: true });
+    await fs.mkdir(path.join(pkg, 'dist', 'core', 'ingestion'), { recursive: true });
+    await fs.writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+    await fs.writeFile(path.join(pkg, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+  }
+  await fs.writeFile(path.join(shimEntry, 'gitnexus.cmd'), '@echo off\r\n');
+  const withShim = findGitnexusRoot({
+    env: {
+      Path: `${staleEntry}${path.delimiter}${shimEntry}`,
+      GITNEXUS_PACKAGE_ROOT: '',
+    },
+  });
+  check(
+    'the install that carries the shim wins over an earlier copy on PATH',
+    withShim === shimPackage,
+    String(withShim),
+  );
+
   const managed = createAnalyzeRunner({
     ...stubShell({ exitCode: 0 }),
     toolchain: { managedPrefix: path.join(managedRoot, 'managed') },

@@ -56,7 +56,14 @@ export interface RootDiscoveryOptions {
  */
 function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
   if (options.discover === false) return [];
-  const env: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
+  const override = options.env ?? {};
+  // `{ ...process.env }` turns Node's case-insensitive env proxy into an ordinary
+  // object, so on Windows the key is `Path` and `env.PATH` is `undefined` — the PATH
+  // probe then looked at nothing and reported "not installed" on a machine where
+  // `gitnexus` runs. Read every spelling, override first, like `toolchain.ts` does.
+  const overridePath = override.PATH ?? override.Path ?? override.path;
+  const env: NodeJS.ProcessEnv = { ...process.env, ...override };
+  const pathValue = overridePath ?? process.env.PATH ?? process.env.Path ?? '';
   const roots: string[] = [];
 
   if (env.GITNEXUS_PACKAGE_ROOT) roots.push(env.GITNEXUS_PACKAGE_ROOT);
@@ -75,12 +82,27 @@ function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
   // shim-based discovery silently finds nothing on the very machines where the
   // CLI is most likely to be installed. Testing the directory is
   // extension-independent and needs no PATHEXT reasoning.
-  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+  //
+  // One exception, measured on this machine: a directory that CARRIES the shim owns
+  // the install the CLI actually runs, and an older copy sitting earlier on PATH wins
+  // the plain scan. That produced a graph helper loading 1.6.6 against an index written
+  // by 1.6.12 ("Database file version: 42, Current build storage version: 41"), so a
+  // shim-bearing entry is probed first.
+  const shimRoots: string[] = [];
+  const plainRoots: string[] = [];
+  for (const dir of pathValue.split(path.delimiter)) {
     if (dir === '') continue;
-    roots.push(path.join(dir, 'node_modules', 'gitnexus'));
-    roots.push(path.join(dir, '..', 'node_modules', 'gitnexus'));
-    roots.push(path.join(dir, '..', '..', 'node_modules', 'gitnexus'));
+    const local = path.join(dir, 'node_modules', 'gitnexus');
+    const hasShim =
+      existsSync(path.join(dir, 'gitnexus.cmd')) ||
+      existsSync(path.join(dir, 'gitnexus.exe')) ||
+      existsSync(path.join(dir, 'gitnexus.ps1')) ||
+      existsSync(path.join(dir, 'gitnexus'));
+    (hasShim ? shimRoots : plainRoots).push(local);
+    plainRoots.push(path.join(dir, '..', 'node_modules', 'gitnexus'));
+    plainRoots.push(path.join(dir, '..', '..', 'node_modules', 'gitnexus'));
   }
+  roots.push(...shimRoots, ...plainRoots);
 
   // nvm-for-windows keeps the real tree off PATH behind a junction.
   if (env.NVM_SYMLINK) roots.push(path.join(env.NVM_SYMLINK, 'node_modules', 'gitnexus'));
