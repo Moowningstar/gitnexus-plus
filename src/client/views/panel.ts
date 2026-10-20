@@ -523,9 +523,15 @@ export function CoverageView({
               h('div', { style: { ...MUTED, marginBottom: '5px' } }, '文件'),
               h(MetricGrid, {
                 items: [
-                  { label: '大小上限', value: cap.text, hint: capSourceLabel(cap.source) },
-                  { label: '跳过合计', value: fileSize(totals.largeBytes) },
-                  { label: '超限文件', value: compactNumber(totals.large) },
+                  { label: '大小上限', value: cap.text, hint: capSourceLabel(cap.source), color: '#d9a441' },
+                  { label: '跳过合计', value: fileSize(totals.largeBytes), color: '#e0af68' },
+                  {
+                    label: '超限文件',
+                    value: compactNumber(totals.large),
+                    // Amber when something was actually dropped, grey when the count is
+                    // zero: a zero is good news and should not shout.
+                    color: totals.large > 0 ? '#f7768e' : undefined,
+                  },
                 ],
               }),
             ),
@@ -537,11 +543,11 @@ export function CoverageView({
                   h('div', { style: { ...MUTED, marginBottom: '5px' } }, '图谱'),
                   h(MetricGrid, {
                     items: [
-                      { label: '符号', value: compactNumber(report.graph.nodes) },
-                      { label: '边', value: compactNumber(report.graph.edges) },
-                      { label: '社区', value: compactNumber(report.graph.communities) },
-                      { label: '流程', value: compactNumber(report.graph.processes) },
-                      { label: '向量', value: compactNumber(report.graph.embeddings) },
+                      { label: '符号', value: compactNumber(report.graph.nodes), color: '#7aa2f7' },
+                      { label: '边', value: compactNumber(report.graph.edges), color: '#9ece6a' },
+                      { label: '社区', value: compactNumber(report.graph.communities), color: '#bb9af7' },
+                      { label: '流程', value: compactNumber(report.graph.processes), color: '#7dcfff' },
+                      { label: '向量', value: compactNumber(report.graph.embeddings), color: '#f7768e' },
                     ],
                   }),
                 ),
