@@ -460,18 +460,67 @@ export function GitActivitySection({
     },
   );
 
+  // Clicking a row expands that file's timeline under the row itself, so the answer
+  // appears where the question was asked. The header picker can name a file that is not
+  // in any of the lists below; that case still renders the block above the lists.
+  const toggleFileHistory = (path: string): void => {
+    if (selectedFile === path) closeFileHistory();
+    else openFileHistory(path);
+  };
+  const fileHistoryBlock = (path: string): React.ReactNode =>
+    selectedFile !== path
+      ? null
+      : h(
+          'div',
+          {
+            style: {
+              margin: '2px 0 8px',
+              paddingLeft: '10px',
+              borderLeft: HAIRLINE,
+            },
+          },
+          h(FileHistorySection, {
+            filePath: path,
+            history: fileHistory,
+            busy: fileHistoryBusy,
+            error: fileHistoryError,
+            onClose: closeFileHistory,
+          }),
+        );
+  /**
+   * One file, plus its inline timeline when open.
+   *
+   * The wrapper owns the key: the row and the expansion are one list item, so React does
+   * not reuse a row's DOM for a different file when the list is re-filtered.
+   */
+  const fileListItem = (file: ClientActivityFile): React.ReactNode =>
+    h(
+      'div',
+      { key: file.path },
+      h(ActivityFileRow, { file, onSelect: toggleFileHistory }),
+      fileHistoryBlock(file.path),
+    );
+
+  const listedPaths = new Set<string>();
+  for (const list of [activity.byRecency, activity.byChanges, activity.missingFiles]) {
+    if (!Array.isArray(list)) continue;
+    for (const file of list) if (typeof file?.path === 'string') listedPaths.add(file.path);
+  }
+  const unlistedSelection = selectedFile !== null && !listedPaths.has(selectedFile);
+
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '4px' } },
-    // First, not last: the header picker opens this, and a file's timeline that appears
-    // below the whole project activity is only findable by scrolling.
-    h(FileHistorySection, {
-      filePath: selectedFile,
-      history: fileHistory,
-      busy: fileHistoryBusy,
-      error: fileHistoryError,
-      onClose: closeFileHistory,
-    }),
+    // Only for a file that is not in a list below (usually picked in the header).
+    unlistedSelection
+      ? h(FileHistorySection, {
+          filePath: selectedFile,
+          history: fileHistory,
+          busy: fileHistoryBusy,
+          error: fileHistoryError,
+          onClose: closeFileHistory,
+        })
+      : null,
     h('div', { style: MUTED }, view.totals),
     view.truncated
       ? h('div', { style: MUTED }, `活动窗口达到提交上限，更早的改动未统计`)
@@ -553,7 +602,7 @@ export function GitActivitySection({
             h('div', { style: { ...MUTED, marginBottom: '4px' } }, '应被索引却缺失'),
             activity.missingFiles
               .slice(0, 8)
-              .map((file) => h(ActivityFileRow, { key: file.path, file, onSelect: openFileHistory })),
+              .map((file) => fileListItem(file)),
           )
         : null,
 
@@ -565,7 +614,7 @@ export function GitActivitySection({
             activity.byChanges
               .filter((f) => f.verdict !== 'excluded')
               .slice(0, 8)
-              .map((file) => h(ActivityFileRow, { key: file.path, file, onSelect: openFileHistory })),
+              .map((file) => fileListItem(file)),
           )
         : null,
 
@@ -577,7 +626,7 @@ export function GitActivitySection({
             activity.byRecency
               .filter((f) => f.verdict !== 'excluded')
               .slice(0, 5)
-              .map((file) => h(ActivityFileRow, { key: file.path, file, onSelect: openFileHistory })),
+              .map((file) => fileListItem(file)),
           )
         : null,
 
