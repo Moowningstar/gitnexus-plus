@@ -33,6 +33,7 @@ import {
   Row,
   Section,
   StateDot,
+  SOFT_BG,
   h,
   styles,
 } from '../primitives';
@@ -705,6 +706,28 @@ export function CoverageView({
             meta: h(
               'span',
               { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', ...MUTED, fontSize: '11px' } },
+              // The range control belongs to the card, not to the folded timeline: it
+              // scopes every number on the card, and it should be reachable without
+              // opening the list.
+              h(
+                'select',
+                {
+                  value: String(activityDays),
+                  'aria-label': 'Git 活动窗口',
+                  onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+                    setActivityDays(Number(event.target.value)),
+                  style: {
+                    font: 'inherit',
+                    fontSize: '11px',
+                    padding: '1px 4px',
+                    border: HAIRLINE,
+                    borderRadius: '4px',
+                    background: SOFT_BG,
+                    color: 'inherit',
+                  },
+                },
+                [7, 14, 30].map((days) => h('option', { key: days, value: String(days) }, `${days} 天`)),
+              ),
               h(StateDot, {
                 state:
                   activityView(report.activity)?.verdicts.find((v) => v.key === 'missing')?.tone ?? 'done',

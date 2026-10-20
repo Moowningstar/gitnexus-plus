@@ -8,7 +8,6 @@ import {
   MUTED,
   MetricGrid,
   PathLabel,
-  SOFT_BG,
   StateDot,
   Tag,
   h,
@@ -322,7 +321,6 @@ export function GitActivitySection({
   activity: rawActivity,
   projectPath,
   days,
-  onDaysChange,
   selectedFile: controlledFile,
   onSelectFile,
   onCloseFile,
@@ -344,7 +342,7 @@ export function GitActivitySection({
   // The project timeline defaults to 7 days and caps at 30; the file timeline
   // reuses the same range. Hooks are before the "activity unavailable" return so
   // the hook order cannot change with the data.
-  const [ownDays, setOwnDays] = React.useState(7);
+  const [ownDays] = React.useState(7);
   const timelineDays = days ?? ownDays;
   /** The commit list starts folded: its header keeps the count visible. */
   const [timelineOpen, setTimelineOpen] = React.useState(false);
@@ -420,10 +418,6 @@ export function GitActivitySection({
     setFileHistory(null);
     setFileHistoryError(null);
     setFileHistoryBusy(false);
-  };
-  const changeTimelineDays = (value: number): void => {
-    if (onDaysChange) onDaysChange(value);
-    else setOwnDays(value);
   };
 
   const cutoff = Date.now() - timelineDays * 86_400_000;
@@ -565,26 +559,8 @@ export function GitActivitySection({
         ),
         h('span', { style: { fontSize: '10px' } }, timelineOpen ? '收起' : '展开'),
       ),
-      h('span', { style: { flex: 1 } }),
-      h(
-        'select',
-        {
-          value: String(timelineDays),
-          'aria-label': '项目提交时间线范围',
-          onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
-            changeTimelineDays(Number(event.target.value)),
-          style: {
-            font: 'inherit',
-            fontSize: '10px',
-            padding: '2px 4px',
-            border: HAIRLINE,
-            borderRadius: '4px',
-            background: SOFT_BG,
-            color: 'inherit',
-          },
-        },
-        [7, 14, 30].map((days) => h('option', { key: days, value: String(days) }, `${days} 天`)),
-      ),
+      // The range selector moved to the card header: it scopes every number on the card,
+      // not just this list, so it should not live behind the fold.
     ),
       timelineOpen
         ? h(ActivityTimeline, {
