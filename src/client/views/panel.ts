@@ -484,35 +484,39 @@ export function CoverageView({
       },
       h(
         'div',
-        { style: { display: 'flex', gap: '16px', alignItems: 'flex-start' } },
-        ratio === null
-          ? null
-          : h(Ring, {
-              ratio,
-              caption: '覆盖',
-              tone:
-                ratio >= 0.9
-                  ? 'var(--dsw-alias-state-success-primary, #3fb950)'
-                  : 'var(--dsw-alias-state-warn-primary, #d9a441)',
-            }),
+        { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+        // Ring and scan summary on one line, metrics below at full card width. Keeping
+        // the ring in a left rail stole ~90px from the metric grid at exactly the widths
+        // where it needed two columns, so the card turned into a tall single column.
         h(
           'div',
-          { style: { display: 'flex', flexDirection: 'column', gap: '9px', minWidth: 0, flex: '1 1 auto' } },
-          h('div', { style: MUTED }, summaryLine(report)),
+          { style: { display: 'flex', gap: '12px', alignItems: 'center', minWidth: 0 } },
+          ratio === null
+            ? null
+            : h(Ring, {
+                ratio,
+                caption: '覆盖',
+                tone:
+                  ratio >= 0.9
+                    ? 'var(--dsw-alias-state-success-primary, #3fb950)'
+                    : 'var(--dsw-alias-state-warn-primary, #d9a441)',
+              }),
+          h('div', { style: { ...MUTED, minWidth: 0 } }, summaryLine(report)),
+        ),
 
-          // The three readings sit in a grid instead of a column: 文件 and 图谱 share a
-          // row, and the capability strip spans the full width below them. A stacked
-          // layout left the right half of the card empty at every width above ~360px.
-          h(
-            'div',
-            {
-              style: {
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-                gap: '10px 20px',
-                alignItems: 'start',
-              },
+        // The three readings sit in a grid instead of a column: 文件 and 图谱 share a
+        // row, and the capability strip spans the full width below them. A stacked
+        // layout left the right half of the card empty at every width above ~360px.
+        h(
+          'div',
+          {
+            style: {
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+              gap: '10px 20px',
+              alignItems: 'start',
             },
+          },
             h(
               'div',
               { style: { minWidth: 0 } },
@@ -554,7 +558,6 @@ export function CoverageView({
                     '顶部「关键词搜索」会先查图；图查询不可用时回退到源码关键词。',
                   ),
             ),
-          ),
         ),
       ),
     ),

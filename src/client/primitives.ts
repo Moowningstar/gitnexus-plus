@@ -331,7 +331,18 @@ export function MetricGrid({ items }: { items: MetricItem[] }) {
     items.map((item) =>
       h(
         'div',
-        { key: item.label, style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+        {
+          key: item.label,
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            minWidth: 0,
+            // The hint is a fourth element in a narrow cell. Wrapping keeps it whole
+            // instead of letting it break mid-word against the value ("索引 / 记录").
+            flexWrap: 'wrap',
+          },
+        },
         item.state !== undefined
           ? h(StateDot, { state: item.state })
           : h('span', {
@@ -350,7 +361,13 @@ export function MetricGrid({ items }: { items: MetricItem[] }) {
         // rather than one metric.
         h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, item.label),
         h('span', { style: { fontWeight: 600, ...styles.mono, whiteSpace: 'nowrap' } }, item.value),
-        item.hint !== undefined ? h('span', { style: { ...MUTED, fontSize: '10px' } }, item.hint) : null,
+        item.hint !== undefined
+          ? h(
+              'span',
+              { style: { ...MUTED, fontSize: '10px', whiteSpace: 'nowrap', flexShrink: 0 } },
+              item.hint,
+            )
+          : null,
       ),
     ),
   );
