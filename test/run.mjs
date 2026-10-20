@@ -414,6 +414,94 @@ async function routeTests() {
   check('disposer clears the registration', registered.length === 0);
 }
 
+async function fileHistoryRouteTests() {
+  section('route: /api/gitnexus/file-history');
+  const http = await import('node:http');
+  const { mountFileHistoryRoute } = await import('../lib/routes/file-history.js');
+
+  const registered = [];
+  const shimServer = {
+    register: (route) => {
+      registered.push(route);
+      return () => {
+        const i = registered.indexOf(route);
+        if (i >= 0) registered.splice(i, 1);
+      };
+    },
+  };
+  const calls = [];
+  const dispose = mountFileHistoryRoute(shimServer, {
+    read: async (repo, file, options) => {
+      calls.push({ repo, file, days: options?.days });
+      return {
+        path: file,
+        available: true,
+        days: options?.days ?? 7,
+        commits: 1,
+        insertions: 50,
+        deletions: 5,
+        timeline: [
+          {
+            sha: 'deadbeef',
+            shortSha: 'deadbeef',
+            date: '2026-10-16T00:00:00Z',
+            author: 'Ada',
+            subject: 'touch',
+            insertions: 50,
+            deletions: 5,
+          },
+        ],
+        reason: null,
+      };
+    },
+  });
+
+  const server = http.createServer((req, res) => {
+    const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
+    if (match !== undefined) { void match.handler(req, res); return; }
+    res.statusCode = 404;
+    res.end('no route');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const base = 'http://127.0.0.1:' + port + '/api/gitnexus/file-history';
+  const repo = process.cwd();
+  const hit = async (query, init) => {
+    const res = await fetch(base + query, init);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+
+  const ok = await hit(
+    '?repo=' + encodeURIComponent(repo) + '&path=' + encodeURIComponent('src/client/index.ts') + '&days=14',
+  );
+  check('file history answers 200', ok.status === 200 && ok.body?.ok === true, 'status=' + ok.status);
+  check('file history carries the selected path', ok.body?.path === 'src/client/index.ts', JSON.stringify(ok.body));
+  check('file history forwards clamped days', calls.at(-1)?.days === 14, JSON.stringify(calls.at(-1)));
+  check('file history carries the timeline', Array.isArray(ok.body?.timeline) && ok.body.timeline.length === 1);
+
+  const missing = await hit('?repo=' + encodeURIComponent(repo));
+  check('missing path is rejected', missing.status === 400, 'status=' + missing.status);
+  const outside = await hit(
+    '?repo=' + encodeURIComponent(repo) + '&path=' + encodeURIComponent('../outside.txt'),
+  );
+  check('a path outside the project is rejected', outside.status === 400 && outside.body?.code === 'invalid-path', 'status=' + outside.status + ' body=' + JSON.stringify(outside.body));
+  const notProject = await hit(
+    '?repo=' + encodeURIComponent('C:\\Windows\\System32') + '&path=' + encodeURIComponent('x.txt'),
+  );
+  check('a non-project is refused', notProject.status === 404 && notProject.body?.code === 'not-a-project', 'status=' + notProject.status);
+  const post = await hit(
+    '?repo=' + encodeURIComponent(repo) + '&path=' + encodeURIComponent('src/client/index.ts'),
+    { method: 'POST' },
+  );
+  check('file history POST is rejected', post.status === 405, 'status=' + post.status);
+  const head = await fetch(base + '?repo=' + encodeURIComponent(repo) + '&path=' + encodeURIComponent('src/client/index.ts'), { method: 'HEAD' });
+  check('file history HEAD is allowed', head.status === 200, 'status=' + head.status);
+
+  await new Promise((resolve) => server.close(resolve));
+  dispose();
+  check('file history disposer clears the registration', registered.length === 0);
+}
+
 async function capabilityTests() {
   section('manifest narrowing (fields a checklist would drop)');
   const { readCapabilities, readGraphQuality } = await import('../lib/gitnexus/coverage.js');
@@ -1423,6 +1511,7 @@ await binaryTests();
 await regressionTests();
 await crossCheckTests();
 await routeTests();
+await fileHistoryRouteTests();
 await stalenessTests();
 await capabilityTests();
 await languageTests();

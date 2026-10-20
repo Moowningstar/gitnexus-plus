@@ -17,7 +17,7 @@
 - **索引覆盖**：列出被 `gitnexus analyze` 跳过的超大文件，给出大小、语言占比，以及生成物/压缩文件的判断信号。
 - **索引新鲜度**：索引提交与 `HEAD` 对比，分为 `current` / `behind` / `diverged` / `unknown`，并给出未提交变更数。
 - **图构成**：节点、边、社区、流程、embedding、边/节点比。
-- **Git 活跃度 × 索引**：最近提交、作者、分支、改动最多的文件，每个文件给出 **已索引 / 设计上排除 / 索引缺失** 三方判断。
+- **Git 活跃度 × 索引**：最近提交、作者、分支、改动最多的文件，每个文件给出 **已索引 / 设计上排除 / 索引缺失** 三方判断；另有活动 × 索引交叉表、相对索引提交的基线审查（索引未记录提交时用活动窗口起点并明确标注）、7/14/30 天提交时间线，以及点击文件行查看该文件自己的时间线。
 - **语言分布**：按字节拆分“能解析进图的语言 / 只识别格式的语言 / 其他”；GitNexus 不在时用内置扩展名映射，并标为 `builtin`，不冒充已解析。
 - **关键词搜索**：按图节点的 `name` / `filePath` 匹配，返回 kind、path、line；点击结果打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
 - **源码回退**：图查询子进程起不来时（无可用 shell 沙箱、DLL/ABI、索引忙），在索引清单内的文件里做有界源码行匹配，结果标为 `mode: "text"`。
@@ -75,6 +75,8 @@ DSH 内暴露：
 - 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }`
 - 路由 `GET /api/gitnexus/coverage?repo=<project>`
 - 路由 `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
+- 路由 `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7`：单个文件的
+  有界提交时间线
 - 路由 `POST/GET/DELETE /api/gitnexus/analyze`（唯一会改动索引的入口）
 - 右侧栏 tab `gitnexus`
 

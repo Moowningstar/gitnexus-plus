@@ -30,6 +30,8 @@ import { mountCoverageRoute } from './routes/coverage.js';
 import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
 import { mountSearchRoute } from './routes/search.js';
+import { mountFileHistoryRoute } from './routes/file-history.js';
+import { readFileActivity } from './gitnexus/git-activity.js';
 import { searchWithFallback } from './gitnexus/search.js';
 import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
 import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
@@ -324,6 +326,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
         mountCoverageRoute(svcCtx.webServer, {
           get: (repoPath, options) => coverageFor(repoPath, options),
           maintenance: (repoPath) => maintenanceFor(repoPath),
+        }),
+        mountFileHistoryRoute(svcCtx.webServer, {
+          read: (repoPath, filePath, options) => readFileActivity(repoPath, filePath, options),
         }),
         mountAnalyzeRoute(svcCtx.webServer, {
           start: (repoPath, options) => analyze.start(repoPath, options),

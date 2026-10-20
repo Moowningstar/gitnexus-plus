@@ -204,6 +204,36 @@ export interface ActivityInfo {
   baseline: ActivityBaseline | null;
   /** Newest commits first, capped; each carries its aggregate index verdict. */
   timeline: ActivityCommit[];
+  /** True when the activity window held more commits than the timeline cap. */
+  timelineTruncated: boolean;
+}
+
+/** One commit touching a specific file. */
+export interface FileHistoryCommit {
+  sha: string;
+  shortSha: string;
+  date: string;
+  author: string;
+  subject: string;
+  insertions: number;
+  deletions: number;
+}
+
+/** A single file's bounded commit history. */
+export interface FileHistory {
+  path: string;
+  available: boolean;
+  days: number;
+  commits: number;
+  insertions: number;
+  deletions: number;
+  timeline: FileHistoryCommit[];
+  reason: string | null;
+}
+
+export interface ReadFileHistoryOptions {
+  days?: number;
+  maxCommits?: number;
 }
 
 export interface ReadGitActivityOptions {
@@ -649,7 +679,8 @@ export async function readGitActivity(
   }
   const cross: ActivityCross = { rows: crossRows, totalFiles: files.size, totalChanges };
 
-  const timeline: ActivityCommit[] = commits.slice(0, 50).map((commit) => {
+  const timelineCap = 100;
+  const timeline: ActivityCommit[] = commits.slice(0, timelineCap).map((commit) => {
     let anyMissing = false;
     let anyIndexed = false;
     for (const path of commit.fileSet) {
@@ -721,5 +752,122 @@ export async function readGitActivity(
     cross,
     baseline,
     timeline,
+    timelineTruncated: commits.length > timelineCap,
+  };
+}
+
+/**
+ * Read one file's commits for its own timeline.
+ *
+ * Kept separate from {@link readGitActivity} because "show me this file's history"
+ * should not pay for the whole repository's numstat. `--follow` is intentional: a
+ * renamed file's timeline that stops at the rename is a misleading one.
+ */
+export async function readFileActivity(
+  repoPath: string,
+  filePath: string,
+  options: ReadFileHistoryOptions = {},
+): Promise<FileHistory> {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+  const invalid =
+    normalized === '' ||
+    normalized.startsWith('/') ||
+    /^[A-Za-z]:/.test(normalized) ||
+    normalized.includes('\0') ||
+    normalized.split('/').includes('..');
+  const rawDays = typeof options.days === 'number' && Number.isFinite(options.days) ? options.days : 7;
+  // The UI offers 7/14/30; clamp here too, so a hand-written URL cannot turn this
+  // into an unbounded history read.
+  const days = Math.max(1, Math.min(30, Math.floor(rawDays)));
+  const maxCommits = Math.max(
+    1,
+    Math.min(200, Math.floor(options.maxCommits ?? 100)),
+  );
+  if (invalid) {
+    return {
+      path: normalized,
+      available: false,
+      days,
+      commits: 0,
+      insertions: 0,
+      deletions: 0,
+      timeline: [],
+      reason: '文件路径必须在项目内',
+    };
+  }
+
+  const log = await git(
+    repoPath,
+    [
+      'log',
+      '--follow',
+      `--since=${days} days ago`,
+      `--max-count=${maxCommits}`,
+      '--numstat',
+      `--format=${RS}%H${US}%an${US}%ae${US}%aI${US}%s`,
+      '--',
+      normalized,
+    ],
+  );
+  if (log === null) {
+    return {
+      path: normalized,
+      available: false,
+      days,
+      commits: 0,
+      insertions: 0,
+      deletions: 0,
+      timeline: [],
+      reason: 'git 不可用或无法读取该文件的历史',
+    };
+  }
+
+  const timeline: FileHistoryCommit[] = [];
+  let insertions = 0;
+  let deletions = 0;
+  for (const chunk of log.split(RS)) {
+    if (chunk.trim() === '') continue;
+    const newline = chunk.indexOf('\n');
+    const header = newline === -1 ? chunk : chunk.slice(0, newline);
+    const body = newline === -1 ? '' : chunk.slice(newline + 1);
+    const [sha, author, , date, subject]: (string | undefined)[] = header.split(US);
+    if (sha === undefined || date === undefined) continue;
+
+    let commitInsertions = 0;
+    let commitDeletions = 0;
+    for (const line of body.split('\n')) {
+      if (line.trim() === '') continue;
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const [addedRaw, deletedRaw] = parts;
+      const added = Number.parseInt(addedRaw, 10);
+      const deleted = Number.parseInt(deletedRaw, 10);
+      const ins = Number.isFinite(added) ? added : 0;
+      const del = Number.isFinite(deleted) ? deleted : 0;
+      commitInsertions += ins;
+      commitDeletions += del;
+    }
+    insertions += commitInsertions;
+    deletions += commitDeletions;
+    timeline.push({
+      sha,
+      shortSha: sha.slice(0, 8),
+      date,
+      author: author ?? '?',
+      subject: subject ?? '',
+      insertions: commitInsertions,
+      deletions: commitDeletions,
+    });
+  }
+
+  return {
+    path: normalized,
+    available: true,
+    days,
+    commits: timeline.length,
+    insertions,
+    deletions,
+    timeline,
+    reason: null,
   };
 }

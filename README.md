@@ -24,6 +24,9 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Graph composition** — nodes, edges, communities, processes, embeddings, edges per node.
 - **Git activity × index** — recent commits, authors, branches and most-changed files,
   each file marked **indexed**, **excluded by design**, or **missing from the index**.
+  Includes an activity × index cross-tab, a baseline review against the indexed commit
+  (or the activity-window start when the index recorded none), a 7/14/30-day commit
+  timeline, and a per-file timeline when a file row is clicked.
 - **Language distribution** — bytes split into languages GitNexus can parse, formats it
   only recognizes, and everything else. Without GitNexus, a built-in extension map keeps
   the breakdown useful and marks it `builtin`, never "parsed".
@@ -94,6 +97,8 @@ Inside DSH:
 - tool `gitnexus_coverage`: `{ repo, includeLanguages? }`
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
+- route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's
+  bounded commit timeline
 - route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index)
 - right-sidebar tab `gitnexus`
 

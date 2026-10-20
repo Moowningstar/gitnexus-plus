@@ -763,7 +763,7 @@ const report = {
       {
         sha: 'deadbeefcafebabe',
         shortSha: 'deadbeef',
-        date: '2026-10-16T01:00:00Z',
+        date: new Date(Date.now() - 2 * 86_400_000).toISOString(),
         author: 'Ada',
         subject: 'Add fresh module',
         files: 2,
@@ -821,7 +821,12 @@ check(
 );
 
 check('renders without throwing', view.text.length > 0);
-check('shows the project path instead of a picker', !view.tags.includes('select') && view.text.includes('D:\\demo'));
+// A `<select>` is now the timeline range control, not a project picker. Assert the
+// resolved path and that the unresolved-workspace state is absent.
+check(
+  'shows the project path instead of an unresolved workspace',
+  view.text.includes('D:\\demo') && !view.text.includes('未解析到工作区'),
+);
 check('shows the maintenance commands', view.text.includes('维护命令') && view.text.includes('强制全量重构'));
 // On an indexed project the incremental command is the normal action and must not
 // read as "initialize"; the full rebuild is an escape hatch, never the applicable one.
@@ -953,6 +958,46 @@ check(
     view.text.includes('deadbeef') &&
     view.text.includes('Add fresh module'),
   view.text.slice(-800),
+);
+check(
+  'offers 7/14/30-day project timeline ranges',
+  view.text.includes('7 天') && view.text.includes('14 天') && view.text.includes('30 天'),
+  view.text.slice(-500),
+);
+
+const fileTimeline = render(I.FileHistorySection, {
+  filePath: 'src/fresh.ts',
+  history: {
+    path: 'src/fresh.ts',
+    available: true,
+    days: 7,
+    commits: 1,
+    insertions: 50,
+    deletions: 5,
+    timeline: [
+      {
+        sha: 'deadbeefcafebabe',
+        shortSha: 'deadbeef',
+        date: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+        author: 'Ada',
+        subject: 'Add fresh module',
+        insertions: 50,
+        deletions: 5,
+      },
+    ],
+  },
+  busy: false,
+  error: null,
+  onClose: () => {},
+});
+check(
+  'renders a selected file timeline',
+  fileTimeline.text.includes('文件时间线') &&
+    fileTimeline.text.includes('src/fresh.ts') &&
+    fileTimeline.text.includes('deadbeef') &&
+    fileTimeline.text.includes('Add fresh module') &&
+    fileTimeline.text.includes('近 7 天 · 1 提交'),
+  fileTimeline.text.slice(0, 500),
 );
 check('renders the three-way verdict labels', view.text.includes('已索引') && view.text.includes('索引缺失') && view.text.includes('有意排除'));
 check('renders a missing-file tag', view.text.includes('缺失'));
