@@ -1278,6 +1278,7 @@ const graphState = (patch) => ({
   },
   loading: false,
   error: null,
+  routeState: 'ready',
   scope: null,
   onOpenCommunity: () => {},
   onBack: () => {},
@@ -1355,6 +1356,25 @@ check('a graph error is surfaced', graphFailed.text.includes('图查询失败'),
 
 const graphLoading = render(I.CoverageView, { report, ...viewProps, graph: graphState({ projection: null, loading: true }) });
 check('an empty graph says it is still reading', graphLoading.text.includes('读取中'), graphLoading.text.slice(-500));
+
+// The state that was actually observed: a client that reloaded ahead of the host. A 404
+// used to leave `projection: null` with no error, so the card sat on 读取中… forever and
+// read as a hang. It must name the cause instead.
+const graphRouteMissing = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  graph: graphState({ projection: null, routeState: 'missing' }),
+});
+check(
+  'a host without the graph route says to restart DSH',
+  graphRouteMissing.text.includes('重启 DSH') && graphRouteMissing.text.includes('宿主未挂载图路由'),
+  graphRouteMissing.text.slice(-600),
+);
+check(
+  'a missing route does not pretend to still be loading',
+  !graphRouteMissing.text.includes('正在读取图'),
+  graphRouteMissing.text.slice(-600),
+);
 
 // A host without the route leaves the state undefined; the card must simply not appear
 // rather than showing an empty frame in every profile that has not restarted yet.

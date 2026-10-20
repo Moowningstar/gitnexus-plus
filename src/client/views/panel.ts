@@ -539,7 +539,11 @@ export function CoverageView({
               'span',
               { style: { ...MUTED, fontSize: '11px' } },
               graph.projection === null
-                ? '读取中…'
+                ? graph.routeState === 'missing'
+                  ? '宿主未挂载图路由'
+                  : graph.loading
+                    ? '读取中…'
+                    : '暂无图数据'
                 : `${graph.projection.view === 'communities' ? '社区聚合' : '单个社区'} · ` +
                   `上限 ${graph.projection.budget.nodes} 节点 / ${graph.projection.budget.edges} 边`,
             ),
@@ -731,6 +735,14 @@ export function CoveragePanel(props: SlotProps) {
   const [graphProjection, setGraphProjection] = React.useState<ClientGraphProjection | null>(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
   const [graphError, setGraphError] = React.useState<string | null>(null);
+  /**
+   * Whether the host serves `/api/gitnexus/graph`.
+   *
+   * Kept as state rather than inferred from a null projection: the client can reload
+   * ahead of the host, and "the route is not mounted" must read as "restart DSH", not as
+   * "still loading".
+   */
+  const [graphRoute, setGraphRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   const [graphScope, setGraphScope] = React.useState<string | null>(null);
   const [graphReload, setGraphReload] = React.useState(0);
   const [tick, setTick] = React.useState(0);
@@ -1244,9 +1256,13 @@ export function CoveragePanel(props: SlotProps) {
           if (!controller.signal.aborted) {
             setGraphProjection(null);
             setGraphError(null);
+            // A 404 from a route that is not mounted is the old-host case, not an empty
+            // graph. Saying which one it is is the whole point of this state.
+            setGraphRoute('missing');
           }
           return;
         }
+        setGraphRoute('ready');
         const body = (await res.json().catch(() => null)) as
           | { ok?: boolean; projection?: ClientGraphProjection; message?: string }
           | null;
@@ -1369,6 +1385,7 @@ export function CoveragePanel(props: SlotProps) {
       projection: graphProjection,
       loading: graphLoading,
       error: graphError,
+      routeState: graphRoute,
       scope: graphScope,
       onOpenCommunity: (id: string) => setGraphScope(id),
       onBack: () => setGraphScope(null),

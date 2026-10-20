@@ -1831,6 +1831,75 @@ async function graphTests() {
       );
     }
 
+    // The command string itself is the one link the in-process tests cannot see. The
+    // host builds it with single-quoted paths and runs it through `ctx.shell`; a quoting
+    // mistake would work in the helper test above and fail in the panel. Run the exact
+    // string through a shell, the way the host does.
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const runShell = promisify(execFile);
+      const helper = path.join(import.meta.dirname, '..', 'lib', 'bin', 'graph-helper.js');
+
+      /** The shells this machine might have, most modern first. */
+      const candidates =
+        process.platform === 'win32'
+          ? [
+              ['pwsh', ['-NoProfile', '-NonInteractive', '-Command']],
+              ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command']],
+            ]
+          : [['sh', ['-c']]];
+
+      /** Run one command string, trying each shell until one exists on this machine. */
+      const runCommand = async (command, cwd) => {
+        let missing = null;
+        for (const [file, prefix] of candidates) {
+          try {
+            return await runShell(file, [...prefix, command], {
+              cwd,
+              timeout: 60_000,
+              windowsHide: true,
+              maxBuffer: 8 * 1024 * 1024,
+            });
+          } catch (error) {
+            if (/ENOENT/.test(String(error))) {
+              missing = error;
+              continue;
+            }
+            throw error;
+          }
+        }
+        throw missing ?? new Error('no usable shell found');
+      };
+
+      const shell = {
+        resolve: (request) => request,
+        execute: async (spec) => {
+          const { stdout, stderr } = await runCommand(spec.command, spec.workdir);
+          return {
+            result: async () => ({ exitCode: 0, stdout: { text: stdout }, stderr: { text: stderr } }),
+          };
+        },
+      };
+      const { projectViaHelper } = await import('../lib/gitnexus/graph.js');
+      const viaShell = await projectViaHelper(repo, 'communities', null, { shell, helperPath: helper });
+      check(
+        'the host command string runs through a real shell',
+        viaShell.view === 'communities' && viaShell.nodes.length > 0,
+        `nodes=${viaShell.nodes.length}`,
+      );
+    } catch (error) {
+      // Only a sandbox refusal is a skip. A missing shell or a quoting bug is this
+      // test's job to fail on — matching the bare word `spawn` here once hid an ENOENT
+      // behind a green check.
+      const denied = /EPERM|EACCES/.test(String(error));
+      check(
+        'the host command string is runnable in this environment',
+        denied,
+        denied ? 'spawn denied by this sandbox — covered by the unconfined run' : String(error),
+      );
+    }
+
     const rejections = async (options, expected) => {
       try {
         await projectGraph(repo, options);

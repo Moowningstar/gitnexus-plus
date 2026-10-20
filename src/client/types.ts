@@ -376,6 +376,15 @@ export interface GraphViewState {
   projection: ClientGraphProjection | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Whether the host actually serves the graph route.
+   *
+   * `missing` is a deployment state, not a failure: a client can hot-reload ahead of the
+   * host, and the route is then simply not mounted. It has to be distinguishable from
+   * "still loading" — the first version collapsed both into `projection === null` and
+   * the card sat on 读取中… forever, which reads as a hang rather than as "restart DSH".
+   */
+  routeState: 'unknown' | 'ready' | 'missing';
   /** The community being drilled into, or null for the overview. */
   scope: string | null;
   onOpenCommunity: (id: string) => void;

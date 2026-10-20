@@ -149,7 +149,7 @@ function fitTransform(points: Map<string, Point>): { x: number; y: number; k: nu
 }
 
 export function GraphSection({ state }: { state: GraphViewState }) {
-  const { projection, loading, error, scope, onOpenCommunity, onBack, onReload, onOpenSymbol } = state;
+  const { projection, loading, error, routeState, scope, onOpenCommunity, onBack, onReload, onOpenSymbol } = state;
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const transform = React.useRef<{ x: number; y: number; k: number }>({ x: 0, y: 0, k: 1 });
   const drag = React.useRef<{ x: number; y: number; moved: boolean; active: boolean }>({
@@ -330,6 +330,19 @@ export function GraphSection({ state }: { state: GraphViewState }) {
   };
 
   const nodes = projection?.nodes ?? [];
+  // An empty canvas with no explanation is indistinguishable from a hang — which is
+  // exactly how a client running against an older host was reported. Every empty state
+  // says which one it is.
+  const emptyMessage =
+    nodes.length > 0
+      ? null
+      : routeState === 'missing'
+        ? '当前宿主还没有图路由：重启 DSH（不是刷新页面）后可用。'
+        : loading
+          ? '正在读取图…'
+          : projection === null
+            ? '暂无图数据。'
+            : '该视图没有可画的节点。';
   // The list under the canvas is not decoration: it is the keyboard- and
   // screen-reader-reachable equivalent of the picture, and the only part of this card
   // that a non-canvas test can assert on.
@@ -389,6 +402,27 @@ export function GraphSection({ state }: { state: GraphViewState }) {
           draw();
         },
       }),
+      // An empty canvas explains itself, centred, rather than leaving a blank frame that
+      // reads as a hang.
+      emptyMessage === null
+        ? null
+        : h(
+            'div',
+            {
+              style: {
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 24px',
+                textAlign: 'center',
+                ...MUTED,
+                pointerEvents: 'none',
+              },
+            },
+            emptyMessage,
+          ),
       // A hover caption rather than redrawing a tooltip inside the canvas: it is
       // readable at any zoom, and it stays honest about the node's file.
       hoverLabel === null
