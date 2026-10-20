@@ -451,14 +451,27 @@ export function CoverageView({
     // its three metrics stayed short, so the card carried a band of dead space; and
     // splitting them forced a reader to assemble one answer from two boxes. They are
     // the same fact at two resolutions: what went in, and what came out.
+    // One split region: the tall overview on the left, the two compact readings
+    // stacked on the right. The right column stretches to the overview's height, so the
+    // quality card absorbs the difference instead of leaving a gap under it; a narrow
+    // pane collapses the three into one column.
+    h(
+      'div',
+      {
+        style: {
+          gridColumn: '1 / -1',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: '8px',
+          alignItems: 'stretch',
+        },
+      },
     h(
       Section,
       {
-        // Two rows tall on the left, so the two compact readings stack beside it: the
-        // language bar above, the resolver provenance below. Grid auto-placement does
-        // the pairing, and a narrow pane collapses all three into one column.
+        // The left column of the split region: the one card that answers "what is in
+        // this index". The right column stacks the two compact readings beside it.
         title: '索引概览',
-        style: { gridRow: 'span 2' },
         meta:
           report.graph === null || report.graph === undefined
             ? null
@@ -534,24 +547,37 @@ export function CoverageView({
       ),
     ),
 
+      h(
+        'div',
+        // The column stretches to the overview's height; the quality card below takes
+        // whatever the language card leaves, so the right side ends level with the left.
+        { style: { display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 } },
     // Shares the overview row: a stacked bar plus its legend is a proportional reading,
     // and pairing it with the coverage figure puts the two "how much of this
     // repository" answers side by side. The grid gives them one row on a wide pane and
     // one column in a narrow sidebar, which is the platform's own behaviour.
-    languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
+    languages !== null && languages.rows.length > 0
+      ? h('div', { style: { flex: '0 0 auto', minWidth: 0 } }, h(LanguageSection, { languages }))
+      : null,
 
-    // Shares the row above. Resolver confidence is what makes the counts above it
-    // lower bounds, so it belongs beside the caveats rather than after the charts.
+    // Fills the rest of the column: at the overview's height it ends level with the left
+    // card, and its body scrolls rather than growing past it.
     h(
       Section,
       {
         title: '解析质量与溯源',
+        style: { flex: '1 1 auto', minHeight: 0 },
+        bodyStyle: { maxHeight: 'none', flex: '1 1 auto', minHeight: 0 },
+        scroll: true,
         meta: h('span', { style: { ...MUTED, fontSize: '11px' } }, provenanceCollapsed(report.graphQuality ?? null)),
       },
       h(ProvenanceBlock, {
         quality: report.graphQuality ?? null,
         provenance: report.provenance ?? null,
       }),
+    ),
+
+      )
     ),
 
     // The graph is the index's own shape, not a derived statistic: it belongs directly
