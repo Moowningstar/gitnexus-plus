@@ -35,11 +35,11 @@ import {
   h,
   styles,
 } from '../primitives';
-import { OverviewBody } from '../sections/overview';
-import { GitActivitySection, activityCollapsed, activityView } from '../sections/activity';
+import { MemoizedOverviewBody } from '../sections/overview';
+import { MemoizedGitActivitySection, activityCollapsed, activityView } from '../sections/activity';
 import { ProvenanceBlock, provenanceCollapsed } from '../sections/capabilities';
 import { ToolchainNotice } from '../sections/install';
-import { LanguageSection } from '../sections/languages';
+import { MemoizedLanguageSection } from '../sections/languages';
 import { LargeFileList } from '../sections/large-files';
 import { MaintenanceSection, type MaintenanceStartMode } from '../sections/maintenance';
 import { SearchSection } from '../sections/search';
@@ -404,7 +404,7 @@ export function CoverageView({
           '这里的数字来自工作区，不是索引；索引里有什么，只有建立后才能回答。',
         ),
       ),
-      languages !== null && languages.rows.length > 0 ? h(LanguageSection, { languages }) : null,
+      languages !== null && languages.rows.length > 0 ? h(MemoizedLanguageSection, { languages }) : null,
       maintenance === null || maintenance === undefined
         ? null
         : h(
@@ -508,7 +508,7 @@ export function CoverageView({
             ? null
             : h('span', { style: { ...MUTED, fontSize: '12px' } }, `${fixed(report.graph.edgesPerNode, 2)} 边/符号`),
       },
-      h(OverviewBody, { report, totals, cap, ratio }),
+      h(MemoizedOverviewBody, { report, totals, cap, ratio }),
 
     ),
 
@@ -522,7 +522,7 @@ export function CoverageView({
     // repository" answers side by side. The grid gives them one row on a wide pane and
     // one column in a narrow sidebar, which is the platform's own behaviour.
     languages !== null && languages.rows.length > 0
-      ? h('div', { style: { flex: '0 0 auto', minWidth: 0 } }, h(LanguageSection, { languages }))
+      ? h('div', { style: { flex: '0 0 auto', minWidth: 0 } }, h(MemoizedLanguageSection, { languages }))
       : null,
 
     // Fills the rest of the column: at the overview's height it ends level with the left
@@ -690,7 +690,7 @@ export function CoverageView({
             // Timeline + cross-tab + baseline is the longest card in the panel.
             scroll: 560,
           },
-          h(GitActivitySection, {
+          h(MemoizedGitActivitySection, {
             activity: report.activity,
             projectPath,
             days: activityDays,

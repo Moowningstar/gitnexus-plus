@@ -24,6 +24,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { CommitDiff, FileHistory, FileHistoryCommit } from 'dsh-gitnexus-wire';
 import { normalizePathKey } from './index-meta.js';
 
 const run = promisify(execFile);
@@ -209,14 +210,7 @@ export interface ActivityInfo {
 }
 
 /** One commit's patch for a single file, bounded for the panel. */
-export interface CommitDiff {
-  path: string;
-  sha: string;
-  available: boolean;
-  patch: string;
-  truncated: boolean;
-  reason: string | null;
-}
+export type { CommitDiff } from 'dsh-gitnexus-wire';
 
 /** Patch is capped: a minified vendor file can carry megabytes in one commit. */
 const DIFF_LIMIT_BYTES = 120 * 1024;
@@ -256,28 +250,8 @@ export async function readCommitDiff(
   };
 }
 
-/** One commit touching a specific file. */
-export interface FileHistoryCommit {
-  sha: string;
-  shortSha: string;
-  date: string;
-  author: string;
-  subject: string;
-  insertions: number;
-  deletions: number;
-}
-
-/** A single file's bounded commit history. */
-export interface FileHistory {
-  path: string;
-  available: boolean;
-  days: number;
-  commits: number;
-  insertions: number;
-  deletions: number;
-  timeline: FileHistoryCommit[];
-  reason: string | null;
-}
+/** One commit touching a specific file, and a file's bounded history. */
+export type { FileHistory, FileHistoryCommit } from 'dsh-gitnexus-wire';
 
 export interface ReadFileHistoryOptions {
   days?: number;

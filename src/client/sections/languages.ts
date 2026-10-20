@@ -124,3 +124,9 @@ export function LanguageSection({ languages }: { languages: ClientLanguages }) {
     ),
   );
 }
+
+/**
+ * Memoized for the panel: `languages` is a stable object per report, so a re-render
+ * caused by a run's status does not re-lay out the bar and legend.
+ */
+export const MemoizedLanguageSection = React.memo(LanguageSection);

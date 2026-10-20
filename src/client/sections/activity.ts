@@ -661,3 +661,11 @@ export function GitActivitySection({
         : null,
   );
 }
+
+/**
+ * Memoized for the panel: the activity payload is a stable object per report, and the
+ * card is the longest one in the panel — re-rendering its lists on unrelated state is
+ * the most expensive thing a stray render can do. Callbacks passed into it must be
+ * stable (`setState` functions or `useCallback`), or the memo never hits.
+ */
+export const MemoizedGitActivitySection = React.memo(GitActivitySection);

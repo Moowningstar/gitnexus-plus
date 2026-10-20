@@ -1,6 +1,11 @@
 // ---------------------------------------------------------------------------
 // The report, as this half reads it
 // ---------------------------------------------------------------------------
+import type {
+  CommitDiff,
+  FileHistory,
+  FileHistoryCommit,
+} from 'dsh-gitnexus-wire';
 //
 // Declared locally rather than imported from `../gitnexus/coverage.js`. The two
 // halves ship as separate artifacts — this one is compiled to CommonJS and wrapped
@@ -143,40 +148,13 @@ export interface ClientActivityCrossRow {
   deletions: number;
 }
 
-/** One commit touching a selected file. */
-export interface ClientFileHistoryCommit {
-  sha: string;
-  shortSha?: string;
-  date: string;
-  author: string;
-  subject: string;
-  insertions: number;
-  deletions: number;
-}
-
-/** The bounded per-file history returned by the route. */
-export interface ClientFileHistory {
-  path: string;
-  available: boolean;
-  days: number;
-  commits: number;
-  insertions: number;
-  deletions: number;
-  timeline: ClientFileHistoryCommit[];
-  reason?: string | null;
-  readAt?: string;
-}
-
-/** One commit's patch for one file, as returned by `/file-diff`. */
-export interface ClientCommitDiff {
-  path: string;
-  sha: string;
-  available: boolean;
-  patch: string;
-  truncated: boolean;
-  reason?: string | null;
-  readAt?: string;
-}
+/**
+ * Shared with the host through `types/wire.d.ts`: the shapes that must not drift.
+ * The aliases keep the client's `Client*` names, so every existing import still works.
+ */
+export type ClientFileHistoryCommit = FileHistoryCommit;
+export type ClientFileHistory = FileHistory;
+export type ClientCommitDiff = CommitDiff;
 
 /** Changes since the index's recorded baseline. */
 export interface ClientActivityBaseline {

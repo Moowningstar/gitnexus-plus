@@ -753,6 +753,33 @@ async function searchTests() {
         executed === 1 && second.results.length === first.results.length,
         `executed=${executed} results=${second.results.length}`,
       );
+
+      // Two submits of the same query before the first finishes must share one process.
+      let concurrent = 0;
+      const slowShell = {
+        resolve: (request) => request,
+        execute: async () => {
+          concurrent += 1;
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return {
+            result: async () => ({
+              exitCode: 0,
+              stdout: { text: JSON.stringify(canned) },
+              stderr: { text: '' },
+            }),
+          };
+        },
+      };
+      const concurrentOptions = { shell: slowShell, helperPath: searchHelper, limit: 5 };
+      const [one, two] = await Promise.all([
+        searchWithFallback(repo, 'concurrentProbeQuery', concurrentOptions),
+        searchWithFallback(repo, 'concurrentProbeQuery', concurrentOptions),
+      ]);
+      check(
+        'a concurrent duplicate search shares the first process',
+        concurrent === 1 && one.results.length === two.results.length,
+        `spawned=${concurrent} results=${two.results.length}`,
+      );
     } catch (error) {
       check('search cache probe runs', false, String(error));
     }

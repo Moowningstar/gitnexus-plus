@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { capSourceLabel, compactNumber, fileSize, summaryLine } from '../format';
 import { HAIRLINE, MUTED, MetricGrid, Ring, h } from '../primitives';
 import { ClientCap, ClientReport, ClientTotals } from '../types';
@@ -107,3 +108,9 @@ export function OverviewBody({
 
   );
 }
+
+/**
+ * Memoized for the panel: all four props are stable for the lifetime of one report, so
+ * the card only re-renders when the report does.
+ */
+export const MemoizedOverviewBody = React.memo(OverviewBody);

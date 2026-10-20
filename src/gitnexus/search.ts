@@ -708,6 +708,18 @@ function rememberSearch(key: string, report: SearchReport): void {
   }
 }
 
+/**
+ * Searches already running, so a double submit joins the first one instead of paying
+ * for a second helper process. The cache catches the same query after it completes;
+ * this catches it while it is still in flight.
+ *
+ * A resident helper (one process, a line protocol over stdin/stdout) would remove the
+ * cold start entirely, but the platform's shell executor is one-shot — `execute` gives
+ * a handle with `result()` and no stdin channel — and spawning a long-lived child
+ * directly would step outside the sandbox this plugin deliberately lives in.
+ */
+const inFlightSearches = new Map<string, Promise<SearchReport>>();
+
 export async function searchWithFallback(
   repoPath: string,
   rawQuery: string,
@@ -719,22 +731,35 @@ export async function searchWithFallback(
   if (cacheKey !== null) {
     const hit = searchCache.get(cacheKey);
     if (hit !== undefined && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) return hit.report;
+    const running = inFlightSearches.get(cacheKey);
+    if (running !== undefined) return running;
   }
+
   const remember = (report: SearchReport): SearchReport => {
     if (cacheKey !== null) rememberSearch(cacheKey, report);
     return report;
   };
-  try {
-    return remember(await searchViaHelper(repoPath, rawQuery, options));
-  } catch (error) {
-    if (error instanceof SearchError && FALLBACK_CODES.has(error.code)) {
-      return remember(
-        await searchText(repoPath, rawQuery, {
-          limit: options.limit,
-          reason: error.message,
-        }),
-      );
+  const run = (async (): Promise<SearchReport> => {
+    try {
+      return remember(await searchViaHelper(repoPath, rawQuery, options));
+    } catch (error) {
+      if (error instanceof SearchError && FALLBACK_CODES.has(error.code)) {
+        return remember(
+          await searchText(repoPath, rawQuery, {
+            limit: options.limit,
+            reason: error.message,
+          }),
+        );
+      }
+      throw error;
     }
-    throw error;
+  })();
+
+  if (cacheKey !== null) {
+    inFlightSearches.set(cacheKey, run);
+    void run.finally(() => inFlightSearches.delete(cacheKey)).catch(() => {
+      /* the caller owns the rejection; this chain only cleans the map */
+    });
   }
+  return run;
 }
