@@ -1074,6 +1074,97 @@ async function analyzeTests() {
   await settle();
   check('a non-zero exit is a failure', failed.status('D:/Project/f')?.state === 'failed');
 
+  // A transient Windows file lock on `.gitnexus` is not a policy refusal: the measured
+  // failure is `EPERM … open '…\\.gitnexus\\lbug.init.lock'` while a scanner holds the
+  // directory, and the ACL for that path was verified healthy. One retry, after clearing
+  // a lock a crashed run left behind, is the response — not telling the operator to stop.
+  {
+    const lockMessage =
+      "Error: EPERM: operation not permitted, open 'D:\\Project\\r\\.gitnexus\\lbug.init.lock'";
+    /** @param {unknown[]} results */
+    const sequenceShell = (results) => {
+      let calls = 0;
+      return {
+        shell: {
+          resolve: (req) => req,
+          execute: async () => ({
+            result: async () => {
+              const result = results[Math.min(calls, results.length - 1)];
+              calls += 1;
+              return result;
+            },
+            kill: () => true,
+          }),
+        },
+        calls: () => calls,
+      };
+    };
+
+    const lockRepo = path.join(import.meta.dirname, '.fixtures', `retry-${process.pid}`);
+    await fs.rm(lockRepo, { recursive: true, force: true });
+    await fs.mkdir(path.join(lockRepo, '.gitnexus'), { recursive: true });
+    await fs.writeFile(path.join(lockRepo, '.gitnexus', 'lbug.init.lock'), '{"pid":999999}');
+
+    // A plugin-owned CLI tree, so the runner reaches the spawn path without depending on
+    // whatever gitnexus this machine happens to have globally installed.
+    const cliRoot = path.join(lockRepo, 'cli');
+    const cliPkg = path.join(cliRoot, 'node_modules', 'gitnexus');
+    await fs.mkdir(path.join(cliPkg, 'dist', 'cli'), { recursive: true });
+    await fs.mkdir(path.join(cliPkg, 'dist', 'core', 'ingestion'), { recursive: true });
+    await fs.writeFile(path.join(cliPkg, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+    await fs.writeFile(path.join(cliPkg, 'dist', 'cli', 'index.js'), '');
+    await fs.writeFile(path.join(cliPkg, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+    const toolchain = { managedPrefix: cliRoot };
+
+    const recovered = sequenceShell([
+      { exitCode: 1, stderr: { text: lockMessage } },
+      { exitCode: 0, stdout: { text: 'done' } },
+    ]);
+    const retrying = createAnalyzeRunner({ shell: recovered.shell, retryDelayMs: 5, toolchain });
+    retrying.start(lockRepo);
+    await new Promise((r) => setTimeout(r, 80));
+    check('a transient lock failure is retried once', recovered.calls() === 2, String(recovered.calls()));
+    check('the retried run reports success', retrying.status(lockRepo)?.state === 'done', JSON.stringify(retrying.status(lockRepo)));
+    check('the status records the attempt count', retrying.status(lockRepo)?.attempts === 2, String(retrying.status(lockRepo)?.attempts));
+    const staleGone = await fs
+      .access(path.join(lockRepo, '.gitnexus', 'lbug.init.lock'))
+      .then(() => false)
+      .catch(() => true);
+    check('the stale init lock is cleared before the retry', staleGone);
+    retrying.dispose();
+
+    const stillLocked = sequenceShell([
+      { exitCode: 1, stderr: { text: lockMessage } },
+      { exitCode: 1, stderr: { text: lockMessage } },
+    ]);
+    const locked = createAnalyzeRunner({ shell: stillLocked.shell, retryDelayMs: 5, toolchain });
+    locked.start(lockRepo);
+    await new Promise((r) => setTimeout(r, 80));
+    check('a second lock failure is reported as failed, not denied', locked.status(lockRepo)?.state === 'failed', JSON.stringify(locked.status(lockRepo)));
+    check(
+      'the message names a transient lock and the retry',
+      locked.status(lockRepo)?.message?.includes('临时占用') === true &&
+        locked.status(lockRepo)?.message?.includes('重试') === true,
+      locked.status(lockRepo)?.message,
+    );
+    locked.dispose();
+
+    // A real sandbox refusal must never be retried: the marker is the only signal that
+    // means "do not try again".
+    const refused = sequenceShell([
+      { exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } },
+      { exitCode: 0 },
+    ]);
+    const refusing = createAnalyzeRunner({ shell: refused.shell, retryDelayMs: 5, toolchain });
+    refusing.start(lockRepo);
+    await new Promise((r) => setTimeout(r, 80));
+    check('a sandbox refusal is not retried', refused.calls() === 1, String(refused.calls()));
+    check('the refusal is still reported as denied', refusing.status(lockRepo)?.state === 'denied');
+    refusing.dispose();
+
+    await fs.rm(lockRepo, { recursive: true, force: true });
+  }
+
   // The managed tree is the one a panel install writes. Before this wiring existed,
   // `findGitnexusCli` supported `managedPrefix` but no caller passed it, so an install
   // succeeded and every later refresh still said "no CLI". This fixture is the shape

@@ -59,6 +59,8 @@ export interface AnalyzeStatus {
   repairFts: boolean;
   /** The command as run, so a failure can be reproduced by hand. */
   command: string;
+  /** How many times the command was spawned. 2 means the transient-lock retry ran. */
+  attempts: number;
   startedAt: number;
   finishedAt: number | null;
   exitCode: number | null;
@@ -140,6 +142,11 @@ export interface AnalyzeRunnerOptions {
   skipFts?: boolean;
   /** Override the redirect of the global registry write. */
   gitnexusHome?: string | null;
+  /**
+   * Wait before the single transient-lock retry. Short in tests, long enough in
+   * production for a scanner that briefly holds `.gitnexus` to let go.
+   */
+  retryDelayMs?: number;
   now?: () => number;
 }
 
@@ -256,11 +263,46 @@ export function analyzeCommandLine(
 /**
  * A sandbox refusal, recognised from the marker DSH writes into the output.
  *
- * Tested before the generic non-zero path because a denial is not a failure of
- * GitNexus — retrying it, or reporting it as "analyze failed", both mislead.
+ * The marker is the only reliable signal. It used to also match a bare `EPERM`, which
+ * is how a transient Windows file lock got reported as "the sandbox refused this
+ * write" — and the operator was told to stop trying, when retrying was the answer.
  */
 function looksDenied(text: string): boolean {
-  return /\[sandbox:[^\]]*denied/i.test(text) || /access is denied|permission denied|EPERM/i.test(text);
+  return /\[sandbox:[^\]]*denied/i.test(text) || /access is denied/i.test(text);
+}
+
+/** Delay before the single transient-lock retry. Long enough for a scanner to let go. */
+const RETRY_DELAY_MS = 1500;
+
+/**
+ * Whether a failure looks like a transient file lock rather than a policy refusal.
+ *
+ * Measured on GitNexus 1.6.12: the first write inside `.gitnexus` is
+ * `lbug.init.lock`, opened with `O_CREAT | O_EXCL`, and Windows can refuse it with
+ * `EPERM` while another scanner or a previous process holds the directory. The same
+ * class produces `unable to acquire init lock` when a crashed run left the file behind.
+ * Both are worth one retry; a sandbox marker never is.
+ */
+function isTransientLock(text: string): boolean {
+  if (/\[sandbox:[^\]]*denied/i.test(text)) return false;
+  if (/unable to acquire init lock/i.test(text)) return true;
+  return /(EPERM|EBUSY|resource busy)/i.test(text) && /\.gitnexus|init\.lock|lbug/i.test(text);
+}
+
+/**
+ * Remove the init lock a crashed run left behind, so the retry can take it.
+ *
+ * Safe by construction: this runner holds one run per repository, so no other analyze
+ * started by this plugin can be inside the window. A live lock from another tool is
+ * left to GitNexus's own staleness detection — this only clears the file, it does not
+ * decide who owns it.
+ */
+function clearStaleLock(repoPath: string): void {
+  try {
+    rmSync(path.join(repoPath, '.gitnexus', 'lbug.init.lock'), { force: true });
+  } catch {
+    /* the retry may still succeed once a scanner releases it */
+  }
 }
 
 /**
@@ -334,6 +376,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
   const outputLimit = options.outputLimit ?? DEFAULT_OUTPUT_LIMIT;
   const tailLimit = options.tailLimit ?? DEFAULT_TAIL_LIMIT;
   const now = options.now ?? (() => Date.now());
+  const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
   const shellFlavor: 'win32' | 'posix' = process.platform === 'win32' ? 'win32' : 'posix';
 
   const runs = new Map<string, AnalyzeStatus>();
@@ -345,6 +388,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     force: false,
     repairFts: false,
     command: '',
+    attempts: 0,
     startedAt: 0,
     finishedAt: null,
     exitCode: null,
@@ -471,6 +515,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       force,
       repairFts,
       command,
+      attempts: 1,
       startedAt: now(),
       finishedAt: null,
       exitCode: null,
@@ -490,61 +535,98 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     });
 
     void (async () => {
-      let execution: ShellExecutionLike;
-      try {
-        execution = await shell.execute(spec);
-      } catch (cause) {
-        // `execute` rejects only for infrastructure failures — an unusable workdir, no
-        // shell. A cancellation rejects here too, before a handle exists.
-        const aborted = controller.signal.aborted;
-        finish(key, {
-          state: aborted ? 'cancelled' : 'failed',
-          message: aborted ? '已取消。' : `无法启动命令：${String((cause as Error)?.message ?? cause)}`,
-        });
+      // A single retry, and only for one class of failure.
+      //
+      // Measured: GitNexus's first write inside `.gitnexus` is the init lock, and on
+      // Windows that `open` can fail with `EPERM` while a virus scanner or the indexer
+      // holds the directory — a transient refusal, not a policy one. The ACL for that
+      // path was verified healthy (`WRITE_DAC`/`WRITE_OWNER` present, no foreign
+      // entries), so retrying once after clearing a stale lock is the response, not an
+      // escalation. Anything carrying the sandbox's own marker is never retried.
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        let execution: ShellExecutionLike;
+        try {
+          execution = await shell.execute(spec);
+        } catch (cause) {
+          // `execute` rejects only for infrastructure failures — an unusable workdir, no
+          // shell. A cancellation rejects here too, before a handle exists.
+          const aborted = controller.signal.aborted;
+          finish(key, {
+            state: aborted ? 'cancelled' : 'failed',
+            attempts: attempt,
+            message: aborted ? '已取消。' : `无法启动命令：${String((cause as Error)?.message ?? cause)}`,
+          });
+          return;
+        }
+
+        let result: ShellResultLike;
+        try {
+          result = await execution.result();
+        } catch (cause) {
+          finish(key, {
+            state: 'failed',
+            attempts: attempt,
+            message: `执行失败：${String((cause as Error)?.message ?? cause)}`,
+          });
+          return;
+        }
+
+        const combined = `${result.stdout?.text ?? ''}${result.stderr?.text ?? ''}`;
+        const body = tail(combined, tailLimit);
+        const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
+
+        if (
+          attempt === 1 &&
+          result.timedOut !== true &&
+          !controller.signal.aborted &&
+          isTransientLock(combined)
+        ) {
+          clearStaleLock(key);
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          if (controller.signal.aborted) {
+            finish(key, { state: 'cancelled', attempts: attempt, exitCode, output: body, message: '已取消。' });
+            return;
+          }
+          continue;
+        }
+
+        // Order matters. A denial can also be a non-zero exit, and reporting it as a
+        // generic failure sends the operator looking for a GitNexus bug that is not
+        // there. Cancellation is checked before timeout because a kill from `cancel()`
+        // and a kill from the deadline both surface as a killed process.
+        if (controller.signal.aborted) {
+          finish(key, { state: 'cancelled', attempts: attempt, exitCode, output: body, message: '已取消。' });
+        } else if (result.timedOut === true) {
+          finish(key, {
+            state: 'timed-out',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message: `超过 ${Math.round(timeoutMs / 1000)} 秒上限已终止。大仓库的全量重建可能需要更长时间。`,
+          });
+        } else if (looksDenied(combined)) {
+          finish(key, {
+            state: 'denied',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message: '沙箱拒绝了这次写入。本插件不会申请扩权 —— 需要在终端里手动执行这条命令。',
+          });
+        } else if (exitCode === 0) {
+          finish(key, { state: 'done', attempts: attempt, exitCode, output: body, message: null });
+        } else {
+          finish(key, {
+            state: 'failed',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message:
+              attempt > 1 && isTransientLock(combined)
+                ? '缓存或锁文件被临时占用（EPERM/EBUSY），已自动重试一次仍失败。稍后重试；若持续出现，把下面的命令放到普通终端执行。'
+                : `gitnexus 以退出码 ${exitCode ?? '未知'} 结束。`,
+          });
+        }
         return;
-      }
-
-      let result: ShellResultLike;
-      try {
-        result = await execution.result();
-      } catch (cause) {
-        finish(key, { state: 'failed', message: `执行失败：${String((cause as Error)?.message ?? cause)}` });
-        return;
-      }
-
-      const combined = `${result.stdout?.text ?? ''}${result.stderr?.text ?? ''}`;
-      const body = tail(combined, tailLimit);
-      const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
-
-      // Order matters. A denial can also be a non-zero exit, and reporting it as a
-      // generic failure sends the operator looking for a GitNexus bug that is not
-      // there. Cancellation is checked before timeout because a kill from `cancel()`
-      // and a kill from the deadline both surface as a killed process.
-      if (controller.signal.aborted) {
-        finish(key, { state: 'cancelled', exitCode, output: body, message: '已取消。' });
-      } else if (result.timedOut === true) {
-        finish(key, {
-          state: 'timed-out',
-          exitCode,
-          output: body,
-          message: `超过 ${Math.round(timeoutMs / 1000)} 秒上限已终止。大仓库的全量重建可能需要更长时间。`,
-        });
-      } else if (looksDenied(combined)) {
-        finish(key, {
-          state: 'denied',
-          exitCode,
-          output: body,
-          message: '沙箱拒绝了这次写入。本插件不会申请扩权 —— 需要在终端里手动执行这条命令。',
-        });
-      } else if (exitCode === 0) {
-        finish(key, { state: 'done', exitCode, output: body, message: null });
-      } else {
-        finish(key, {
-          state: 'failed',
-          exitCode,
-          output: body,
-          message: `gitnexus 以退出码 ${exitCode ?? '未知'} 结束。`,
-        });
       }
     })();
 
