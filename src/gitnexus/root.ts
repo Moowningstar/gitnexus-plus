@@ -54,6 +54,21 @@ export interface RootDiscoveryOptions {
  *
  * @returns absolute candidate directories (not yet validated)
  */
+/**
+ * The effective `PATH`, whatever the platform spells it.
+ *
+ * `process.env` is a case-insensitive proxy, but {@link candidateRoots} spreads it
+ * into a plain object and that spread drops the alias. Windows stores the variable
+ * as `Path`, so reading only `.PATH` walks zero directories and reports a machine
+ * with a global `gitnexus` as having none. `toolchain.ts` already documents and
+ * fixes this exact trap for the CLI probe; the package-root probe must not repeat
+ * it, because `readToolchainStatus` infers `absent` from a null root even when the
+ * CLI was found.
+ */
+function effectivePath(env: NodeJS.ProcessEnv): string {
+  return env.PATH ?? env.Path ?? env.path ?? '';
+}
+
 function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
   if (options.discover === false) return [];
   const env: NodeJS.ProcessEnv = { ...process.env, ...(options.env ?? {}) };
@@ -75,7 +90,7 @@ function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
   // shim-based discovery silently finds nothing on the very machines where the
   // CLI is most likely to be installed. Testing the directory is
   // extension-independent and needs no PATHEXT reasoning.
-  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+  for (const dir of effectivePath(env).split(path.delimiter)) {
     if (dir === '') continue;
     roots.push(path.join(dir, 'node_modules', 'gitnexus'));
     roots.push(path.join(dir, '..', 'node_modules', 'gitnexus'));

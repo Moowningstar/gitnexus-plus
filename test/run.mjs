@@ -1075,6 +1075,25 @@ async function analyzeTests() {
     JSON.stringify(foundCli),
   );
 
+  // Windows spells the variable `Path`, and spreading `process.env` into a plain
+  // object drops the case-insensitive alias. Reading only `.PATH` then walks zero
+  // directories, so a global install was reported as absent while the CLI probe
+  // (which does read the alias) still found the shim. That split verdict is what
+  // made the panel say "no GitNexus" on a machine with `gitnexus` on PATH.
+  const pathCaseRoot = fixturePath('path-case');
+  const pathCasePackage = path.join(pathCaseRoot, 'node_modules', 'gitnexus');
+  await fs.rm(pathCaseRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(pathCasePackage, 'dist', 'core', 'ingestion'), { recursive: true });
+  await fs.writeFile(path.join(pathCasePackage, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.12' }));
+  await fs.writeFile(path.join(pathCasePackage, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+  const rootByWindowsPath = findGitnexusRoot({ env: { PATH: undefined, Path: pathCaseRoot } });
+  check(
+    'a Windows-spelled Path is probed for the package root',
+    rootByWindowsPath === path.resolve(pathCasePackage),
+    String(rootByWindowsPath),
+  );
+  await fs.rm(pathCaseRoot, { recursive: true, force: true });
+
   const managed = createAnalyzeRunner({
     ...stubShell({ exitCode: 0 }),
     toolchain: { managedPrefix: path.join(managedRoot, 'managed') },
