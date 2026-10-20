@@ -1955,6 +1955,15 @@ function GitActivitySection({
       .then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }))
       .then(({ status, body }) => {
         if (seq !== fileHistorySeq.current) return;
+        // The client bundle can hot-reload before the host does. An unregistered
+        // route comes back as the desktop carrier's 401/404, not the route's own
+        // not-a-project JSON; say that instead of a generic status.
+        if (
+          (status === 404 && body?.code !== 'not-a-project') ||
+          status === 401
+        ) {
+          throw new Error('当前宿主没有文件时间线路由；重启 DSH 后再试。');
+        }
         if (!body?.ok) {
           throw new Error(
             typeof body?.message === 'string' ? body.message : `请求失败 (${status})`,
