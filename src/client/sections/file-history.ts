@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { compactNumber } from '../format';
+import { highlightLine, languageOf, type HighlightState, type TokenKind } from '../highlight';
 import { routeUrl } from '../navigation';
 import { Button, HAIRLINE, MUTED, PathLabel, h, styles } from '../primitives';
 import { ClientCommitDiff, ClientFileHistory } from '../types';
@@ -9,16 +10,48 @@ const REMOVED = 'var(--dsw-alias-state-error-primary, #f85149)';
 const HUNK = 'var(--dsw-alias-label-secondary, inherit)';
 
 /**
+ * Token colours, falling back to a dark-theme palette.
+ *
+ * The diff itself keeps carrying the add/remove signal in its line colour; these only
+ * distinguish syntax inside a line, so a theme that does not define them still reads.
+ */
+const TOKEN_COLORS: Record<TokenKind, string | undefined> = {
+  plain: undefined,
+  comment: 'var(--dsw-alias-label-secondary, #6a9955)',
+  string: 'var(--dsw-alias-code-string, #ce9178)',
+  number: 'var(--dsw-alias-code-number, #b5cea8)',
+  keyword: 'var(--dsw-alias-code-keyword, #c586c0)',
+};
+
+/** A diff body line, split into the marker and the code that follows it. */
+function diffLineParts(line: string): { marker: string; code: string } {
+  if (line.startsWith('@@')) return { marker: '', code: line };
+  if (
+    line.startsWith('diff --git') ||
+    line.startsWith('index ') ||
+    line.startsWith('--- ') ||
+    line.startsWith('+++ ')
+  ) {
+    return { marker: '', code: line };
+  }
+  if (line === '') return { marker: '', code: '' };
+  return { marker: line[0] as string, code: line.slice(1) };
+}
+
+/**
  * One commit's patch, as unified diff lines.
  *
  * `+++`/`---` are file headers, not changed lines, so they are excluded from the colour
  * rule; colouring them would make every patch open with a false green and red.
  */
 function DiffView({
+  path,
   diff,
   busy,
   error,
 }: {
+  /** Source file the patch belongs to; only its extension is used. */
+  path: string;
   diff: ClientCommitDiff | null;
   busy: boolean;
   error: string | null;
@@ -35,6 +68,46 @@ function DiffView({
     return h('div', { style: { ...MUTED, marginTop: '3px' } }, '该提交没有改动这个文件。');
   }
   const lines = diff.patch.replace(/\n$/, '').split('\n');
+  const language = languageOf(path);
+  // Block comments span lines, so the scanner state has to be threaded through the patch.
+  const state: HighlightState = { blockComment: false };
+  const rows = lines.map((line, index) => {
+    if (line.startsWith('@@')) {
+      return h('div', { key: index, style: { color: HUNK } }, line);
+    }
+    const header =
+      line.startsWith('diff --git') ||
+      line.startsWith('index ') ||
+      line.startsWith('--- ') ||
+      line.startsWith('+++ ');
+    if (header) {
+      return h('div', { key: index, style: { color: HUNK } }, line);
+    }
+    const { marker, code } = diffLineParts(line);
+    const added = marker === '+';
+    const removed = marker === '-';
+    const base = added ? ADDED : removed ? REMOVED : undefined;
+    const tokens = highlightLine(code, language, state);
+    const children: React.ReactNode[] = [];
+    if (marker !== '') {
+      children.push(h('span', { key: 'm', style: { color: base } }, marker));
+    }
+    tokens.forEach((token, tokenIndex) => {
+      children.push(
+        h(
+          'span',
+          {
+            key: tokenIndex,
+            // Plain runs keep the diff colour; only real tokens take a syntax colour.
+            style: { color: token.kind === 'plain' ? base : TOKEN_COLORS[token.kind] },
+          },
+          token.text,
+        ),
+      );
+    });
+    if (code === '') children.push(h('span', { key: 'blank' }, ' '));
+    return h('div', { key: index }, children);
+  });
   return h(
     'div',
     { style: { marginTop: '3px' } },
@@ -54,20 +127,7 @@ function DiffView({
           padding: '4px 6px',
         },
       },
-      lines.map((line, index) => {
-        const added = line.startsWith('+') && !line.startsWith('+++');
-        const removed = line.startsWith('-') && !line.startsWith('---');
-        return h(
-          'div',
-          {
-            key: index,
-            style: {
-              color: added ? ADDED : removed ? REMOVED : line.startsWith('@@') ? HUNK : undefined,
-            },
-          },
-          line === '' ? ' ' : line,
-        );
-      }),
+      rows,
     ),
     diff.truncated
       ? h('div', { style: { ...MUTED, fontSize: '10px', marginTop: '2px' } }, '改动过大，已截断显示。')
@@ -246,7 +306,7 @@ export function FileHistorySection({
                         ),
                       ),
                     ),
-                    open ? h(DiffView, { diff, busy: diffBusy, error: diffError }) : null,
+                    open ? h(DiffView, { path: filePath, diff, busy: diffBusy, error: diffError }) : null,
                   );
                 }),
               ),

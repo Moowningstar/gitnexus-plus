@@ -1025,6 +1025,45 @@ check(
     fileTimeline.text.includes('近 7 天 · 1 提交'),
   fileTimeline.text.slice(0, 500),
 );
+
+// The diff body is tokenized by the plugin's own scanner: no highlighter is exposed to
+// plugins, and bundling one is not possible in this single-artifact build.
+section('highlight: diff line tokenizer');
+check(
+  'languageOf maps extensions to a rule set',
+  I.languageOf('a/b.tsx') === 'ts' &&
+    I.languageOf('x.PY') === 'python' &&
+    I.languageOf('run.ps1') === 'powershell' &&
+    I.languageOf('README.md') === null,
+  JSON.stringify([I.languageOf('a/b.tsx'), I.languageOf('x.PY'), I.languageOf('run.ps1'), I.languageOf('README.md')]),
+);
+{
+  const tokens = I.highlightLine('const x = "a // b"; // tail', 'ts', { blockComment: false });
+  const kinds = tokens.map((t) => t.kind).join(',');
+  check('a string keeps a comment marker inside it', kinds.includes('string') && kinds.includes('comment'), kinds);
+  check(
+    'keywords are recognised and the tail is one comment token',
+    tokens.some((t) => t.kind === 'keyword' && t.text === 'const') &&
+      tokens.some((t) => t.kind === 'comment' && t.text === '// tail') &&
+      tokens.some((t) => t.kind === 'string' && t.text.includes('// b')),
+    JSON.stringify(tokens),
+  );
+}
+{
+  const state = { blockComment: false };
+  const first = I.highlightLine('/* open', 'ts', state);
+  const second = I.highlightLine('still */ const y = 1', 'ts', state);
+  check('a block comment spans lines', state.blockComment === false && second.some((t) => t.kind === 'keyword' && t.text === 'const'), JSON.stringify(second));
+  check('the open line is entirely a comment', first.length === 1 && first[0].kind === 'comment', JSON.stringify(first));
+}
+check(
+  'an unknown language is left plain',
+  I.highlightLine('const x = 1', null, { blockComment: false }).length === 1,
+);
+check(
+  'a python comment does not need a second slash',
+  I.highlightLine('x = 1  # note', 'python', { blockComment: false }).some((t) => t.kind === 'comment'),
+);
 check('renders the three-way verdict labels', view.text.includes('已索引') && view.text.includes('索引缺失') && view.text.includes('有意排除'));
 check('renders a missing-file tag', view.text.includes('缺失'));
 check('renders the author list', view.text.includes('Ada') && view.text.includes('dependabot[bot]'));
