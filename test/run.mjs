@@ -711,6 +711,51 @@ async function searchTests() {
           : message,
       );
     }
+
+    // A repeated search must not pay for a second helper process. The shell stub
+    // answers with a canned report, so only the cache can make the second call cheap.
+    try {
+      const { searchWithFallback } = await import('../lib/gitnexus/search.js');
+      const searchHelper = path.join(import.meta.dirname, '..', 'lib', 'bin', 'search-helper.js');
+      let executed = 0;
+      const canned = {
+        ok: true,
+        report: {
+          query: 'cacheProbeQuery',
+          mode: 'graph',
+          ftsAvailable: false,
+          results: [
+            { kind: 'Function', name: 'cacheProbeQuery', filePath: 'src/x.ts', startLine: 1, endLine: 1 },
+          ],
+          total: 1,
+          truncated: false,
+          warning: null,
+        },
+      };
+      const counting = {
+        resolve: (request) => request,
+        execute: async () => {
+          executed += 1;
+          return {
+            result: async () => ({
+              exitCode: 0,
+              stdout: { text: JSON.stringify(canned) },
+              stderr: { text: '' },
+            }),
+          };
+        },
+      };
+      const options = { shell: counting, helperPath: searchHelper, limit: 5 };
+      const first = await searchWithFallback(repo, 'cacheProbeQuery', options);
+      const second = await searchWithFallback(repo, 'cacheProbeQuery', options);
+      check(
+        'a repeated search is served from cache',
+        executed === 1 && second.results.length === first.results.length,
+        `executed=${executed} results=${second.results.length}`,
+      );
+    } catch (error) {
+      check('search cache probe runs', false, String(error));
+    }
   } else {
     check('real search runs against the indexed repository (skipped)', true, 'no .gitnexus/lbug on this machine');
   }

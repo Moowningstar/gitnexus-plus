@@ -26,7 +26,7 @@
  * state rather than falling back to a filesystem scan with different semantics.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -678,20 +678,62 @@ const FALLBACK_CODES: ReadonlySet<SearchErrorCode> = new Set([
  * project with no index: in all three there is either nothing to search or no honest
  * denominator. Every other failure gets the text search, and its report carries
  * `mode: "text"` plus the graph failure in `warning`.
+ *
+ * Results are memoized for a minute. Each search is a Node cold start plus a native
+ * open, which is the most expensive single interaction in the panel, and the same query
+ * is re-run on every submit/back-navigation. The index file's mtime is part of the key,
+ * so a refresh invalidates the cache without any wiring.
  */
+const SEARCH_CACHE_MAX = 16;
+const SEARCH_CACHE_TTL_MS = 60_000;
+const searchCache = new Map<string, { at: number; report: SearchReport }>();
+
+function searchCacheKey(repoPath: string, query: string, limit: number): string | null {
+  try {
+    const absRepo = path.resolve(repoPath);
+    const mtime = statSync(path.join(absRepo, '.gitnexus', 'gitnexus.json')).mtimeMs;
+    return [absRepo, query.toLowerCase(), limit, mtime].join('\u0000');
+  } catch {
+    return null;
+  }
+}
+
+function rememberSearch(key: string, report: SearchReport): void {
+  searchCache.delete(key);
+  searchCache.set(key, { at: Date.now(), report });
+  while (searchCache.size > SEARCH_CACHE_MAX) {
+    const oldest = searchCache.keys().next().value;
+    if (oldest === undefined) break;
+    searchCache.delete(oldest);
+  }
+}
+
 export async function searchWithFallback(
   repoPath: string,
   rawQuery: string,
   options: HelperSearchOptions,
 ): Promise<SearchReport> {
+  const sanitized = sanitizeSearchQuery(rawQuery);
+  const limit = clampLimit(options.limit);
+  const cacheKey = sanitized === '' ? null : searchCacheKey(repoPath, sanitized, limit);
+  if (cacheKey !== null) {
+    const hit = searchCache.get(cacheKey);
+    if (hit !== undefined && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) return hit.report;
+  }
+  const remember = (report: SearchReport): SearchReport => {
+    if (cacheKey !== null) rememberSearch(cacheKey, report);
+    return report;
+  };
   try {
-    return await searchViaHelper(repoPath, rawQuery, options);
+    return remember(await searchViaHelper(repoPath, rawQuery, options));
   } catch (error) {
     if (error instanceof SearchError && FALLBACK_CODES.has(error.code)) {
-      return searchText(repoPath, rawQuery, {
-        limit: options.limit,
-        reason: error.message,
-      });
+      return remember(
+        await searchText(repoPath, rawQuery, {
+          limit: options.limit,
+          reason: error.message,
+        }),
+      );
     }
     throw error;
   }
