@@ -103,8 +103,6 @@ export interface CoverageViewProps {
   deltaError?: string | null;
   /** Whether the host mounted the delta route; `missing` is named, not swallowed. */
   deltaRoute?: 'unknown' | 'ready' | 'missing';
-  /** Advances once a second while a run is in flight, so elapsed time moves. */
-  now: number;
   onRefresh: () => void;
   onStartRun: (mode?: MaintenanceStartMode) => void;
   onCancelRun: () => void;
@@ -145,6 +143,38 @@ export interface StreamReportPayload {
   report: ClientReport;
   maintenance: ClientMaintenance | null;
   readAt: string | null;
+}
+
+/**
+ * Whether two polled run snapshots say the same thing.
+ *
+ * The poll runs every second and the host returns a fresh object each time, so setting
+ * it unconditionally re-rendered the whole report once a second even when nothing had
+ * changed. Elapsed time is advanced by each card's own clock now; this comparison is
+ * what lets a quiet second stay quiet.
+ */
+function sameRun(a: ClientAnalyzeRun | null, b: ClientAnalyzeRun | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.state === b.state &&
+    a.exitCode === b.exitCode &&
+    a.message === b.message &&
+    a.startedAt === b.startedAt &&
+    a.finishedAt === b.finishedAt &&
+    a.output === b.output
+  );
+}
+
+function sameInstallRun(a: ClientInstallRun | null, b: ClientInstallRun | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.state === b.state &&
+    a.exitCode === b.exitCode &&
+    a.message === b.message &&
+    a.startedAt === b.startedAt &&
+    a.finishedAt === b.finishedAt &&
+    a.output === b.output
+  );
 }
 
 export function LoadingBar({ label, percent }: { label: string; percent?: number | null }) {
@@ -198,7 +228,6 @@ export function CoverageView({
   delta,
   deltaError,
   deltaRoute,
-  now,
   onRefresh,
   onStartRun,
   onCancelRun,
@@ -306,7 +335,7 @@ export function CoverageView({
               meta: h('span', { style: { ...MUTED, fontSize: '12px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
               scroll: 320,
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -346,7 +375,6 @@ export function CoverageView({
         toolchain: report.toolchain,
         run: installRun,
         runError: installError,
-        now,
         onInstall,
         onCancelInstall,
       }),
@@ -393,7 +421,7 @@ export function CoverageView({
                   : '重启 DSH 后可执行；当前仅可复制（沙箱与提权由 DSH 处理）',
               ),
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
+            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
           ),
     );
   }
@@ -413,7 +441,6 @@ export function CoverageView({
       toolchain: report.toolchain,
       run: installRun,
       runError: installError,
-      now,
       onInstall,
       onCancelInstall,
     }),
@@ -773,7 +800,7 @@ export function CoverageView({
             ),
             scroll: 360,
           },
-          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, now, onStartRun, onCancelRun }),
+          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
         ),
   );
 }
@@ -846,7 +873,6 @@ export function CoveragePanel(props: SlotProps) {
   const [graphRoute, setGraphRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   const [graphScope, setGraphScope] = React.useState<string | null>(null);
   const [graphReload, setGraphReload] = React.useState(0);
-  const [tick, setTick] = React.useState(0);
   const running = run?.state === 'running';
 
   /**
@@ -865,7 +891,8 @@ export function CoveragePanel(props: SlotProps) {
         const body = await res.json().catch(() => null);
         if (cancelled || !body?.ok) return;
         const next: ClientAnalyzeRun | null = body.run ?? null;
-        setRun(next);
+        // Polls fire every second; only a changed verdict should re-render the report.
+        setRun((previous) => (sameRun(previous, next) ? previous : next));
         // A finished run changed the index, so the report on screen is now a reading of
         // the previous one. This is the whole reason the run was started.
         if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
@@ -874,7 +901,6 @@ export function CoveragePanel(props: SlotProps) {
       }
     };
     const id = setInterval(() => {
-      setTick((n) => n + 1);
       void poll();
     }, 1000);
     return () => {
@@ -898,8 +924,7 @@ export function CoveragePanel(props: SlotProps) {
       const body = await res.json().catch(() => null);
       if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
       setRun(body.run ?? null);
-      setTick(0);
-    } catch (cause) {
+      } catch (cause) {
       setRunError(String((cause as Error)?.message ?? cause));
     }
   }, [projectPath]);
@@ -1086,7 +1111,7 @@ export function CoveragePanel(props: SlotProps) {
         const body = await res.json().catch(() => null);
         if (cancelled || !body?.ok) return;
         const next: ClientInstallRun | null = body.run ?? null;
-        setInstallRun(next);
+        setInstallRun((previous) => (sameInstallRun(previous, next) ? previous : next));
         // A finished install changes what this machine can do, so re-read the report:
         // the toolchain verdict is computed per read, so this is what clears the notice.
         if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
@@ -1095,7 +1120,6 @@ export function CoveragePanel(props: SlotProps) {
       }
     };
     const id = setInterval(() => {
-      setTick((n) => n + 1);
       void poll();
     }, 1000);
     return () => {
@@ -1112,7 +1136,6 @@ export function CoveragePanel(props: SlotProps) {
       const body = await res.json().catch(() => null);
       if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
       setInstallRun(body.run ?? null);
-      setTick(0);
     } catch (cause) {
       autoInitArmed.current = false;
       setInstallError(String((cause as Error)?.message ?? cause));
@@ -1451,7 +1474,6 @@ export function CoveragePanel(props: SlotProps) {
     // `tick` is read here rather than inside the card, so elapsed seconds re-render
     // even when the host reports nothing new — a run with no output for a minute
     // otherwise looks frozen.
-    now: Date.now() + tick * 0,
     onRefresh: () => setReloadToken((n) => n + 1),
     onStartRun: (mode?: MaintenanceStartMode) => void startRun(mode),
     onCancelRun: () => void cancelRun(),

@@ -1,5 +1,6 @@
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
+import { useNow } from '../clock';
 import { runStateLabel, runStateTone } from '../format';
 import { Button, HAIRLINE, MUTED, SOFT_BG, Section, StateDot, h, styles } from '../primitives';
 import { ClientInstallRun, ClientToolchain } from '../types';
@@ -23,26 +24,25 @@ export function ToolchainNotice({
   toolchain,
   run,
   runError,
-  now,
   onInstall,
   onCancelInstall,
 }: {
   toolchain: ClientToolchain | null | undefined;
   run: ClientInstallRun | null;
   runError: string | null;
-  now: number;
   onInstall: () => void;
   onCancelInstall: () => void;
 }) {
   const [copied, setCopied] = React.useState(false);
   const [confirming, setConfirming] = React.useState(false);
   const [acknowledged, setAcknowledged] = React.useState(false);
+  // The clock hook runs before the early return: hooks cannot be conditional.
+  const activeRun = run ?? null;
+  const installing = activeRun?.state === 'running';
+  const at = useNow(installing);
 
   if (toolchain === undefined || toolchain === null || toolchain.verdict === 'ready') return null;
 
-  const activeRun = run ?? null;
-  const installing = activeRun?.state === 'running';
-  const at = typeof now === 'number' ? now : Date.now();
   const elapsed =
     activeRun === null ? 0 : Math.max(0, Math.round(((activeRun.finishedAt ?? at) - activeRun.startedAt) / 1000));
   const libraryOnly = toolchain.verdict === 'library-only';

@@ -1,5 +1,6 @@
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
+import { useNow } from '../clock';
 import { runStateLabel, runStateTone } from '../format';
 import { Button, HAIRLINE, MUTED, SOFT_BG, StateDot, Tag, h, styles } from '../primitives';
 import { ClientAnalyzeRun, ClientDelta, ClientMaintenance, ClientMaintenanceCommand } from '../types';
@@ -36,7 +37,6 @@ export function MaintenanceSection({
   delta,
   deltaError,
   deltaRoute,
-  now,
   onStartRun,
   onCancelRun,
 }: {
@@ -54,7 +54,6 @@ export function MaintenanceSection({
   deltaError?: string | null;
   /** `missing` means the host has no delta route — name it instead of showing nothing. */
   deltaRoute?: 'unknown' | 'ready' | 'missing';
-  now: number;
   onStartRun: (mode?: MaintenanceStartMode) => void;
   onCancelRun: () => void;
 }) {
@@ -115,7 +114,10 @@ export function MaintenanceSection({
   // predated the prop. `run === null` alone crashed on it.
   const activeRun = run ?? null;
   const running = activeRun?.state === 'running';
-  const at = typeof now === 'number' ? now : Date.now();
+  // The clock lives here, next to the number it moves, instead of one level up: a tick
+  // in the panel re-rendered the whole report (activity lists, graph card, search) once
+  // a second just to advance this one line.
+  const at = useNow(running);
   const elapsed =
     activeRun === null ? 0 : Math.max(0, Math.round(((activeRun.finishedAt ?? at) - activeRun.startedAt) / 1000));
 
