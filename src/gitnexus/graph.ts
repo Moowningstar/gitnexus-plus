@@ -25,7 +25,7 @@
  * a query that crashes the native engine takes down a short-lived child, not the panel.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
 import { loadAdapter } from './search.js';
@@ -500,6 +500,17 @@ export async function projectViaHelper(
 
   const budgetNodes = clampBudget(options.nodeBudget, DEFAULT_NODE_BUDGET, 1000);
   const budgetEdges = clampBudget(options.edgeBudget, DEFAULT_EDGE_BUDGET, 4000);
+
+  // A projection is a pure function of the index, the view, the id and the budgets, and
+  // producing it costs a Node cold start plus the native open. Switching communities and
+  // pressing re-read are common; the index mtime is part of the key, so a refresh
+  // invalidates without any cross-module wiring.
+  const cacheKey = projectionCacheKey(absRepo, view, id, budgetNodes, budgetEdges);
+  const cached = cacheKey === null ? undefined : projectionCache.get(cacheKey);
+  if (cached !== undefined && Date.now() - cached.at < PROJECTION_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
   const args = [
     options.helperPath,
     absRepo,
@@ -562,5 +573,43 @@ export async function projectViaHelper(
   if (projection === null) {
     throw new GraphError('graph-failed', 500, '图投影子进程返回了无法识别的结果形状。');
   }
+  if (cacheKey !== null) rememberProjection(cacheKey, projection);
   return projection;
+}
+
+/** How many projections to keep; each is bounded by the budgets, so this is small. */
+const PROJECTION_CACHE_MAX = 8;
+const PROJECTION_CACHE_TTL_MS = 60_000;
+const projectionCache = new Map<string, { at: number; value: GraphProjection }>();
+
+function rememberProjection(key: string, value: GraphProjection): void {
+  projectionCache.delete(key);
+  projectionCache.set(key, { at: Date.now(), value });
+  while (projectionCache.size > PROJECTION_CACHE_MAX) {
+    const oldest = projectionCache.keys().next().value;
+    if (oldest === undefined) break;
+    projectionCache.delete(oldest);
+  }
+}
+
+/**
+ * Cache key for one projection, or `null` when the index cannot be statted.
+ *
+ * The index file's mtime is in the key: a refresh rewrites it, so a cached projection
+ * from before the refresh can never be served after it.
+ */
+function projectionCacheKey(
+  repoPath: string,
+  view: GraphView,
+  id: string | null,
+  nodes: number,
+  edges: number,
+): string | null {
+  try {
+    const metaFile = path.join(repoPath, '.gitnexus', 'gitnexus.json');
+    const mtime = statSync(metaFile).mtimeMs;
+    return [repoPath, view, id ?? '', nodes, edges, mtime].join('\u0000');
+  } catch {
+    return null;
+  }
 }

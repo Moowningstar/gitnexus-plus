@@ -2298,6 +2298,28 @@ async function graphTests() {
         viaShell.view === 'communities' && viaShell.nodes.length > 0,
         `nodes=${viaShell.nodes.length}`,
       );
+
+      // Same request twice must spawn once: the projection is a pure function of the
+      // index, the view/id and the budgets, and the index mtime is part of the key.
+      let executed = 0;
+      const counting = {
+        resolve: (request) => request,
+        execute: async (spec) => {
+          executed += 1;
+          const { stdout, stderr } = await runCommand(spec.command, spec.workdir);
+          return {
+            result: async () => ({ exitCode: 0, stdout: { text: stdout }, stderr: { text: stderr } }),
+          };
+        },
+      };
+      const options = { shell: counting, helperPath: helper, nodeBudget: 100 };
+      const first = await projectViaHelper(repo, 'communities', null, options);
+      const second = await projectViaHelper(repo, 'communities', null, options);
+      check(
+        'a repeated projection is served from cache',
+        executed === 1 && second.nodes.length === first.nodes.length,
+        `executed=${executed} nodes=${second.nodes.length}`,
+      );
     } catch (error) {
       // Only a sandbox refusal is a skip. A missing shell or a quoting bug is this
       // test's job to fail on — matching the bare word `spawn` here once hid an ENOENT

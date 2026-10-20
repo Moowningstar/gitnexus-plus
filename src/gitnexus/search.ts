@@ -135,7 +135,13 @@ export async function loadAdapter(options: SearchOptions): Promise<LbugAdapter> 
     );
   }
   const cached = adapters.get(root);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    // The install can be removed or replaced while the host runs (uninstall, upgrade to
+    // a tree with a different native build). Reusing the module bindings then points at
+    // a package that no longer exists; one stat is cheaper than a stale handle.
+    if (existsSync(root)) return cached;
+    adapters.delete(root);
+  }
 
   try {
     const mod = (await import(

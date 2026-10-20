@@ -202,6 +202,26 @@ interface DeltaToolResult {
 export function apply(ctx: Context, config: PluginConfig): void {
   const cache = new Map<string, { at: number; report: CoverageReport }>();
   const CACHE_TTL_MS = 15_000;
+  // A long session touches many repositories, and each entry holds a full report —
+  // file lists, samples, activity. Entries used to live forever; eight recent
+  // repositories is more than the panel can show at once, and stale ones are dropped
+  // on write.
+  const CACHE_MAX = 8;
+
+  /** Store a report, pruning expired entries first and the oldest beyond the cap after. */
+  const rememberCoverage = (key: string, report: CoverageReport, at: number): void => {
+    const now = Date.now();
+    for (const [other, entry] of cache) {
+      if (now - entry.at >= CACHE_TTL_MS) cache.delete(other);
+    }
+    cache.delete(key);
+    cache.set(key, { at, report });
+    while (cache.size > CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  };
 
   /**
    * The one install location, resolved once and shared by every path that needs to
@@ -249,7 +269,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       toolchain: managedToolchain,
       onProgress: options.onProgress,
     });
-    cache.set(key, { at: Date.now(), report });
+    rememberCoverage(key, report, Date.now());
     return report;
   };
 

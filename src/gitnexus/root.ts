@@ -122,11 +122,50 @@ function candidateRoots(options: RootDiscoveryOptions = {}): string[] {
 
 /**
  * Resolve the GitNexus package root, or `null` when no usable install is found.
+ *
+ * The candidate list is cheap to build and expensive to probe: every call stats dozens
+ * of paths, and a single panel load asks several times (coverage, languages, search and
+ * graph helpers). A positive result is memoized for 30 s and re-validated with one
+ * `existsSync` before reuse, so an uninstall cannot leave a dead path in place.
+ *
+ * `null` is deliberately NOT memoized: the panel's install flow writes the managed tree
+ * and immediately re-reads the toolchain, and a cached "absent" would keep reporting
+ * that for half a minute after a successful install.
  */
+const ROOT_CACHE_TTL_MS = 30_000;
+const ROOT_CACHE_MAX = 8;
+const rootCache = new Map<string, { root: string; at: number }>();
+
+function rootCacheKey(options: RootDiscoveryOptions): string {
+  const override = options.env ?? {};
+  const pathValue =
+    override.PATH ??
+    override.Path ??
+    override.path ??
+    process.env.PATH ??
+    process.env.Path ??
+    '';
+  return [
+    options.discover === false ? '0' : '1',
+    options.managedPrefix ?? '',
+    override.GITNEXUS_PACKAGE_ROOT ?? process.env.GITNEXUS_PACKAGE_ROOT ?? '',
+    options.moduleUrl ?? '',
+    pathValue,
+  ].join('\u0000');
+}
+
 export function findGitnexusRoot(options: RootDiscoveryOptions = {}): string | null {
+  const key = rootCacheKey(options);
+  const hit = rootCache.get(key);
+  if (hit !== undefined && Date.now() - hit.at < ROOT_CACHE_TTL_MS) {
+    if (existsSync(hit.root)) return hit.root;
+    rootCache.delete(key);
+  }
   for (const root of candidateRoots(options)) {
     try {
       if (existsSync(path.join(root, 'package.json')) && existsSync(path.join(root, DIST.walker))) {
+        if (rootCache.size >= ROOT_CACHE_MAX) rootCache.clear();
+        rootCache.set(key, { root, at: Date.now() });
         return root;
       }
     } catch {

@@ -422,6 +422,16 @@ export async function readGitActivity(
     return 'excluded';
   };
 
+  // The branch list does not depend on the log, so it starts before the log is parsed
+  // and is awaited where it is used. Two windows of git work overlap instead of queue.
+  const branchPromise = git(repoPath, [
+    'for-each-ref',
+    `--count=${maxBranches}`,
+    '--sort=-committerdate',
+    `--format=%(refname:short)${US}%(committerdate:iso-strict)${US}%(authorname)${US}%(HEAD)`,
+    'refs/heads',
+  ]);
+
   const log = await git(repoPath, [
     'log',
     `--since=${since}`,
@@ -546,11 +556,13 @@ export async function readGitActivity(
     source: ActivityBaseline['source'],
   ): Promise<ActivityBaseline> => {
     const short = ref.slice(0, 8);
-    const show = await git(repoPath, [
-      'show',
-      '-s',
-      `--format=%H${US}%aI${US}%an${US}%s`,
-      ref,
+    // Three independent reads of the same ref pair: the subject, the numstat, and the
+    // commit count. Running them together keeps the baseline to one git round-trip
+    // instead of three, which is most of what this panel load used to spend.
+    const [show, diff, countRaw] = await Promise.all([
+      git(repoPath, ['show', '-s', `--format=%H${US}%aI${US}%an${US}%s`, ref]),
+      git(repoPath, ['diff', '--numstat', '--no-renames', `${ref}..HEAD`]),
+      git(repoPath, ['rev-list', '--count', `${ref}..HEAD`]),
     ]);
     if (show === null) {
       return {
@@ -579,7 +591,6 @@ export async function readGitActivity(
       author: author ?? null,
     };
 
-    const diff = await git(repoPath, ['diff', '--numstat', '--no-renames', `${ref}..HEAD`]);
     if (diff === null) {
       return {
         ...base,
@@ -612,7 +623,6 @@ export async function readGitActivity(
       changed.set(filePath, { insertions: ins, deletions: del });
     }
 
-    const countRaw = await git(repoPath, ['rev-list', '--count', `${ref}..HEAD`]);
     const commitCount = countRaw === null ? 0 : Number.parseInt(countRaw.trim(), 10);
 
     const changedFiles: ActivityFile[] = [...changed.entries()]
@@ -643,6 +653,22 @@ export async function readGitActivity(
     };
   };
 
+  const baselineRef = typeof options.baselineRef === 'string' ? options.baselineRef.trim() : '';
+  // The manifest can legitimately have no recorded commit. Falling back to the
+  // oldest commit in the activity window still answers "what changed recently?",
+  // but the source is carried so the UI never calls it an index baseline.
+  // `oldestCommit` is the oldest *date*; the fallback needs the oldest SHA, which
+  // is the last commit after `git log` has produced newest-first entries.
+  const windowBaseline = commits.length > 0 ? commits[commits.length - 1].sha : '';
+  // Started here and awaited at the end: the baseline is two or three more git calls,
+  // and it does not depend on the branch list that is awaited in between.
+  const baselinePromise: Promise<ActivityBaseline | null> | null =
+    baselineRef !== ''
+      ? readBaseline(baselineRef, 'index')
+      : windowBaseline !== ''
+        ? readBaseline(windowBaseline, 'window')
+        : null;
+
   const byChanges = [...files.values()]
     .sort((a, b) => b.changes - a.changes || (a.path < b.path ? -1 : 1))
     .slice(0, maxFiles)
@@ -664,13 +690,7 @@ export async function readGitActivity(
       })),
   );
 
-  const branchRaw = await git(repoPath, [
-    'for-each-ref',
-    `--count=${maxBranches}`,
-    '--sort=-committerdate',
-    `--format=%(refname:short)${US}%(committerdate:iso-strict)${US}%(authorname)${US}%(HEAD)`,
-    'refs/heads',
-  ]);
+  const branchRaw = await branchPromise;
   const branches: ActivityBranch[] = [];
   if (branchRaw !== null) {
     for (const line of branchRaw.split('\n')) {
@@ -750,19 +770,7 @@ export async function readGitActivity(
     };
   });
 
-  const baselineRef = typeof options.baselineRef === 'string' ? options.baselineRef.trim() : '';
-  // The manifest can legitimately have no recorded commit. Falling back to the
-  // oldest commit in the activity window still answers "what changed recently?",
-  // but the source is carried so the UI never calls it an index baseline.
-  // `oldestCommit` is the oldest *date*; the fallback needs the oldest SHA, which
-  // is the last commit after `git log` has produced newest-first entries.
-  const windowBaseline = commits.length > 0 ? commits[commits.length - 1].sha : '';
-  const baseline =
-    baselineRef !== ''
-      ? await readBaseline(baselineRef, 'index')
-      : windowBaseline !== ''
-        ? await readBaseline(windowBaseline, 'window')
-        : null;
+  const baseline = baselinePromise === null ? null : await baselinePromise;
 
   return {
     window: {

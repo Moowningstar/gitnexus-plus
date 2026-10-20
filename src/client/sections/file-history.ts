@@ -44,34 +44,19 @@ function diffLineParts(line: string): { marker: string; code: string } {
  * `+++`/`---` are file headers, not changed lines, so they are excluded from the colour
  * rule; colouring them would make every patch open with a false green and red.
  */
-function DiffView({
-  path,
-  diff,
-  busy,
-  error,
-}: {
-  /** Source file the patch belongs to; only its extension is used. */
-  path: string;
-  diff: ClientCommitDiff | null;
-  busy: boolean;
-  error: string | null;
-}) {
-  if (busy) return h('div', { style: { ...MUTED, marginTop: '3px' } }, '读取改动…');
-  if (error !== null) {
-    return h('div', { style: { ...MUTED, marginTop: '3px', color: REMOVED } }, error);
-  }
-  if (diff === null) return null;
-  if (diff.available === false) {
-    return h('div', { style: { ...MUTED, marginTop: '3px' } }, diff.reason ?? '该提交的改动不可用');
-  }
-  if (diff.patch.trim() === '') {
-    return h('div', { style: { ...MUTED, marginTop: '3px' } }, '该提交没有改动这个文件。');
-  }
-  const lines = diff.patch.replace(/\n$/, '').split('\n');
+/**
+ * Turn a patch into coloured rows.
+ *
+ * Pure and separated from the component so the result can be memoized: a patch can be
+ * 120 KB, and re-tokenizing it on every parent render (the activity card re-renders once
+ * a second while a run is in flight) is the kind of cost that shows up as lag.
+ */
+function renderPatchRows(path: string, patch: string): React.ReactNode[] {
+  const lines = patch.replace(/\n$/, '').split('\n');
   const language = languageOf(path);
   // Block comments span lines, so the scanner state has to be threaded through the patch.
   const state: HighlightState = { blockComment: false };
-  const rows = lines.map((line, index) => {
+  return lines.map((line, index) => {
     if (line.startsWith('@@')) {
       return h('div', { key: index, style: { color: HUNK } }, line);
     }
@@ -108,6 +93,39 @@ function DiffView({
     if (code === '') children.push(h('span', { key: 'blank' }, ' '));
     return h('div', { key: index }, children);
   });
+}
+
+function DiffView({
+  path,
+  diff,
+  busy,
+  error,
+}: {
+  /** Source file the patch belongs to; only its extension is used. */
+  path: string;
+  diff: ClientCommitDiff | null;
+  busy: boolean;
+  error: string | null;
+}) {
+  // Called before any early return: hooks cannot be conditional.
+  const rows = React.useMemo(
+    () =>
+      diff === null || diff.available === false || diff.patch.trim() === ''
+        ? null
+        : renderPatchRows(path, diff.patch),
+    [path, diff],
+  );
+  if (busy) return h('div', { style: { ...MUTED, marginTop: '3px' } }, '读取改动…');
+  if (error !== null) {
+    return h('div', { style: { ...MUTED, marginTop: '3px', color: REMOVED } }, error);
+  }
+  if (diff === null) return null;
+  if (diff.available === false) {
+    return h('div', { style: { ...MUTED, marginTop: '3px' } }, diff.reason ?? '该提交的改动不可用');
+  }
+  if (diff.patch.trim() === '') {
+    return h('div', { style: { ...MUTED, marginTop: '3px' } }, '该提交没有改动这个文件。');
+  }
   return h(
     'div',
     { style: { marginTop: '3px' } },
