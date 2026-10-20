@@ -495,14 +495,22 @@ export function CoverageView({
           { style: { display: 'flex', flexDirection: 'column', gap: '9px', minWidth: 0, flex: '1 1 auto' } },
           h('div', { style: MUTED }, summaryLine(report)),
 
-          // Files in, graph out — the two halves sit side by side so the wide card
-          // is used rather than merely filled.
+          // The three readings sit in a grid instead of a column: 文件 and 图谱 share a
+          // row, and the capability strip spans the full width below them. A stacked
+          // layout left the right half of the card empty at every width above ~360px.
           h(
             'div',
-            { style: { display: 'flex', gap: '24px', flexWrap: 'wrap', alignItems: 'flex-start' } },
+            {
+              style: {
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: '10px 20px',
+                alignItems: 'start',
+              },
+            },
             h(
               'div',
-              { style: { minWidth: '200px', flex: '1 1 auto' } },
+              { style: { minWidth: 0 } },
               h('div', { style: { ...MUTED, marginBottom: '5px' } }, '文件'),
               h(MetricGrid, {
                 items: [
@@ -516,7 +524,7 @@ export function CoverageView({
               ? null
               : h(
                   'div',
-                  { style: { minWidth: '240px', flex: '1 1 auto' } },
+                  { style: { minWidth: 0 } },
                   h('div', { style: { ...MUTED, marginBottom: '5px' } }, '图谱'),
                   h(MetricGrid, {
                     items: [
@@ -528,20 +536,19 @@ export function CoverageView({
                     ],
                   }),
                 ),
-          ),
-
-          h(
-            'div',
-            { style: { borderTop: HAIRLINE, paddingTop: '8px' } },
-            h('div', { style: { ...MUTED, marginBottom: '5px' } }, '查询能力'),
-            h(CapabilityStrip, { capabilities: report.capabilities }),
-            report.capabilities?.fts?.status === 'available'
-              ? null
-              : h(
-                  'div',
-                  { style: { ...MUTED, marginTop: '4px', fontSize: '10px' } },
-                  '顶部「关键词搜索」会先查图；图查询不可用时回退到源码关键词。',
-                ),
+            h(
+              'div',
+              { style: { gridColumn: '1 / -1', borderTop: HAIRLINE, paddingTop: '8px' } },
+              h('div', { style: { ...MUTED, marginBottom: '5px' } }, '查询能力'),
+              h(CapabilityStrip, { capabilities: report.capabilities }),
+              report.capabilities?.fts?.status === 'available'
+                ? null
+                : h(
+                    'div',
+                    { style: { ...MUTED, marginTop: '4px', fontSize: '10px' } },
+                    '顶部「关键词搜索」会先查图；图查询不可用时回退到源码关键词。',
+                  ),
+            ),
           ),
         ),
       ),
