@@ -979,10 +979,11 @@ check(
   view.text.slice(-800),
 );
 check(
-  'renders the commit timeline',
-  view.text.includes('提交时间线') &&
-    view.text.includes('deadbeef') &&
-    view.text.includes('Add fresh module'),
+  'the commit timeline starts folded and keeps its count visible',
+  view.text.includes('提交时间线 · 近 7 天') &&
+    view.text.includes('展开') &&
+    // The rows behind the fold must not be rendered until it is opened.
+    !view.text.includes('Add fresh module'),
   view.text.slice(-800),
 );
 check(

@@ -346,6 +346,8 @@ export function GitActivitySection({
   // the hook order cannot change with the data.
   const [ownDays, setOwnDays] = React.useState(7);
   const timelineDays = days ?? ownDays;
+  /** The commit list starts folded: its header keeps the count visible. */
+  const [timelineOpen, setTimelineOpen] = React.useState(false);
   const [ownFile, setOwnFile] = React.useState<string | null>(null);
   const selectedFile = controlledFile === undefined ? ownFile : controlledFile;
   const [fileHistory, setFileHistory] = React.useState<ClientFileHistory | null>(null);
@@ -529,10 +531,39 @@ export function GitActivitySection({
     h(
       'div',
       { style: { display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 } },
+      // Collapsed by default: the timeline is 50+ rows on an active repository and pushed
+      // everything else (file lists, authors, branches) off the card. The count stays
+      // visible, so the header still answers "how much happened" without the rows.
       h(
-        'span',
-        { style: { ...MUTED } },
-        `提交时间线 · 近 ${timelineDays} 天 · ${projectTimeline.length} 个`,
+        'div',
+        {
+          role: 'button',
+          tabIndex: 0,
+          'aria-expanded': timelineOpen,
+          title: timelineOpen ? '收起提交时间线' : '展开提交时间线',
+          onClick: () => setTimelineOpen((open) => !open),
+          onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setTimelineOpen((open) => !open);
+            }
+          },
+          style: {
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '4px',
+            cursor: 'pointer',
+            ...MUTED,
+            userSelect: 'none',
+          },
+        },
+        h('span', { style: { fontSize: '10px' } }, timelineOpen ? '▾' : '▸'),
+        h(
+          'span',
+          null,
+          `提交时间线 · 近 ${timelineDays} 天 · ${projectTimeline.length} 个`,
+        ),
+        h('span', { style: { fontSize: '10px' } }, timelineOpen ? '收起' : '展开'),
       ),
       h('span', { style: { flex: 1 } }),
       h(
@@ -555,11 +586,13 @@ export function GitActivitySection({
         [7, 14, 30].map((days) => h('option', { key: days, value: String(days) }, `${days} 天`)),
       ),
     ),
-    h(ActivityTimeline, {
-      timeline: projectTimeline,
-      indexKnown: activity.totals?.indexKnown === true,
-    }),
-    activity.timelineTruncated === true
+      timelineOpen
+        ? h(ActivityTimeline, {
+            timeline: projectTimeline,
+            indexKnown: activity.totals?.indexKnown === true,
+          })
+        : null,
+    timelineOpen && activity.timelineTruncated === true
       ? h(
           'div',
           { style: { ...MUTED, fontSize: '10px' } },
