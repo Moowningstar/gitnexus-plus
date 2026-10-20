@@ -35,7 +35,7 @@
  * prompt states, for the same reason.
  */
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
@@ -309,8 +309,37 @@ function isTransientLock(text: string): boolean {
   // The parse store is a directory the analyzer must create; a retry cannot grant a
   // right the confined token does not have, so that class is handled separately.
   if (isSandboxStoreDenied(text)) return false;
+  // A refused `spawn` is the sandbox blocking a child process (the FTS installer), not a
+  // held file: waiting and retrying changes nothing.
+  if (/spawn EPERM/i.test(text)) return false;
   if (/unable to acquire init lock/i.test(text)) return true;
   return /(EPERM|EBUSY|resource busy)/i.test(text) && /\.gitnexus|init\.lock|lbug/i.test(text);
+}
+
+/**
+ * Whether GitNexus tried to start a child process and the sandbox refused.
+ *
+ * Measured on a `--repair-fts` run: `Analysis failed: spawn EPERM`. The FTS extension is
+ * installed/loaded out of process, which a confined shell denies. This is the same class
+ * as the respawn problem `GITNEXUS_MEMORY=off` was added for — but this one is a child
+ * the analyzer starts deliberately, and no flag suppresses it.
+ */
+function looksSpawnDenied(text: string): boolean {
+  return /spawn EPERM/i.test(text);
+}
+
+/**
+ * Whether the FTS extension was found and still could not be loaded.
+ *
+ * That is an upstream runtime problem, not a sandbox refusal and not something a retry
+ * can fix: on Windows it usually names a missing DLL (`找不到指定的模块`), which the
+ * upstream message traces to the VC++ 2015-2022 x64 redistributable or OpenSSL 3.
+ */
+function looksFtsUnloadable(text: string): boolean {
+  return (
+    /FTS extension file was found but could not be loaded/i.test(text) ||
+    (/failed to load library/i.test(text) && /fts/i.test(text))
+  );
 }
 
 /**
@@ -344,6 +373,26 @@ function clearStaleLock(repoPath: string): void {
     rmSync(path.join(repoPath, '.gitnexus', 'lbug.init.lock'), { force: true });
   } catch {
     /* the retry may still succeed once a scanner releases it */
+  }
+}
+
+/**
+ * Whether the manifest on disk records no commit.
+ *
+ * In a confined shell the analyzer cannot start `git`, so it writes an empty
+ * `lastCommit` even on a successful run. The index itself is fine — the baseline is not
+ * — and that is what makes the refresh gate answer "无法确认" instead of "已是最新".
+ * Reported to the operator rather than repaired here: the manifest belongs to GitNexus,
+ * and writing a commit into it is the analyzer's decision, not this plugin's.
+ */
+function lacksCommitBaseline(repoPath: string): boolean {
+  try {
+    const raw = JSON.parse(
+      readFileSync(path.join(repoPath, '.gitnexus', 'gitnexus.json'), 'utf8'),
+    ) as { lastCommit?: unknown };
+    return typeof raw.lastCommit !== 'string' || raw.lastCommit === '';
+  } catch {
+    return false;
   }
 }
 
@@ -650,6 +699,28 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
             output: body,
             message: `超过 ${Math.round(timeoutMs / 1000)} 秒上限已终止。大仓库的全量重建可能需要更长时间。`,
           });
+        } else if (looksFtsUnloadable(combined)) {
+          // The extension is present and still cannot load: an upstream runtime gap, not
+          // a sandbox refusal and not a retry candidate.
+          finish(key, {
+            state: 'failed',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message:
+              'FTS 扩展文件存在但加载失败 —— 通常是 Windows 缺少原生运行时（VC++ 2015-2022 x64 与 OpenSSL 3），' +
+              '不是索引损坏，也不是本插件能修的。装好运行时后再试；在此之前搜索仍按名称/路径匹配。',
+          });
+        } else if (looksSpawnDenied(combined)) {
+          finish(key, {
+            state: 'denied',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            message:
+              '分析器要启动一个子进程（FTS 扩展的安装/加载），当前沙箱不允许 spawn。请在普通终端执行下面的命令；' +
+              '若终端里仍报扩展无法加载，那是缺少原生运行时。',
+          });
         } else if (isSandboxStoreDenied(combined)) {
           // Deterministic, not transient: the confined token may create files in
           // `.gitnexus` but not directories, and the parse worker needs a directory.
@@ -672,7 +743,18 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
             message: '沙箱拒绝了这次写入。本插件不会申请扩权 —— 需要在终端里手动执行这条命令。',
           });
         } else if (exitCode === 0) {
-          finish(key, { state: 'done', attempts: attempt, exitCode, output: body, message: null });
+          finish(key, {
+            state: 'done',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            // A confined shell cannot start `git`, so GitNexus cannot record the commit
+            // it indexed. The index is still correct; only the baseline is missing, and
+            // the gate will honestly say "无法确认" until a terminal run fills it in.
+            message: lacksCommitBaseline(key)
+              ? '刷新完成。但沙箱里分析器读不到 git，索引没有记录提交基线 —— 想让门禁给出"已是最新"，在普通终端再跑一次下面的命令。'
+              : null,
+          });
         } else {
           finish(key, {
             state: 'failed',

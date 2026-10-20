@@ -1200,6 +1200,67 @@ async function analyzeTests() {
     );
     deniedStore.dispose();
 
+    // The FTS repair starts a child process; a confined shell refuses it, and no retry
+    // grants a spawn right. Measured as `Analysis failed: spawn EPERM`.
+    const spawnDenied = sequenceShell([
+      { exitCode: 1, stderr: { text: '  Analysis failed: spawn EPERM' } },
+      { exitCode: 0 },
+    ]);
+    const repairRun = createAnalyzeRunner({ shell: spawnDenied.shell, retryDelayMs: 5, toolchain });
+    repairRun.start(lockRepo, { repairFts: true });
+    await new Promise((r) => setTimeout(r, 80));
+    check('a refused child process is not retried', spawnDenied.calls() === 1, String(spawnDenied.calls()));
+    check('it is reported as a sandbox refusal', repairRun.status(lockRepo)?.state === 'denied', JSON.stringify(repairRun.status(lockRepo)));
+    check(
+      'the message names the child process and the terminal',
+      repairRun.status(lockRepo)?.message?.includes('子进程') === true &&
+        repairRun.status(lockRepo)?.message?.includes('终端') === true,
+      repairRun.status(lockRepo)?.message,
+    );
+    repairRun.dispose();
+
+    // An extension that is present but cannot load is an upstream runtime gap. Telling
+    // the operator to retry would be wrong; naming the runtime is the useful answer.
+    const unloadable = sequenceShell([
+      {
+        exitCode: 1,
+        stderr: {
+          text: 'Analysis failed: Cannot repair FTS indexes: The FTS extension file was found but could not be loaded',
+        },
+      },
+      { exitCode: 0 },
+    ]);
+    const ftsRun = createAnalyzeRunner({ shell: unloadable.shell, retryDelayMs: 5, toolchain });
+    ftsRun.start(lockRepo, { repairFts: true });
+    await new Promise((r) => setTimeout(r, 80));
+    check('an unloadable FTS extension is not retried', unloadable.calls() === 1, String(unloadable.calls()));
+    check('it is a failure, not a sandbox refusal', ftsRun.status(lockRepo)?.state === 'failed', JSON.stringify(ftsRun.status(lockRepo)));
+    check(
+      'the message names the missing runtime',
+      ftsRun.status(lockRepo)?.message?.includes('运行时') === true,
+      ftsRun.status(lockRepo)?.message,
+    );
+    ftsRun.dispose();
+
+    // A confined shell cannot start git, so a successful run writes an empty
+    // `lastCommit`. The index is fine; the baseline is not, and the operator should know
+    // why the gate says 无法确认 afterwards.
+    await fs.writeFile(
+      path.join(lockRepo, '.gitnexus', 'gitnexus.json'),
+      JSON.stringify({ lastCommit: '', stats: { files: 1 } }),
+    );
+    const noBaseline = sequenceShell([{ exitCode: 0, stdout: { text: 'done' } }]);
+    const baselineRun = createAnalyzeRunner({ shell: noBaseline.shell, retryDelayMs: 5, toolchain });
+    baselineRun.start(lockRepo);
+    await new Promise((r) => setTimeout(r, 80));
+    check('a successful run without a baseline still completes', baselineRun.status(lockRepo)?.state === 'done');
+    check(
+      'it explains the missing commit baseline',
+      baselineRun.status(lockRepo)?.message?.includes('提交基线') === true,
+      baselineRun.status(lockRepo)?.message,
+    );
+    baselineRun.dispose();
+
     const stillLocked = sequenceShell([
       { exitCode: 1, stderr: { text: lockMessage } },
       { exitCode: 1, stderr: { text: lockMessage } },
