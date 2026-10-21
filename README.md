@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.4](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.4)** ·
+**Current release: [0.1.5](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.5)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -49,8 +49,13 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Source fallback** — when the graph helper cannot start (no usable shell sandbox,
   DLL/ABI, busy index), a bounded line search over the indexed files returns
   `mode: "text"` instead of pretending to be the graph.
-- **No-index visibility** — a git project without an index shows a scan overview,
-  language split and the initialize command instead of an empty panel.
+- **Multiple indexes in one workspace** — the workspace can be a container (`D:\Project`
+  holding `gitnexus-plus/`, `viewer/`, or `geo/` holding `frontend/`, `backend/`). The
+  panel discovers every `.gitnexus` below it, selects one by default, and offers a header
+  switcher when there is more than one; the choice is remembered per workspace.
+- **No-index visibility** — a git project *or a plain folder* without an index shows a
+  scan overview, language split and the initialize command instead of an empty panel. A
+  folder with no `.git` is indexed with `--skip-git`.
 - **Maintenance** — initialize, incremental refresh and full rebuild (`--force`) run
   through DSH's shell executor, with no self-escalation. When the index reports FTS as
   unavailable, a **修复搜索索引（FTS）** action runs `analyze --repair-fts` — the search
@@ -103,14 +108,23 @@ Treat the first install as unverified and fall back to the manual command if it 
 
 ## Usage
 
-The panel reports the project the current workspace points at; it has no global
-repository list. Its bound is a project root (a `.gitnexus` index or a `.git` marker), so
-it cannot become a filesystem probe.
+The panel reports the projects the current workspace contains; it has no global
+repository list. It looks **downward** from the workspace: the workspace itself and every
+indexed descendant are candidates, and an indexed directory is a project boundary. When
+there is more than one candidate the header path becomes a switcher, with a line naming
+the workspace, the index count and the active path; refreshes, delta, search, graph and
+maintenance then target the selected project. The default is the remembered choice, then
+the workspace's own index, then the nearest complete/newest descendant. Only when nothing
+is found does it describe the workspace itself: the directory must exist and must not be a
+filesystem root, and it needs neither `.git` nor an index. A plain folder is still scanned,
+and can be indexed with `--skip-git` (no commit baseline, no incremental refresh). The
+route offers no way to browse or list any other path.
 
 Inside DSH:
 
 - tool `gitnexus_coverage`: `{ repo, includeLanguages? }`
 - tool `gitnexus_delta`: `{ repo }` — would a refresh change anything?
+- route `GET /api/gitnexus/projects?root=<workspace>` — the workspace's index candidates
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's
@@ -156,9 +170,11 @@ GitNexus path owns the rest.
 | Symptom | What to do here | Upstream GitNexus path |
 | --- | --- | --- |
 | The panel says GitNexus is absent | Install it yourself, or use the panel's install. For a non-standard location set `GITNEXUS_CLI=/path/to/gitnexus/dist/cli/index.js`. | [`gitnexus/README.md` — Requirements](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#requirements), [Quick Start](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#quick-start) |
-| The project has no index | Use **初始化索引** in the panel, or run `gitnexus analyze --index-only <repo>`. | [`README.md` — CLI Reference](https://github.com/abhigyanpatwari/GitNexus/blob/main/README.md#cli-reference), [`RUNBOOK.md` — Index out of date](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#index-out-of-date--stale-tools) |
+| The project has no index | Use **初始化索引** in the panel, or run `gitnexus analyze --index-only <repo>`. For a folder that is not a git repository the panel's command adds `--skip-git` (upstream requires it); the resulting index has no commit baseline and no incremental refresh. | [`README.md` — CLI Reference](https://github.com/abhigyanpatwari/GitNexus/blob/main/README.md#cli-reference), [`RUNBOOK.md` — Index out of date](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#index-out-of-date--stale-tools) |
+| A subdirectory has an index but the switcher does not list it | The search only goes **down** from the current workspace, never up or to siblings. It skips hidden directories, `node_modules` and build output, and has depth/count/time limits. Confirm `<workspace>/<child>/.gitnexus/gitnexus.json`; if the index is in a skipped or very deep directory, open that directory as the workspace. Multiple indexes appear in the header switcher; a truncated search is labelled as such. | This plugin's discovery; no upstream GitNexus path. |
 | Refresh fails, `spawn EPERM`, or the index stays `incremental-in-progress` | The panel's command already sets `GITNEXUS_MEMORY=off`, `NODE_OPTIONS=--max-old-space-size=8192`, `GITNEXUS_HOME=<repo>/.gitnexus/plugin-home` and `--index-only`. If the sandbox still refuses, run the copied command in your own shell; the plugin will not escalate. | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors), [Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
 | Refresh fails with `EPERM … mkdir` or `rmdir '<repo>\.gitnexus\parsedfile-store'` | GitNexus deletes this run-scoped store at the start of every parse, and a parse worker creates it again during the parse — both directions can be refused. Two causes, both addressed in 0.1.4: the plugin no longer pre-creates the directory (that was 0.1.3's `rmdir`), and the analyzer's shell call now carries the **repository** as its sandbox workspace root. A panel route has no session, so the sandbox used to fall back to the DSH application directory, whose write capability is a different identity — the repository's write grant never applied. If it still fails, the deployment's mode is read-only: run the copied command in a normal terminal. | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors), [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus) |
+| Windows reports `windows-acl-run: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\Program Files\DSH Desktop)` | The ACL sandbox failed to grant write on the **workspace root**; `D:\Program Files\DSH Desktop` is the DSH application directory, not a project. Since 0.1.5 the search/graph helpers use the queried repository as the policy root, and the installer uses the plugin prefix; a failed install returns the copyable command. If an ordinary **shell command** still fails this way, the session workspace itself is the install directory: open a writable project. Do not add ACL grants to Program Files. | This plugin's policy-root fix; the DSH sandbox itself has no upstream GitNexus path. |
 | Incremental analyze hangs, or the database reports `Maximum database size … has been reached` | Use **全量重建** (`--force`), or the clean-slate steps. | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus), [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Refresh fails with `EPERM … open '<repo>\.gitnexus\lbug.init.lock'` or `unable to acquire init lock` | A transient file lock, not a permissions problem: the ACL for `.gitnexus` was checked on the machine that reported it and came back healthy. GitNexus's first write is that lock, and a scanner, the indexer, or a crashed run can hold it. The plugin clears a stale lock and retries once automatically (the run shows `attempts: 2`). If it still fails, wait a moment and retry, or run the copied command in a normal terminal. | This plugin's retry plus the analyzer's own lock file; no upstream GitNexus path. |
 | Search fails with `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | Graph search runs in `lib/bin/search-helper.js`, never in the Electron host. Restart DSH after upgrading and keep `node` on the shell PATH. If the helper cannot start at all, search falls back to source text. | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
@@ -203,7 +219,11 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 
 Add `--force` for a full rebuild, or `--repair-fts` alone to rebuild the search indexes
 without touching the graph (the panel offers that as **修复搜索索引（FTS）** when the index
-reports FTS as unavailable).
+reports FTS as unavailable). A folder without `.git` also gets `--skip-git`.
+
+- `--skip-git` — GitNexus refuses a directory without `.git` even when its path is
+  explicit; this flag indexes the folder directly. The index then has no commit baseline,
+  no incremental refresh and no Git activity, and the panel says so.
 
 - `GITNEXUS_MEMORY=off` — stops the CLI from re-spawning itself over piped stdio, which a
   confined sandbox denies (`spawn EPERM`).
@@ -250,5 +270,13 @@ the related features puts that use under it.**
   capped.
 - The source fallback only covers files in the index manifest; refresh the index for new
   files.
+- An index built with `--skip-git` has no commit baseline: the gate can only say it cannot
+  confirm, a refresh re-analyses the whole folder, and the Git activity cards do not
+  appear.
+- The workspace search is **bounded**: 12 levels, 4000 directories and 2 seconds by
+  default; it skips `node_modules`, build output and every hidden directory, and does not
+  follow symlinks. Multiple indexes are listed; the default is the workspace's own index,
+  then the nearest complete/newest descendant, and the header can switch. When a bound
+  stops the search the panel says it may have missed an index.
 - Deeper design/build notes are kept out of the public README; this file stays at the
   "what it does" and "how to fix it" level.

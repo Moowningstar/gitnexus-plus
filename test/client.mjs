@@ -1079,19 +1079,21 @@ const empty = render(I.CoverageView, { report: { ...report, largeFiles: [], warn
 check('a clean report renders without a skipped-file section', !empty.text.includes('被跳过的超大文件'));
 check('a clean report still renders languages', empty.text.includes('语言分布'));
 
-const noIndex = render(I.CoverageView, {
-  report: {
-    repo: { indexed: false, path: 'D:\\demo' },
-    totals: { scanned: 10, selected: 9, indexedInGraph: 0, large: 0, largeBytes: 0, suppressedDeclarations: 0, scannedBytes: 2048 },
-    cap: { text: '512.0 KB', source: 'default' },
-    languages: {
-      rows: [{ key: 'typescript', label: 'TypeScript', color: '#3178c6', klass: 'recognized', files: 9, bytes: 2048 }],
-      totalFiles: 9,
-      totalBytes: 2048,
-      detector: 'builtin',
-    },
-    toolchain: { verdict: 'ready' },
+const noIndexReport = {
+  repo: { indexed: false, path: 'D:\\demo' },
+  totals: { scanned: 10, selected: 9, indexedInGraph: 0, large: 0, largeBytes: 0, suppressedDeclarations: 0, scannedBytes: 2048 },
+  cap: { text: '512.0 KB', source: 'default' },
+  languages: {
+    rows: [{ key: 'typescript', label: 'TypeScript', color: '#3178c6', klass: 'recognized', files: 9, bytes: 2048 }],
+    totalFiles: 9,
+    totalBytes: 2048,
+    detector: 'builtin',
   },
+  toolchain: { verdict: 'ready' },
+};
+
+const noIndex = render(I.CoverageView, {
+  report: noIndexReport,
   ...viewProps,
 });
 check('an unindexed project leads with the initialize command', noIndex.text.includes('还没有 GitNexus 索引') && noIndex.text.includes('初始化索引'));
@@ -1103,8 +1105,144 @@ check(
 );
 check('still marks an applicable command when unindexed', noIndex.text.includes('当前适用'));
 
+// A plain folder: no index and no `.git`. It is still the operator's working tree,
+// and the panel must say what can and cannot be done there instead of showing a raw
+// 404 with no numbers.
+const noGitNoIndex = render(I.CoverageView, {
+  report: {
+    ...noIndexReport,
+    repo: { indexed: false, hasGit: false, path: 'D:\\demo' },
+  },
+  ...viewProps,
+  maintenance: { ...maintenance, skipGit: true },
+});
+check(
+  'a non-git directory with no index says so up front',
+  noGitNoIndex.text.includes('不是 git 仓库') && noGitNoIndex.text.includes('没有提交基线'),
+  noGitNoIndex.text.slice(0, 400),
+);
+check(
+  'a non-git directory still shows the scan and the initialize action',
+  noGitNoIndex.text.includes('扫描概览') && noGitNoIndex.text.includes('初始化索引'),
+);
+
+// An index built with `--skip-git`: there is no incremental mode, so the normal
+// action must not be labelled "增量刷新".
+const gitless = render(I.CoverageView, {
+  report: { ...report, repo: { ...report.repo, hasGit: false } },
+  ...viewProps,
+  maintenance: { ...maintenance, skipGit: true },
+});
+check(
+  'an indexed non-git directory offers re-analysis, not an incremental refresh',
+  gitless.text.includes('执行重新分析') && !gitless.text.includes('执行增量刷新'),
+  gitless.text.slice(0, 600),
+);
+
+// A workspace with more than one index: the path position becomes a switcher, and
+// the note keeps the full active path that the compact option labels omit.
+const project = (pathValue, name, relPath, indexedAt) => ({
+  path: pathValue,
+  name,
+  relPath,
+  direction: 'descendant',
+  depth: 1,
+  indexedAt,
+  lastCommit: null,
+  branch: null,
+  stats: null,
+  complete: true,
+  metaFile: 'gitnexus.json',
+});
+const frontend = project('D:\\demo\\frontend', 'frontend', 'frontend', '2026-10-20T08:00:00Z');
+const backend = project('D:\\demo\\backend', 'backend', 'backend', '2026-10-19T08:00:00Z');
+const nested = render(I.CoverageView, {
+  report: { ...report, repo: { ...report.repo, path: 'D:\\demo\\frontend' } },
+  ...viewProps,
+  projectPath: 'D:\\demo\\frontend',
+  workspacePath: 'D:\\demo',
+  projects: [frontend, backend],
+  onSelectProject: () => {},
+});
+check('a multi-index workspace shows a project switcher', nested.tags.includes('select'), nested.tags.join(','));
+check(
+  'the switcher lists every project',
+  nested.text.includes('frontend') && nested.text.includes('backend'),
+  nested.text.slice(0, 300),
+);
+check(
+  'the header keeps the active project path and the workspace scope',
+  nested.text.includes('D:\\demo\\frontend') &&
+    nested.text.includes('工作区：D:\\demo · 2 个索引'),
+  nested.text.slice(0, 400),
+);
+
+// No index below the workspace: the scan-only state says how far the search went,
+// instead of leaving "no index" indistinguishable from "did not look".
+const searched = render(I.CoverageView, {
+  report: noIndexReport,
+  ...viewProps,
+  workspacePath: 'D:\\demo',
+  projects: [],
+  projectsVisited: 42,
+  projectsTruncated: false,
+});
+check(
+  'a failed search reports how many directories were checked',
+  searched.text.includes('42 个目录') && searched.text.includes('没有找到'),
+  searched.text.slice(0, 500),
+);
+const searchedTruncated = render(I.CoverageView, {
+  report: noIndexReport,
+  ...viewProps,
+  workspacePath: 'D:\\demo',
+  projects: [],
+  projectsVisited: 4000,
+  projectsTruncated: true,
+});
+check(
+  'a truncated search says it may have missed a directory',
+  searchedTruncated.text.includes('搜索达到上限'),
+  searchedTruncated.text.slice(0, 500),
+);
+
+// The pure selection rule: remembered choice, then the workspace itself, then the
+// host's ranking. This is what keeps a refresh from jumping between projects.
+check(
+  'a remembered project wins while it still exists',
+  I.chooseProject([frontend, backend], 'D:\\demo', 'D:\\demo\\backend') === 'D:\\demo\\backend',
+);
+check(
+  'a stale remembered project falls back to the ranking',
+  I.chooseProject([frontend, backend], 'D:\\demo', 'D:\\demo\\gone') === 'D:\\demo\\frontend',
+);
+const workspaceProject = { ...frontend, path: 'D:\\demo', name: 'demo', relPath: '', depth: 0 };
+check(
+  'the workspace index wins by default',
+  I.chooseProject([frontend, workspaceProject], 'D:\\demo', null) === 'D:\\demo',
+);
+check(
+  'a workspace with no indexes opens on itself',
+  I.chooseProject([], 'D:\\demo', null) === 'D:\\demo',
+);
+
 const errored = render(I.CoverageView, { report: null, ...viewProps, error: '工作区未解析' });
 check('error state surfaces the message', errored.text.includes('工作区未解析'));
+
+// A failed read used to render the "维护命令" heading with an empty body, because the
+// panel synthesised a maintenance payload with no commands. The heading is a promise
+// that there is something to copy; with no commands it must disappear.
+const erroredEmptyMaintenance = render(I.CoverageView, {
+  report: null,
+  ...viewProps,
+  error: '工作区未解析',
+  maintenance: { commands: [], rationale: [] },
+});
+check(
+  'an empty maintenance payload does not render an empty card',
+  !erroredEmptyMaintenance.text.includes('维护命令'),
+  erroredEmptyMaintenance.text,
+);
 
 const partial = render(I.CoverageView, { report: { ...report, languages: null }, ...viewProps });
 check('missing language data degrades without crashing', partial.text.includes('被跳过的超大文件'));

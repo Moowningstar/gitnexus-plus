@@ -214,6 +214,8 @@ export interface ClientReport {
     path?: string;
     name?: string;
     indexed?: boolean;
+    /** `false` for a folder with no `.git`; such a directory can still be indexed with `--skip-git`. */
+    hasGit?: boolean;
     indexedAt?: string | null;
     lastCommit?: string | null;
     branch?: string | null;
@@ -263,6 +265,39 @@ export interface ClientToolchain {
   verdict: 'ready' | 'library-only' | 'absent';
 }
 
+/** One indexed project under the current workspace. */
+export interface ClientProject {
+  path: string;
+  name: string;
+  /** Path relative to the workspace; empty for the workspace itself. */
+  relPath: string;
+  direction: 'self' | 'descendant';
+  depth: number;
+  indexedAt: string | null;
+  lastCommit: string | null;
+  branch: string | null;
+  stats: {
+    files: number;
+    nodes: number;
+    edges: number;
+    communities: number;
+    processes: number;
+    embeddings: number;
+  } | null;
+  /** Whether `.gitnexus/lbug` exists beside the manifest. */
+  complete: boolean;
+  metaFile: string | null;
+}
+
+/** The host's answer to “which indexes live under this workspace?”. */
+export interface ClientProjectList {
+  root: string;
+  projects: ClientProject[];
+  visited: number;
+  truncated: boolean;
+  readAt?: string;
+}
+
 /** The maintenance payload that rides along with a report. */
 export interface ClientMaintenance {
   commands?: ClientMaintenanceCommand[];
@@ -279,6 +314,11 @@ export interface ClientMaintenance {
    * button would claim to repair and silently run a plain incremental refresh.
    */
   supportsRepair?: boolean;
+  /**
+   * The directory has no `.git`, so every command carries `--skip-git` and the normal
+   * action is a re-analysis rather than an incremental refresh. Absent on older hosts.
+   */
+  skipGit?: boolean;
 }
 
 /**

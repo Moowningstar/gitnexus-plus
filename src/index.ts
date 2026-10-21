@@ -30,6 +30,7 @@ import {
   type MaintenanceCommand,
 } from './gitnexus/commands.js';
 import { mountCoverageRoute } from './routes/coverage.js';
+import { mountProjectsRoute } from './routes/projects.js';
 import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
 import { mountSearchRoute } from './routes/search.js';
@@ -37,6 +38,7 @@ import { mountFileHistoryRoute } from './routes/file-history.js';
 import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
+import { hasGitMarker } from './gitnexus/index-meta.js';
 import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { projectViaHelper } from './gitnexus/graph.js';
@@ -160,6 +162,13 @@ export interface MaintenanceInfo {
    * render a control the route would silently treat as a plain refresh.
    */
   supportsRepair: true;
+  /**
+   * Whether the directory has no `.git`, so every command carries `--skip-git`.
+   *
+   * The client uses it to stop calling the normal action an "incremental refresh":
+   * GitNexus disables incremental updates for an index without a commit baseline.
+   */
+  skipGit: boolean;
 }
 
 /** What the `gitnexus_coverage` tool returns to the model. */
@@ -288,6 +297,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // `skipFts: false` means automatic, not "attempt FTS": if the index has no FTS,
       // attempting the install dies with `spawn EPERM` in a confined host.
       skipFts: effectiveSkipFts(repoPath, config.skipFts),
+      // A plain folder is indexable, but only through `--skip-git`; without it
+      // GitNexus refuses the explicit path before it reads anything else.
+      skipGit: !hasGitMarker(repoPath),
       memoryOff: config.memoryOff,
       // Default to a plugin-owned home inside the project so the global registry
       // write stays within the workspace. The explicit config still wins.
@@ -299,6 +311,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       rationale: commandRationale(options),
       supportsForce: true,
       supportsRepair: true,
+      skipGit: options.skipGit,
     };
   };
 
@@ -308,14 +321,17 @@ export function apply(ctx: Context, config: PluginConfig): void {
       description:
         'Report what a GitNexus index omitted for a repository: files skipped for exceeding the ' +
         'size cap, oversized generated/minified output that inflates a language share, and files ' +
-        'a fresh scan would select but the index does not cover. Read-only; never triggers a ' +
-        're-index. Use it to judge how much of a repository the index actually represents before ' +
-        'trusting graph queries.',
+        'a fresh scan would select but the index does not cover. A directory without git or an ' +
+        'index is described from a scan-only report. Read-only; never triggers a re-index. Use it ' +
+        'to judge how much of a repository the index actually represents before trusting graph ' +
+        'queries.',
       parameters: {
         repo: {
           type: 'string',
           required: true,
-          description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+          description:
+            'Absolute path to the repository root or working directory to describe ' +
+            '(the directory containing .gitnexus, .git, or neither).',
         },
         includeLanguages: {
           type: 'boolean',
@@ -449,9 +465,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
        * only the root with the repository the caller named. The **mode** is never
        * touched: read-only stays read-only, and a deployment without a policy service
        * keeps the executor's own default. What it adds is the one input the agentless
-       * route cannot otherwise supply.
+       * route cannot otherwise supply. It is used by every spawn this plugin starts for
+       * a repository: analyze, the search helper and the graph helper. Without it the
+       * helpers inherit the application directory, and on Windows the ACL runner fails
+       * before the helper starts (`SetNamedSecurityInfoW … grantWrite(<app dir>)`).
        */
-      const analyzePolicy = (repoPath: string): unknown => {
+      const sandboxPolicyForRoot = (repoPath: string): unknown => {
         const raw: unknown = svcCtx.get('sandboxPolicy');
         if (raw === null || typeof raw !== 'object') return undefined;
         const service = raw as { resolve?: () => unknown };
@@ -479,7 +498,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         shell: searchShell,
         timeoutMs: config.analyzeTimeoutMs,
         toolchain: managedToolchain,
-        sandboxPolicy: analyzePolicy,
+        sandboxPolicy: sandboxPolicyForRoot,
         // The runner must read the same config as the command text it confirms,
         // otherwise the dialog describes a command the run does not execute. It
         // resolves `false` per repository (automatic), and defaults to the
@@ -495,9 +514,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
         shell: isShellLike(shellRaw) ? shellRaw : null,
         prefix: installPrefix,
         timeoutMs: config.installTimeoutMs,
+        // The install target is the plugin-owned prefix, not the application
+        // directory: the runner creates it and roots the policy there.
+        sandboxPolicy: sandboxPolicyForRoot,
       });
 
       const disposers = [
+        mountProjectsRoute(svcCtx.webServer),
         mountCoverageRoute(svcCtx.webServer, {
           get: (repoPath, options) => coverageFor(repoPath, options),
           maintenance: (repoPath) => maintenanceFor(repoPath),
@@ -529,6 +552,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
               helperPath: searchHelperPath,
               limit: options?.limit,
               managedPrefix: installPrefix,
+              // Same repository-rooted policy as analyze: the helper is a no-session
+              // spawn, and the deployment default is the DSH application directory,
+              // whose Windows ACL grant can fail under Program Files.
+              sandboxPolicy: sandboxPolicyForRoot,
             }),
         }),
         mountGraphRoute(svcCtx.webServer, {
@@ -537,6 +564,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
               shell: searchShell,
               helperPath: graphHelperPath,
               managedPrefix: installPrefix,
+              sandboxPolicy: sandboxPolicyForRoot,
             }),
         }),
       ];

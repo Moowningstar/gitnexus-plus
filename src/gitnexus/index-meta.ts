@@ -109,8 +109,10 @@ export async function findRegistryEntry(
  * registry at all — and a plugin that refused to describe the user's own working
  * directory because a global file elsewhere had not heard of it would be wrong.
  * This is not by itself the route bound any more: a git project with no index still
- * has a readable working tree, so the routes use {@link isProjectRoot}, which
- * accepts either an index or a `.git` marker.
+ * has a readable working tree, so the routes that need a graph use
+ * {@link isProjectRoot}, which accepts either an index or a `.git` marker, and the
+ * scan/delta routes use {@link isExistingDirectory}, which also accepts a plain
+ * folder that GitNexus could index with `--skip-git`.
  */
 export async function hasIndex(repoPath: string): Promise<boolean> {
   const dir = path.join(repoPath, '.gitnexus');
@@ -126,22 +128,62 @@ export async function hasIndex(repoPath: string): Promise<boolean> {
 }
 
 /**
- * Whether a directory is a project the routes may describe.
+ * Whether a directory carries a `.git` marker.
  *
- * Deliberately wider than {@link hasIndex}: a git repository with no index still has
- * a readable working tree, and both the scan-only coverage report and the initialize
- * action are for exactly that state. A directory with neither an index nor a `.git`
- * marker is refused, which is what keeps these routes from becoming a filesystem
- * probe. `.git` may be a directory or a file (worktrees and submodules), so this
- * checks existence rather than type.
+ * `.git` may be a directory or a file (worktrees and submodules), so this checks
+ * existence rather than type. The distinction matters to the maintenance commands:
+ * GitNexus refuses to analyze a folder without a `.git` unless `--skip-git` is
+ * passed, and it reports the resulting index as having no commit baseline.
  */
-export async function isProjectRoot(repoPath: string): Promise<boolean> {
-  if (await hasIndex(repoPath)) return true;
+export function hasGitMarker(repoPath: string): boolean {
   try {
     return existsSync(path.join(repoPath, '.git'));
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a directory is a project the read routes may describe.
+ *
+ * Deliberately wider than {@link hasIndex}: a git repository with no index still has
+ * a readable working tree, and both the scan-only coverage report and the initialize
+ * action are for exactly that state. A directory with neither an index nor a `.git`
+ * marker is refused by the routes that need git or a graph (search, graph, file
+ * history); the coverage and delta routes use {@link isExistingDirectory} instead,
+ * because GitNexus can index a plain folder with `--skip-git`.
+ */
+export async function isProjectRoot(repoPath: string): Promise<boolean> {
+  if (await hasIndex(repoPath)) return true;
+  return hasGitMarker(repoPath);
+}
+
+/**
+ * Whether a path is an existing directory.
+ *
+ * This is the bound for the scan-only coverage report and the delta gate. The panel
+ * reports the working directory the operator is *in*, and that directory need not be
+ * a git repository: GitNexus indexes any folder with `--skip-git`, and the scan and
+ * the language breakdown need neither git nor an index. Refusing such a directory
+ * left the panel with a raw 404 and no numbers at all — the reported bug.
+ *
+ * This is still not a directory listing: the route describes exactly the path it is
+ * given and offers no way to browse a parent or a sibling. Filesystem roots are
+ * excluded by {@link isFilesystemRoot}, because scanning a whole drive is not a
+ * project report.
+ */
+export async function isExistingDirectory(candidate: string): Promise<boolean> {
+  try {
+    return (await fs.stat(candidate)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a path is a filesystem root (`D:\`, `/`, a UNC share root). */
+export function isFilesystemRoot(candidate: string): boolean {
+  const resolved = path.resolve(candidate);
+  return path.dirname(resolved) === resolved;
 }
 
 /** `indexCoverage` as the `analyze` that produced the index wrote it. */

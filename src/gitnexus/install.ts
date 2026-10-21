@@ -36,6 +36,7 @@
 
 import os from 'node:os';
 import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 import type { ShellLike } from './analyze.js';
 
 export type InstallState =
@@ -82,6 +83,16 @@ export interface InstallRunnerOptions {
   now?: () => number;
   /** Platform whose shell syntax applies. */
   platform?: NodeJS.Platform;
+  /**
+   * The deployment policy for the install target.
+   *
+   * A panel route has no session, so the deployment default is the DSH application
+   * directory. On Windows that directory is under Program Files, and the ACL runner
+   * cannot grant workspace-write there. The install writes only under `prefix`, so the
+   * host supplies a policy rooted at `prefix` — the same shape it supplies to analyze
+   * and the helpers. The mode is forwarded unchanged.
+   */
+  sandboxPolicy?: (prefix: string) => unknown;
 }
 
 export interface InstallRunner {
@@ -120,11 +131,18 @@ function quote(value: string, platform: NodeJS.Platform): string {
 export function installCommandLine(
   prefix: string,
   spec: string,
-  options: { platform?: NodeJS.Platform } = {},
+  options: { platform?: NodeJS.Platform; cacheDir?: string } = {},
 ): string {
   const platform = options.platform ?? process.platform;
+  // npm's ambient cache is under the user profile, outside the install target. A
+  // workspace-write sandbox rooted at the prefix would deny those writes, so keep the
+  // cache inside the granted tree; it is also easier to remove with the install.
+  const cacheDir = options.cacheDir ?? path.join(prefix, '.npm-cache');
   const args = ['install', '--prefix', quote(prefix, platform), spec, '--no-audit', '--no-fund'];
-  return `npm ${args.join(' ')}`;
+  const cache = quote(cacheDir, platform);
+  return platform === 'win32'
+    ? `$env:npm_config_cache=${cache}; npm ${args.join(' ')}`
+    : `npm_config_cache=${cache} npm ${args.join(' ')}`;
 }
 
 /** Keep the last `limit` characters, on a line boundary when one is available. */
@@ -192,6 +210,43 @@ export function createInstallRunner(options: InstallRunnerOptions): InstallRunne
     }
 
     const command = installCommandLine(prefix, spec, { platform });
+
+    let sandboxPolicy: unknown;
+    try {
+      sandboxPolicy = options.sandboxPolicy?.(prefix);
+    } catch {
+      sandboxPolicy = undefined;
+    }
+    const policyMode =
+      sandboxPolicy !== null && typeof sandboxPolicy === 'object'
+        ? (sandboxPolicy as { mode?: unknown }).mode
+        : undefined;
+    if (policyMode === 'read-only') {
+      return finish({
+        state: 'unavailable',
+        command,
+        startedAt: now(),
+        message:
+          '当前部署是只读沙箱，安装需要写入安装目录。请复制下面的命令，在普通终端执行。',
+      });
+    }
+
+    // The sandbox grant is applied to the prefix itself, so it must exist before the
+    // grant materializes. The plugin owns this directory; creating it is the one step
+    // an install would do anyway. The policy above does not need it to exist.
+    try {
+      mkdirSync(prefix, { recursive: true });
+    } catch (cause) {
+      return finish({
+        state: 'failed',
+        command,
+        startedAt: now(),
+        message:
+          `无法创建安装目录 ${prefix}：${String((cause as Error)?.message ?? cause)}。` +
+          '请复制下面的命令，在普通终端执行。',
+      });
+    }
+
     const abort = new AbortController();
     controller = abort;
     status = {
@@ -205,14 +260,29 @@ export function createInstallRunner(options: InstallRunnerOptions): InstallRunne
       output: '',
     };
 
-    const spec0 = shell.resolve({
-      command,
-      timeoutMs,
-      onExpiry: 'kill',
-      stdoutMaxBytes: outputLimit,
-      signal: abort.signal,
-      // No sandboxPolicy: the deployment decides. See analyze.ts for why.
-    });
+    let spec0;
+    try {
+      spec0 = shell.resolve({
+        command,
+        timeoutMs,
+        onExpiry: 'kill',
+        stdoutMaxBytes: outputLimit,
+        signal: abort.signal,
+        // Rooted at the install target, not the DSH application directory: a no-session
+        // route otherwise inherits a root under Program Files, where the Windows ACL
+        // runner fails before the install starts.
+        ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
+      });
+    } catch (cause) {
+      return finish({
+        state: 'failed',
+        command,
+        startedAt: now(),
+        message:
+          `无法在沙箱中启动安装：${String((cause as Error)?.message ?? cause)}。` +
+          '请复制下面的命令，在普通终端执行。',
+      });
+    }
 
     void (async () => {
       let execution;

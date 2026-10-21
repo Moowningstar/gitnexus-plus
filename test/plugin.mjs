@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 
 let passed = 0;
 let failed = 0;
@@ -182,13 +183,19 @@ check('output.render returns content blocks', (() => {
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Eight routes now: read the working tree, keyword-search the graph, read one file's
-// commit history, read one commit's patch for a file, check whether a refresh would
-// change anything, read a bounded graph projection, refresh an index, and install
-// GitNexus when there is none. Separate modules because their privileges differ sharply —
-// reading/searching/history/patch/delta/graph are unprivileged, refreshing writes inside
-// the workspace, and installing runs the dependency tree's build scripts.
-check('exactly eight routes mounted', stub.routes.length === 8, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// Nine routes now: list the workspace's indexes, read the working tree, keyword-search
+// the graph, read one file's commit history, read one commit's patch for a file, check
+// whether a refresh would change anything, read a bounded graph projection, refresh an
+// index, and install GitNexus when there is none. Separate modules because their
+// privileges differ sharply — listing/reading/searching/history/patch/delta/graph are
+// unprivileged, refreshing writes inside the workspace, and installing runs the
+// dependency tree's build scripts.
+check('exactly nine routes mounted', stub.routes.length === 9, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+check(
+  'the projects route is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/projects'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
 check(
   'the coverage route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/coverage'),
@@ -282,6 +289,135 @@ section('analyze route: force is explicit');
       !String(repair.run?.command ?? '').includes('--skip-fts'),
     repair.run?.command,
   );
+}
+
+section('coverage route: a plain folder is described');
+{
+  // The reported bug: a real working directory with no `.git` and no index used to
+  // get a 404, so the panel showed a raw error and no numbers. This drives the real
+  // route, engine and maintenance payload rather than a stub, which is where the
+  // `--skip-git` wiring lives.
+  const coverageRoute = stub.routes.find((r) => r.path === '/api/gitnexus/coverage');
+  const projectsRoute = stub.routes.find((r) => r.path === '/api/gitnexus/projects');
+  const fixture = path.join(import.meta.dirname, '.fixtures', `plugin-plain-${process.pid}`);
+  await fs.rm(fixture, { recursive: true, force: true });
+  await fs.mkdir(fixture, { recursive: true });
+  await fs.writeFile(path.join(fixture, 'a.ts'), 'export const x = 1;\n');
+
+  const callWith = async (route, url) => {
+    const req = { method: 'GET', url, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+    let body = '';
+    let finish;
+    const settled = new Promise((resolve) => {
+      finish = resolve;
+    });
+    const res = {
+      statusCode: 0,
+      headersSent: false,
+      setHeader() {},
+      end(value) {
+        body = String(value ?? '');
+        this.headersSent = true;
+        finish();
+      },
+    };
+    await route.handler(req, res);
+    // The route is async: `handler` returns before the scan finishes. Wait for the
+    // response to be ended rather than for a fixed number of turns.
+    await settled;
+    return JSON.parse(body);
+  };
+  const call = (url) => callWith(coverageRoute, url);
+
+  const plain = await call(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(fixture),
+  );
+  check(
+    'a plain folder is answered with a report instead of a 404',
+    plain.ok === true && plain.report?.repo?.indexed === false,
+    JSON.stringify(plain).slice(0, 300),
+  );
+  check(
+    'the report records that the folder has no .git',
+    plain.report?.repo?.hasGit === false,
+    JSON.stringify(plain.report?.repo),
+  );
+  check(
+    'the initialize command carries --skip-git',
+    plain.maintenance?.commands?.[0]?.argv?.includes('--skip-git') === true,
+    JSON.stringify(plain.maintenance?.commands?.[0]),
+  );
+  check(
+    'the maintenance payload tells the client not to say 增量刷新',
+    plain.maintenance?.skipGit === true,
+    JSON.stringify(plain.maintenance),
+  );
+
+  const missing = await call(
+    '/api/gitnexus/coverage?repo=' +
+      encodeURIComponent(path.join(fixture, 'does-not-exist')),
+  );
+  check(
+    'a missing directory is still refused',
+    missing.ok === false && missing.code === 'not-a-directory',
+    JSON.stringify(missing),
+  );
+
+  // The workspace is a container. The projects route lists the index below it; the
+  // client selects that path and coverage/maintenance are requested for it exactly.
+  const container = path.join(
+    import.meta.dirname,
+    '.fixtures',
+    `plugin-nested-${process.pid}`,
+  );
+  await fs.rm(container, { recursive: true, force: true });
+  await fs.mkdir(path.join(container, 'pkg', '.gitnexus'), { recursive: true });
+  await fs.writeFile(
+    path.join(container, 'pkg', '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ fileHashes: {}, stats: { files: 1 } }),
+  );
+  await fs.writeFile(path.join(container, 'pkg', '.gitnexus', 'lbug'), '');
+  await fs.writeFile(path.join(container, 'pkg', 'index.ts'), 'export const nested = 1;\n');
+  const nestedProject = path.resolve(container, 'pkg');
+
+  const resolved = await callWith(
+    projectsRoute,
+    '/api/gitnexus/projects?root=' + encodeURIComponent(container),
+  );
+  check(
+    'the projects route lists the index below the container',
+    resolved.ok === true &&
+      resolved.projects?.length === 1 &&
+      path.resolve(resolved.projects[0].path) === nestedProject,
+    JSON.stringify(resolved),
+  );
+  check(
+    'the candidate carries its distance and completeness',
+    resolved.projects?.[0]?.depth === 1 &&
+      resolved.projects?.[0]?.direction === 'descendant' &&
+      resolved.projects?.[0]?.complete === true,
+    JSON.stringify(resolved.projects?.[0]),
+  );
+
+  const selected = await call(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(nestedProject),
+  );
+  check(
+    'the selected project is described exactly',
+    selected.ok === true &&
+      selected.report?.repo?.indexed === true &&
+      path.resolve(selected.report.repo.path) === nestedProject,
+    JSON.stringify(selected.report?.repo),
+  );
+  check(
+    'the maintenance commands target the selected project',
+    String(selected.maintenance?.commands?.[0]?.argv ?? '').includes('pkg') &&
+      String(selected.maintenance?.commands?.[0]?.argv ?? '').includes('--skip-git'),
+    JSON.stringify(selected.maintenance?.commands?.[0]),
+  );
+
+  await fs.rm(container, { recursive: true, force: true });
+  await fs.rm(fixture, { recursive: true, force: true });
 }
 
 section('serveRoutes=false suppresses the routes');

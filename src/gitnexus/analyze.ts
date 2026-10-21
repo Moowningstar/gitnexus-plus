@@ -38,6 +38,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
+import { hasGitMarker } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
 
 /** Where a run got to. `unavailable` is decided before anything is spawned. */
@@ -235,6 +236,12 @@ export function analyzeCommandLine(
     force?: boolean;
     /** Repair the search (FTS) indexes only. Never combined with `skipFts`. */
     repairFts?: boolean;
+    /**
+     * The directory has no `.git`. GitNexus refuses a folder without one even when it
+     * is passed explicitly, unless `--skip-git` is present; the index then has no
+     * commit baseline and no incremental mode.
+     */
+    skipGit?: boolean;
     /** Must match `maintenanceCommands`; see the note on the runner option. */
     skipFts?: boolean;
     gitnexusHome?: string | null;
@@ -252,11 +259,13 @@ export function analyzeCommandLine(
   // rather than trusting callers to keep them apart.
   const repairFts = options.repairFts === true;
   const skipFts = options.skipFts === true && !repairFts;
+  const skipGit = options.skipGit === true;
   const force = options.force === true && !repairFts;
 
   const args =
     `analyze --index-only` +
     `${repairFts ? ' --repair-fts' : ''}` +
+    `${skipGit ? ' --skip-git' : ''}` +
     `${skipFts ? ' --skip-fts' : ''}` +
     `${force ? ' --force' : ''} ` +
     quoteFor(flavor, repoPath);
@@ -539,6 +548,11 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     // index so it stays inside the workspace the host was granted. A repair run never
     // skips FTS — that would be the one flag combination that does nothing at all.
     const skipFts = repairFts ? false : effectiveSkipFts(key, options.skipFts === true);
+    // GitNexus checks for `.git` before it reads any option, so a plain folder is
+    // refused even when its path is explicit. `--skip-git` is the CLI's own answer:
+    // it indexes the folder and warns that commit tracking and incremental updates
+    // are disabled. The panel reports the same consequence.
+    const skipGit = !hasGitMarker(key);
     const gitnexusHome = options.gitnexusHome ?? defaultGitnexusHome(key);
 
     // One run per repository. Two concurrent `analyze` processes would contend for the
@@ -553,6 +567,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     const previewCommand =
       `gitnexus analyze --index-only` +
       `${repairFts ? ' --repair-fts' : ''}` +
+      `${skipGit ? ' --skip-git' : ''}` +
       `${force ? ' --force' : ''}`;
 
     if (shell === null) {
@@ -598,6 +613,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       force,
       repairFts,
       skipFts,
+      skipGit,
       gitnexusHome,
     });
 

@@ -76,7 +76,7 @@ import { LanguageBar, LanguageSection } from './sections/languages';
 import { LargeFileList } from './sections/large-files';
 import { MaintenanceSection } from './sections/maintenance';
 import { SidebarRightApi } from './types';
-import { CoveragePanel, CoverageTitle, CoverageView } from './views/panel';
+import { CoveragePanel, CoverageTitle, CoverageView, chooseProject } from './views/panel';
 
 /** Must match the `id` in the loader factory written by scripts/build-client.mjs. */
 const PLUGIN_ID = 'dsh-gitnexus-plus';
@@ -221,6 +221,7 @@ export const __internals = {
     compactNumber,
     useProjectPath,
     contextDiagnostic,
+    chooseProject,
     CoveragePanel,
     CoverageView,
     CoverageTitle,

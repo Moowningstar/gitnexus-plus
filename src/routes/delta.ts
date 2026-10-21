@@ -12,7 +12,7 @@
  */
 
 import path from 'node:path';
-import { isProjectRoot } from '../gitnexus/index-meta.js';
+import { isExistingDirectory, isFilesystemRoot } from '../gitnexus/index-meta.js';
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { DeltaReport } from '../gitnexus/delta.js';
@@ -38,15 +38,15 @@ export function mountDeltaRoute(webServer: WebServerService, deps: DeltaRouteDep
     }
 
     const absRepo = path.resolve(repo);
-    // Same bound as the coverage route: a project root, so this cannot be used to
-    // probe arbitrary directories. A project without an index is *not* refused here:
-    // "no index yet" is an answer the panel renders, and the engine reports it as
-    // `comparable: false` with the reason.
-    if (!(await isProjectRoot(absRepo))) {
+    // Same bound as the coverage route: the directory the caller named, not a project
+    // marker. A folder with no index and no `.git` is answered by the engine with
+    // `comparable: false` and an explanation — which is a state the panel renders,
+    // and more useful than a 404.
+    if (!(await isExistingDirectory(absRepo)) || isFilesystemRoot(absRepo)) {
       sendJson(res, 404, {
         ok: false,
-        code: 'not-a-project',
-        message: 'directory is neither a GitNexus index nor a git repository root',
+        code: 'not-a-directory',
+        message: `目录不存在、不是文件夹，或是文件系统根目录：${absRepo}`,
       });
       return;
     }

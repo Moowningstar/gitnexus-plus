@@ -321,6 +321,16 @@ export interface HelperSearchOptions {
   /** The plugin-owned GitNexus prefix, when one was installed from the panel. */
   managedPrefix?: string;
   limit?: number;
+  /**
+   * A policy the host resolved for this repository.
+   *
+   * A panel route has no session, so the deployment's default resolves to the DSH
+   * application directory. On Windows that directory is under Program Files, where
+   * the ACL sandbox cannot grant workspace-write (`SetNamedSecurityInfoW`, Win32 5).
+   * The helper only needs the repository (and its private temp), so the host supplies
+   * the same repository-rooted policy it already supplies to `analyze`.
+   */
+  sandboxPolicy?: (repoPath: string) => unknown;
 }
 
 function quoteFor(value: string): string {
@@ -440,6 +450,7 @@ export async function searchViaHelper(
   }
 
   const limit = clampLimit(options.limit);
+  const sandboxPolicy = options.sandboxPolicy?.(absRepo);
   const args = [options.helperPath, absRepo, query, String(limit), options.managedPrefix ?? '']
     .map(quoteFor)
     .join(' ');
@@ -458,6 +469,7 @@ export async function searchViaHelper(
       timeoutMs: 20_000,
       onExpiry: 'kill',
       stdoutMaxBytes: 2 * 1024 * 1024,
+      ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
     });
     const execution = await options.shell.execute(spec);
     result = await execution.result();

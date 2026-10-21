@@ -108,6 +108,10 @@ export function MaintenanceSection({
   // install or the registry write. Refuse to start it and say why, rather than
   // leaving a button that is known to be wrong on this host.
   const hostCurrent = maintenance.supportsForce === true;
+  // A folder with no `.git` is indexable, but only with `--skip-git`, and GitNexus
+  // disables commit tracking and incremental updates for it. Calling that action an
+  // "incremental refresh" would describe a mode the index cannot have.
+  const skipGit = maintenance.skipGit === true;
   // Normalised rather than trusted. The declared type says `ClientAnalyzeRun | null`,
   // but a React element built without the prop arrives as `undefined` — which is
   // exactly what happened the first time this component was rendered by a caller that
@@ -370,11 +374,17 @@ export function MaintenanceSection({
       // the command itself is identical.
       const shown =
         command.mode === 'init' && indexed
-          ? {
-              ...command,
-              label: '增量刷新',
-              when: '索引落后或有文件改动时使用；未变更文件的解析产物会复用。',
-            }
+          ? skipGit
+            ? {
+                ...command,
+                label: '重新分析',
+                when: '该目录不是 git 仓库：没有增量刷新，每次都会完整重分析；未变更文件的解析缓存仍会复用。',
+              }
+            : {
+                ...command,
+                label: '增量刷新',
+                when: '索引落后或有文件改动时使用；未变更文件的解析产物会复用。',
+              }
           : command;
       return h(
         'div',
@@ -415,9 +425,17 @@ export function MaintenanceSection({
                   ? '运行中'
                   : gateClean
                     ? '无需刷新'
-                    : hostCurrent
-                      ? '执行增量刷新'
-                      : '执行增量刷新（需重启）',
+                    : !indexed
+                      ? hostCurrent
+                        ? '初始化索引'
+                        : '初始化索引（需重启）'
+                      : skipGit
+                        ? hostCurrent
+                          ? '执行重新分析'
+                          : '执行重新分析（需重启）'
+                        : hostCurrent
+                          ? '执行增量刷新'
+                          : '执行增量刷新（需重启）',
               )
             : command.mode === 'repair-fts'
               ? h(
@@ -486,12 +504,21 @@ export function MaintenanceSection({
     // and can take minutes, while the incremental path reuses unchanged files.
     h(primitives.RiskConfirmation, {
       open: confirming !== null,
-      title: repairConfirm ? '修复搜索索引（FTS）？' : fullConfirm ? '执行全量重建？' : '执行增量刷新？',
+      title: repairConfirm
+        ? '修复搜索索引（FTS）？'
+        : fullConfirm
+          ? '执行全量重建？'
+          : !indexed
+            ? '初始化索引？'
+            : skipGit
+              ? '重新分析这个目录？'
+              : '执行增量刷新？',
       description: repairConfirm
         ? '将执行：\n\n' +
           (confirmCommand?.shell ?? 'gitnexus analyze --index-only --repair-fts') +
           '\n\n' +
           '只重建搜索索引（FTS），不重跑分析、不改图，耗时通常在秒级。' +
+          (skipGit ? '该目录没有 .git，命令带 --skip-git。' : '') +
           '只写入 .gitnexus/，不改动源文件。' +
           '如果 FTS 扩展文件本身缺失（Windows 上常见），修复也会失败 —— 那是上游安装问题，不是索引坏了。' +
           '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。'
@@ -502,20 +529,32 @@ export function MaintenanceSection({
             '这会重建图与 FTS；未变更文件的解析产物仍会复用。' +
             '但耗时以分钟计，索引很大时更久（上限 10 分钟，可随时取消）。' +
             '重建期间索引可能短暂不可用。' +
+            (skipGit ? '该目录没有 .git，命令带 --skip-git；重建后仍没有提交基线与增量刷新。' : '') +
             '只写入 .gitnexus/，不改动源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
             '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。'
           : '将在项目目录下运行：\n\n' +
             (confirmCommand?.shell ?? 'gitnexus analyze --index-only') +
             '\n\n' +
             '只写入 .gitnexus/，不改动任何源文件，也不会重写 AGENTS.md / CLAUDE.md。' +
-            '耗时取决于改动量：无改动时约 7 秒，改动几个文件时实测可到 3 分钟，' +
-            '大仓库的初始化或刷新可能更久（上限 10 分钟，可随时取消）。' +
+            (skipGit
+              ? '该目录没有 .git，命令带 --skip-git：GitNexus 会直接索引这个目录，' +
+                '但没有提交基线，也没有增量刷新 —— 每次都会完整重分析，也不会有 Git 活动。'
+              : '耗时取决于改动量：无改动时约 7 秒，改动几个文件时实测可到 3 分钟，' +
+                '大仓库的初始化或刷新可能更久（上限 10 分钟，可随时取消）。') +
             '命令由 DSH 的 shell 执行器运行，沙箱与其它命令一致 —— 本插件不申请扩权。',
       acknowledgeLabel: fullConfirm
         ? '我了解这会重建图与 FTS、耗时数分钟，并可能让索引短暂不可用'
         : '我了解这会运行一个进程并写入 .gitnexus/',
       cancelLabel: '取消',
-      confirmLabel: repairConfirm ? '开始修复' : fullConfirm ? '开始重建' : '执行',
+      confirmLabel: repairConfirm
+        ? '开始修复'
+        : fullConfirm
+          ? '开始重建'
+          : !indexed
+            ? '开始初始化'
+            : skipGit
+              ? '开始重新分析'
+              : '执行',
       closeLabel: '关闭',
       // The checkbox is controlled, so it needs state of its own, and it is reset on
       // close: the acknowledgement is per-action rather than remembered.

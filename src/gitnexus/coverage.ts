@@ -18,7 +18,13 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { readIndexMeta, findRegistryEntry, normalizePathKey, type IndexStats } from './index-meta.js';
+import {
+  readIndexMeta,
+  findRegistryEntry,
+  hasGitMarker,
+  normalizePathKey,
+  type IndexStats,
+} from './index-meta.js';
 import { scanRepository, type CapSource } from './scan.js';
 import {
   classifyFile,
@@ -100,6 +106,14 @@ export interface RepoInfo {
   storagePath: string;
   /** Whether a manifest was found. */
   indexed: boolean;
+  /**
+   * Whether the directory carries a `.git` marker.
+   *
+   * A folder without one can still be scanned, and GitNexus can index it with
+   * `--skip-git`; the index then has no commit baseline and no incremental mode.
+   * The panel uses this to say that plainly instead of promising Git activity.
+   */
+  hasGit: boolean;
   /** Whether GitNexus's own registry lists it. */
   registered: boolean;
   /** Which manifest was read. */
@@ -529,6 +543,9 @@ export async function analyzeCoverage(
 ): Promise<CoverageReport> {
   const env = options.env ?? process.env;
   const absRepo = path.resolve(repoPath);
+  // A marker check, not a `git` call: the maintenance commands need this even when
+  // the git executable is absent, and the commit state is read separately below.
+  const hasGit = hasGitMarker(absRepo);
   const emit = (progress: CoverageProgress): void => {
     try {
       options.onProgress?.(progress);
@@ -757,6 +774,17 @@ export async function analyzeCoverage(
     });
   }
 
+  if (meta !== null && !hasGit) {
+    warnings.push({
+      level: 'info',
+      code: 'no-commit-baseline',
+      message:
+        '该索引不是从 git 仓库建立的（--skip-git）：没有提交基线，无法判断索引是否落后，' +
+        '刷新每次都会重新分析，也不会产生 Git 活动',
+      evidence: { path: absRepo },
+    });
+  }
+
   if (uncovered.length > 0) {
     warnings.push({
       level: 'info',
@@ -834,6 +862,7 @@ export async function analyzeCoverage(
       name: registryEntry?.name ?? path.basename(absRepo),
       storagePath: meta?.storagePath ?? path.join(absRepo, '.gitnexus'),
       indexed: meta !== null,
+      hasGit,
       registered: registryEntry !== null,
       // Which manifest the index was read from — `gitnexus.json` (current) or
       // `meta.json` (legacy). Surfaced so a report can be explained without

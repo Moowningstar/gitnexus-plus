@@ -382,6 +382,12 @@ export interface HelperGraphOptions {
   managedPrefix?: string;
   nodeBudget?: number;
   edgeBudget?: number;
+  /**
+   * A policy the host resolved for this repository. Same reason as the search helper:
+   * a no-session route otherwise falls back to the DSH application directory, whose
+   * Windows ACL grant fails under Program Files.
+   */
+  sandboxPolicy?: (repoPath: string) => unknown;
 }
 
 function quoteFor(value: string): string {
@@ -523,6 +529,7 @@ export async function projectViaHelper(
     .map(quoteFor)
     .join(' ');
   const command = `node ${args}`;
+  const sandboxPolicy = options.sandboxPolicy?.(absRepo);
 
   let result: {
     exitCode?: number | null;
@@ -537,6 +544,7 @@ export async function projectViaHelper(
       timeoutMs: 25_000,
       onExpiry: 'kill',
       stdoutMaxBytes: 4 * 1024 * 1024,
+      ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
     });
     const execution = await options.shell.execute(spec);
     result = await execution.result();

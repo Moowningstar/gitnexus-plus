@@ -113,6 +113,15 @@ export interface MaintenanceOptions {
    * measurement in {@link maintenanceCommands}.
    */
   skipFts?: boolean;
+  /**
+   * Add `--skip-git` for a directory that is not a git repository.
+   *
+   * GitNexus refuses a folder without `.git` even when the folder is passed
+   * explicitly: the analyzer's first check is `hasGitDir(repoPath)`, and its own
+   * message names this flag. The resulting index has no commit baseline and no
+   * incremental mode, so the commands say that too.
+   */
+  skipGit?: boolean;
   memoryOff?: boolean;
   gitnexusHome?: string | null;
   /**
@@ -128,6 +137,7 @@ export interface MaintenanceOptions {
 interface ResolvedOptions {
   platform: NodeJS.Platform;
   skipFts: boolean;
+  skipGit: boolean;
   memoryOff: boolean;
   gitnexusHome: string | null;
 }
@@ -161,12 +171,14 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
   const resolved: ResolvedOptions = {
     platform: options.platform ?? process.platform,
     skipFts: options.skipFts === true,
+    skipGit: options.skipGit === true,
     memoryOff: options.memoryOff !== false,
     gitnexusHome: options.gitnexusHome ?? null,
   };
-  const { platform, skipFts, memoryOff, gitnexusHome } = resolved;
+  const { platform, skipFts, skipGit, memoryOff, gitnexusHome } = resolved;
 
   const common = ['analyze', '--index-only'];
+  if (skipGit) common.push('--skip-git');
   if (skipFts) common.push('--skip-fts');
 
   const quote = (value: string): string =>
@@ -190,25 +202,41 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
     return `gitnexus ${args.join(' ')}`;
   };
 
+  const skipGitNote = skipGit
+    ? '该目录不是 git 仓库：--skip-git 让 GitNexus 直接索引它；没有提交基线，也没有增量刷新。'
+    : null;
+  const repairArgs = [
+    'analyze',
+    '--index-only',
+    '--repair-fts',
+    ...(skipGit ? ['--skip-git'] : []),
+    quote(repoPath),
+  ];
+
   return [
     {
       mode: 'init',
       label: '初始化索引',
-      when: '该项目还没有 .gitnexus 索引时使用。',
+      when:
+        '该项目还没有 .gitnexus 索引时使用。' + (skipGitNote === null ? '' : skipGitNote),
       argv: line([]),
       shell: envPrefix() + line([]),
       destructive: false,
-      caveat: skipFts
-        ? '--skip-fts 会让一个已有 FTS 的索引清库重建（实测 179s vs 8.5s），非必要不要加。'
-        : // The measured range, not the best case. An earlier wording said "秒级（约 7s）"
-          // on the strength of a no-change run; five changed files on the same repository
-          // took 171 s. Understating this is how an operator concludes the button hung.
-          '耗时随改动量增长：无改动约 7s，5 个文件实测约 171s。日志会写 changed/added/deleted。',
+      caveat:
+        skipFts
+          ? '--skip-fts 会让一个已有 FTS 的索引清库重建（实测 179s vs 8.5s），非必要不要加。'
+          : // The measured range, not the best case. An earlier wording said "秒级（约 7s）"
+            // on the strength of a no-change run; five changed files on the same repository
+            // took 171 s. Understating this is how an operator concludes the button hung.
+            '耗时随改动量增长：无改动约 7s，5 个文件实测约 171s。日志会写 changed/added/deleted。' +
+            (skipGit ? '该目录没有 git，每次刷新都是完整重分析。' : ''),
     },
     {
       mode: 'full',
       label: '强制全量重构',
-      when: '增量刷新卡死或结果反常时的逃生舱。重建图与 FTS，耗时数分钟；未变更文件的解析产物仍会复用。',
+      when:
+        '增量刷新卡死或结果反常时的逃生舱。重建图与 FTS，耗时数分钟；未变更文件的解析产物仍会复用。' +
+        (skipGitNote === null ? '' : skipGitNote),
       argv: line(['--force']),
       shell: envPrefix() + line(['--force']),
       destructive: true,
@@ -223,11 +251,11 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
           {
             mode: 'repair-fts' as const,
             label: '修复搜索索引（FTS）',
-            when: '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。修复要在子进程里加载 FTS 扩展，因此系统需要具备原生运行时（Windows：VC++ 2015-2022 x64 与 OpenSSL 3）。',
-            argv: `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
-            shell:
-              envPrefix() +
-              `gitnexus ${['analyze', '--index-only', '--repair-fts', quote(repoPath)].join(' ')}`,
+            when:
+              '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。修复要在子进程里加载 FTS 扩展，因此系统需要具备原生运行时（Windows：VC++ 2015-2022 x64 与 OpenSSL 3）。' +
+              (skipGit ? '该目录没有 git，命令同样带 --skip-git。' : ''),
+            argv: `gitnexus ${repairArgs.join(' ')}`,
+            shell: envPrefix() + `gitnexus ${repairArgs.join(' ')}`,
             destructive: false,
             caveat:
               '只修复搜索索引，不改图。两种失败要分清：受限沙箱会拒绝子进程（spawn EPERM，需在普通终端执行）；' +
@@ -239,7 +267,7 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
 }
 
 /** The options {@link commandRationale} needs — a subset of the command options. */
-export type RationaleOptions = Pick<ResolvedOptions, 'skipFts' | 'memoryOff' | 'gitnexusHome'>;
+export type RationaleOptions = Pick<ResolvedOptions, 'skipFts' | 'skipGit' | 'memoryOff' | 'gitnexusHome'>;
 
 /**
  * A one-line explanation of why the environment prefix is there at all, for the
@@ -251,6 +279,12 @@ export function commandRationale(options: RationaleOptions): string[] {
     notes.push('GITNEXUS_MEMORY=off：阻止 CLI 用管道 stdio 重启自身（受限环境下会 EPERM）。');
   }
   notes.push(`NODE_OPTIONS=--max-old-space-size=${HEAP_MB}：补上它本想通过重启获得的那份堆。`);
+  if (options.skipGit) {
+    notes.push(
+      '--skip-git：该目录没有 .git，GitNexus 默认拒绝分析；这个标记让它直接索引目录，' +
+        '代价是没有提交基线，也不能做增量刷新。',
+    );
+  }
   if (options.skipFts) {
     notes.push('--skip-fts：FTS 扩展需在子进程安装，受限环境下会失败。');
   }

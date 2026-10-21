@@ -5,8 +5,8 @@
  * carrier contract in `@deepseek-ai/dsh-host-webserver`: bare `node:http`, no
  * Express, exact-then-longest-prefix matching, and a disposer for teardown.
  *
- * THE BOUND IS "IS A PROJECT ROOT", NOT "IS IN THE REGISTRY"
- * ----------------------------------------------------------
+ * THE BOUND IS "A DIRECTORY THE CALLER NAMED", NOT "IS IN THE REGISTRY"
+ * ----------------------------------------------------------------------
  * An earlier revision accepted only paths present in `~/.gitnexus/registry.json`.
  * That was wrong for the panel's actual job: it shows the project the user is
  * *in*, and a working directory the global registry has never heard of — a fresh
@@ -16,19 +16,25 @@
  *
  * A later revision required an index. That was also wrong, for the same reason at a
  * different state: a project with no index yet still has a readable working tree,
- * and the engine already builds a useful scan-only report for it. The bound is now a
- * project root (`.gitnexus` or `.git`), which still refuses arbitrary directories.
+ * and the engine already builds a useful scan-only report for it. A further revision
+ * still required a `.git` marker, which refused the exact directory this panel is
+ * most useful for on a machine without git: GitNexus indexes any folder with
+ * `--skip-git`, and the scan-only report never needed git in the first place.
  *
- * The route still refuses to describe arbitrary directories: the path must be a
- * project root — carrying `.gitnexus/gitnexus.json`, `.gitnexus/meta.json`, or a
- * `.git` marker — so a caller cannot use it to enumerate a filesystem. An index is
- * no longer required: the engine's scan-only report is what makes the "no index
- * yet" state informative instead of an empty command. Loopback and method guards
- * live in `./guard.js`.
+ * The bound is now an existing directory that is not a filesystem root. The route
+ * does not offer a directory listing: it describes exactly the path it is given.
+ * Loopback and method guards live in `./guard.js`.
+ *
+ * RESOLUTION IS A SEPARATE READ
+ * -----------------------------
+ * A workspace may contain several indexed projects. `/api/gitnexus/projects` resolves
+ * that list and the client chooses one; this route stays "describe this path", so a
+ * project switch does not change what a refresh means and an older client keeps the
+ * old contract.
  */
 
 import path from 'node:path';
-import { isProjectRoot } from '../gitnexus/index-meta.js';
+import { isExistingDirectory, isFilesystemRoot } from '../gitnexus/index-meta.js';
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { CoverageProgress, CoverageReport } from '../gitnexus/coverage.js';
@@ -71,18 +77,16 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
     }
 
     const absRepo = path.resolve(repo);
-    // The bound changed from "is a GitNexus index" to "is a project root": a
-    // directory with neither an index nor a `.git` marker is still refused, so the
-    // route cannot be used to enumerate a filesystem. A git repository without an
-    // index is the state the panel's initialize action exists for, and the engine
-    // already produces a useful scan-only report for it (file counts, bytes,
-    // languages, the size cap). Refusing that state was hiding data, not protecting
-    // anything — the route only answers loopback callers.
-    if (!(await isProjectRoot(absRepo))) {
+    // The bound is the directory itself, not a project marker: a folder with no
+    // `.git` and no index is still the operator's working tree, and the engine's
+    // scan-only report is exactly what makes that state informative. Refusing it
+    // produced the raw 404 the panel rendered as a dead end. Filesystem roots are
+    // excluded — scanning a whole drive is not a project report.
+    if (!(await isExistingDirectory(absRepo)) || isFilesystemRoot(absRepo)) {
       sendJson(res, 404, {
         ok: false,
-        code: 'not-a-project',
-        message: 'directory is neither a GitNexus index nor a git repository root',
+        code: 'not-a-directory',
+        message: `目录不存在、不是文件夹，或是文件系统根目录：${absRepo}`,
       });
       return;
     }
@@ -150,7 +154,12 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
     // `readAt` is what makes a refresh visible: without it two reads of an unchanged
     // repository are byte-identical on screen, so the control looks inert even when
     // it did exactly what it was asked.
-    sendJson(res, 200, { ok: true, report, maintenance, readAt: new Date().toISOString() });
+    sendJson(res, 200, {
+      ok: true,
+      report,
+      maintenance,
+      readAt: new Date().toISOString(),
+    });
   });
 
   return webServer.register({ kind: 'prefix', path: '/api/gitnexus/coverage', handler });

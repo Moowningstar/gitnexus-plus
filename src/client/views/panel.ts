@@ -51,6 +51,8 @@ import {
   ClientGraphProjection,
   ClientInstallRun,
   ClientMaintenance,
+  ClientProject,
+  ClientProjectList,
   ClientReport,
   ClientSearchHit,
   ContextDiagnostic,
@@ -58,6 +60,48 @@ import {
   SearchViewState,
   SlotProps,
 } from '../types';
+
+/**
+ * Pick the project a workspace opens on.
+ *
+ * An explicit remembered choice wins while it still exists; then the workspace's own
+ * index; then the first candidate (the host ranks by distance, completeness and
+ * recency). Never invents a path: a workspace with no indexes opens on itself, which
+ * is the scan-only state.
+ */
+export function chooseProject(
+  projects: ClientProject[],
+  workspace: string,
+  remembered: string | null,
+): string {
+  if (remembered !== null) {
+    const hit = projects.find((project) => project.path === remembered);
+    if (hit !== undefined) return hit.path;
+  }
+  const self = projects.find((project) => project.path === workspace);
+  if (self !== undefined) return self.path;
+  return projects[0]?.path ?? workspace;
+}
+
+const ACTIVE_PROJECT_KEY = 'dsh-gitnexus-plus:active-project:';
+
+function readRememberedProject(workspace: string): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage.getItem(`${ACTIVE_PROJECT_KEY}${workspace}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberProject(workspace: string, project: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(`${ACTIVE_PROJECT_KEY}${workspace}`, project);
+  } catch {
+    /* storage may be unavailable in a hardened webview; selection stays in memory */
+  }
+}
 
 /**
  * The panel body registered into `sidebar.right.pane.tab`.
@@ -83,6 +127,21 @@ export interface CoverageViewProps {
   report: ClientReport | null;
   maintenance: ClientMaintenance | null | undefined;
   projectPath: string | null;
+  /**
+   * The workspace the panel was opened with. It is the search root for the project
+   * list; the active project may be one of its descendants.
+   */
+  workspacePath?: string | null;
+  /** Indexed projects under the workspace, nearest first. */
+  projects?: ClientProject[];
+  /** How many directories the host examined for the list. */
+  projectsVisited?: number;
+  /** Whether the host's search hit a bound. */
+  projectsTruncated?: boolean;
+  /** Why the project list could not be read, when it failed. */
+  projectsError?: string | null;
+  /** Switch the active project. The host reloads coverage; this view does not fetch. */
+  onSelectProject?: (path: string) => void;
   context: ContextDiagnostic | null;
   busy: boolean;
   /** Numeric progress from the host, or null before the first event/for an old host. */
@@ -217,6 +276,12 @@ export function CoverageView({
   report,
   maintenance,
   projectPath,
+  workspacePath,
+  projects,
+  projectsVisited,
+  projectsTruncated,
+  projectsError,
+  onSelectProject,
   context,
   busy,
   progress,
@@ -241,35 +306,121 @@ export function CoverageView({
   // the project could not even be identified there is nothing to claim, so it is
   // false rather than assumed.
   const indexed = report?.repo?.indexed === true;
+  // A maintenance payload with no commands is not a section: rendering its title
+  // produced an empty card on failed reads and on hosts that predate the route.
+  const maintenanceSection =
+    maintenance !== null &&
+    maintenance !== undefined &&
+    Array.isArray(maintenance.commands) &&
+    maintenance.commands.length > 0
+      ? maintenance
+      : null;
+  // The workspace and the active project are different facts when the index lives in a
+  // subdirectory. The path position becomes a switcher when there is more than one.
+  const projectChoices = projects ?? [];
+  const activeInChoices = projectChoices.some((project) => project.path === projectPath);
+  const showSwitcher =
+    projectChoices.length > 1 &&
+    activeInChoices &&
+    onSelectProject !== undefined &&
+    projectPath !== null;
+  const activeDiffers =
+    projectPath !== null && workspacePath !== null && projectPath !== workspacePath;
   const header = h(
-    Row,
-    null,
-    report !== null && report.repo?.indexed ? h(StateDot, { state: healthState(report) }) : null,
-    h('span', { style: { fontWeight: 600 } }, 'GitNexus 索引'),
-    // The project, not a picker. Shown so the reader can confirm which tree the
-    // numbers describe — a path is the only unambiguous answer to that.
-    projectPath === null
-      ? h('span', { style: MUTED }, '未解析到工作区')
-      : h(
-          'span',
-          { style: { minWidth: 0, flex: '1 1 auto' } },
-          h(PathLabel, { path: projectPath }),
-        ),
-    h('span', { style: { flex: 1 } }),
-    // The label states the scope. "刷新" alone next to a staleness warning reads as
-    // "rebuild the index", which this control has never done and — by design, since
-    // the plugin spawns nothing — cannot do.
+    'div',
+    { style: { display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0 } },
     h(
-      Button,
-      {
-        variant: 'ghost',
-        onClick: onRefresh,
-        disabled: busy,
-        title: '重新读取报告（不会重建索引；重建见下方「维护命令」）',
-        'aria-label': '重新读取报告',
-      },
-      h(IconRefreshOutlineRegular, { size: 14 }),
+      Row,
+      null,
+      report !== null && report.repo?.indexed ? h(StateDot, { state: healthState(report) }) : null,
+      h('span', { style: { fontWeight: 600 } }, 'GitNexus 索引'),
+      // The project, not a global picker. A workspace-scoped switcher is the one
+      // selection this panel offers; it changes what the cards describe, nothing else.
+      projectPath === null
+        ? h('span', { style: MUTED }, '未解析到工作区')
+        : showSwitcher
+          ? h(
+              'span',
+              { style: { display: 'flex', alignItems: 'center', gap: '2px', minWidth: 0, flex: '1 1 auto' } },
+              h(
+                'select',
+                {
+                  value: projectPath,
+                  onChange: (event: { target: { value: string } }) =>
+                    onSelectProject?.(event.target.value),
+                  'aria-label': '切换工作区内的 GitNexus 索引',
+                  title: `工作区：${workspacePath ?? ''} · ${projectChoices.length} 个索引`,
+                  style: {
+                    appearance: 'none',
+                    border: 0,
+                    background: 'transparent',
+                    color: 'inherit',
+                    font: 'inherit',
+                    minWidth: 0,
+                    maxWidth: '100%',
+                    padding: 0,
+                    cursor: 'pointer',
+                  },
+                },
+                projectChoices.map((project) =>
+                  h(
+                    'option',
+                    { key: project.path, value: project.path },
+                    project.relPath === ''
+                      ? `${project.name}（本工作区）`
+                      : project.relPath === project.name
+                        ? project.name
+                        : `${project.name} — ${project.relPath}`,
+                  ),
+                ),
+              ),
+              h('span', { style: { ...MUTED, fontSize: '10px' } }, '▾'),
+            )
+          : h(
+              'span',
+              { style: { minWidth: 0, flex: '1 1 auto' } },
+              h(PathLabel, { path: projectPath }),
+            ),
+      h('span', { style: { flex: 1 } }),
+      // The label states the scope. "刷新" alone next to a staleness warning reads as
+      // "rebuild the index", which this control has never done and — by design, since
+      // the plugin spawns nothing — cannot do.
+      h(
+        Button,
+        {
+          variant: 'ghost',
+          onClick: onRefresh,
+          disabled: busy,
+          title: '重新读取报告（不会重建索引；重建见下方「维护命令」）',
+          'aria-label': '重新读取报告',
+        },
+        h(IconRefreshOutlineRegular, { size: 14 }),
+      ),
     ),
+    showSwitcher ||
+    activeDiffers ||
+    projectsTruncated === true ||
+    (projectsError !== null && projectsError !== undefined)
+      ? h(
+          'div',
+          { style: { ...MUTED, fontSize: '11px', minWidth: 0, overflowWrap: 'anywhere' } },
+          [
+            showSwitcher
+              ? `工作区：${workspacePath ?? ''} · ${projectChoices.length} 个索引 · 当前 ${
+                  projectPath ?? ''
+                }`
+              : activeDiffers
+                ? `工作区：${workspacePath ?? ''} · 当前 ${projectPath ?? ''}`
+                : null,
+            projectsTruncated === true ? '项目搜索达到上限，可能还有未列出的索引。' : null,
+            projectsError !== null && projectsError !== undefined
+              ? `项目列表读取失败：${projectsError}`
+              : null,
+          ]
+            .filter((line): line is string => line !== null)
+            .join(' '),
+        )
+      : null,
   );
 
   // A report already on screen stays readable while a manual refresh runs; the bar
@@ -324,9 +475,8 @@ export function CoverageView({
         h(StateDot, { state: 'error' }),
         h('span', null, error),
       ),
-      maintenance === null || maintenance === undefined
-        ? null
-        : h(
+      maintenanceSection !== null
+        ? h(
             Section,
             {
               wide: true,
@@ -334,8 +484,9 @@ export function CoverageView({
               meta: h('span', { style: { ...MUTED, fontSize: '12px' } }, '复制后到会话执行（沙箱与提权由 DSH 处理）'),
               scroll: 320,
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed: false, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
-          ),
+            h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed: false, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+          )
+        : null,
     );
   }
 
@@ -382,9 +533,27 @@ export function CoverageView({
         { style: { gridColumn: '1 / -1', display: 'flex', gap: '8px', alignItems: 'flex-start' } },
         h(StateDot, { state: 'idle' }),
         h(
-          'span',
-          null,
-          '该项目还没有 GitNexus 索引。下面是工作区扫描结果；初始化后可看到图谱、查询能力与 Git 活动对账。',
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 } },
+          h(
+            'span',
+            null,
+            report.repo?.hasGit === false
+              ? '该目录不是 git 仓库，也没有 GitNexus 索引。下面是工作区扫描结果；仍可建立索引（--skip-git），但没有提交基线与增量刷新，也不会有 Git 活动。'
+              : '该项目还没有 GitNexus 索引。下面是工作区扫描结果；初始化后可看到图谱、查询能力与 Git 活动对账。',
+          ),
+          Array.isArray(projects) && projects.length === 0
+            ? h(
+                'span',
+                { style: { ...MUTED, fontSize: '11px' } },
+                projectsError !== null && projectsError !== undefined
+                  ? `项目列表读取失败：${projectsError}；已按工作区描述。`
+                  : `已在 ${projectsVisited ?? 0} 个目录中查找 GitNexus 索引` +
+                    (projectsTruncated === true
+                      ? '，搜索达到上限，可能还有未检查的子目录。'
+                      : '，没有找到。'),
+              )
+            : null,
         ),
       ),
       h(
@@ -405,9 +574,8 @@ export function CoverageView({
         ),
       ),
       languages !== null && languages.rows.length > 0 ? h(MemoizedLanguageSection, { languages }) : null,
-      maintenance === null || maintenance === undefined
-        ? null
-        : h(
+      maintenanceSection !== null
+        ? h(
             Section,
             {
               wide: true,
@@ -415,13 +583,14 @@ export function CoverageView({
               meta: h(
                 'span',
                 { style: { ...MUTED, fontSize: '11px' } },
-                maintenance.supportsForce === true
+                maintenanceSection.supportsForce === true
                   ? '均可直接执行，也可复制到会话（沙箱与提权由 DSH 处理）'
                   : '重启 DSH 后可执行；当前仅可复制（沙箱与提权由 DSH 处理）',
               ),
             },
-            h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
-          ),
+            h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+          )
+        : null,
     );
   }
 
@@ -699,9 +868,8 @@ export function CoverageView({
         ),
 
     // Wide, and always open: the commands are the action this panel offers.
-    maintenance === null || maintenance === undefined
-      ? null
-      : h(
+    maintenanceSection !== null
+      ? h(
           Section,
           {
             wide: true,
@@ -709,16 +877,17 @@ export function CoverageView({
             meta: h(
               'span',
               { style: { ...MUTED, fontSize: '12px' } },
-              `${maintenance.commands?.length ?? 0} 条 · ` +
-                (maintenance.supportsForce === true
+              `${maintenanceSection.commands?.length ?? 0} 条 · ` +
+                (maintenanceSection.supportsForce === true
                   ? '均可直接执行，也可复制到会话'
                   : '重启 DSH 后可执行；当前仅可复制') +
                 '（沙箱与提权由 DSH 处理）',
             ),
             scroll: 360,
           },
-          h(MaintenanceSection, { maintenance, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
-        ),
+          h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+        )
+      : null,
   );
 }
 
@@ -732,11 +901,34 @@ export function CoverageView({
  * @param {{params?: {repo?: string}, sessionId?: string, useWorkspaces?: Function}} props
  */
 export function CoveragePanel(props: SlotProps) {
-  const projectPath = useProjectPath(props);
+  // The path the operator opened. It is the search root for the project list; the
+  // active project may be the workspace itself or one of its descendants.
+  const workspacePath = useProjectPath(props);
   const sessionId = typeof props.sessionId === 'string' ? props.sessionId : null;
-  const [report, setReport] = React.useState<ClientReport | null>(null);
-  const [maintenance, setMaintenance] = React.useState<ClientMaintenance | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const [rawReport, setRawReport] = React.useState<ClientReport | null>(null);
+  const [rawMaintenance, setRawMaintenance] = React.useState<ClientMaintenance | null>(null);
+  const [rawError, setRawError] = React.useState<string | null>(null);
+  /** The project the current report belongs to. */
+  const [reportProject, setReportProject] = React.useState<string | null>(null);
+  const [projectList, setProjectList] = React.useState<ClientProjectList | null>(null);
+  /** The workspace `projectList` was resolved for. Guards against a workspace switch. */
+  const [projectListFor, setProjectListFor] = React.useState<string | null>(null);
+  const [activeProject, setActiveProject] = React.useState<string | null>(null);
+  const [projectsError, setProjectsError] = React.useState<string | null>(null);
+  const [resolving, setResolving] = React.useState(false);
+  /**
+   * Bumped after the project list resolves, so the coverage effect waits for it.
+   * Without this, a manual refresh would read coverage for the old active project
+   * while the resolve was still deciding whether that project still exists.
+   */
+  const [loadToken, setLoadToken] = React.useState(0);
+  const projectsReady = projectListFor === workspacePath;
+  const visibleProjects = projectsReady ? projectList?.projects ?? [] : undefined;
+  const projectPath = activeProject ?? workspacePath;
+  const reportVisible = reportProject === projectPath;
+  const report = reportVisible ? rawReport : null;
+  const maintenance = reportVisible ? rawMaintenance : null;
+  const error = reportVisible ? rawError : null;
   const [busy, setBusy] = React.useState(false);
   const [progress, setProgress] = React.useState<LoadingProgress | null>(null);
   const [reloadToken, setReloadToken] = React.useState(0);
@@ -1096,13 +1288,85 @@ export function CoveragePanel(props: SlotProps) {
   }, [installRun, projectPath, report, startRun]);
 
   React.useEffect(() => {
-    if (projectPath === null) return undefined;
+    if (workspacePath === null) return undefined;
+    const controller = new AbortController();
+    setResolving(true);
+    setProjectsError(null);
+    // A workspace switch must not leave the previous project's report on screen. A
+    // refresh of the same workspace keeps it readable while the list is re-read.
+    if (projectListFor !== workspacePath) {
+      setRawReport(null);
+      setRawMaintenance(null);
+      setRawError(null);
+      setReadAt(null);
+      setReportProject(null);
+      setActiveProject(null);
+    }
+    void (async () => {
+      try {
+        const res = await fetch(
+          routeUrl(`/api/gitnexus/projects?root=${encodeURIComponent(workspacePath)}`),
+          { signal: controller.signal },
+        );
+        const body = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          projects?: ClientProject[];
+          visited?: number;
+          truncated?: boolean;
+          message?: string;
+        } | null;
+        if (!res.ok || body?.ok !== true || !Array.isArray(body.projects)) {
+          throw new Error(body?.message ?? `读取项目列表失败 (${res.status})`);
+        }
+        if (controller.signal.aborted) return;
+        const list: ClientProjectList = {
+          root: workspacePath,
+          projects: body.projects,
+          visited: typeof body.visited === 'number' ? body.visited : 0,
+          truncated: body.truncated === true,
+        };
+        setProjectList(list);
+        setProjectListFor(workspacePath);
+        const remembered = readRememberedProject(workspacePath);
+        const next = chooseProject(list.projects, workspacePath, remembered);
+        setActiveProject(next);
+        if (remembered !== null && next !== remembered) {
+          // The remembered project disappeared; persist the fallback so the next open
+          // does not look for it again.
+          rememberProject(workspacePath, next);
+        }
+        setLoadToken((n) => n + 1);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setProjectsError(String((cause as Error)?.message ?? cause));
+        // First load: fall back to scanning the workspace. A refresh keeps the list
+        // already on screen; a transient resolve failure should not remove it.
+        if (projectListFor !== workspacePath) {
+          setProjectList({ root: workspacePath, projects: [], visited: 0, truncated: false });
+          setProjectListFor(workspacePath);
+          setActiveProject(workspacePath);
+        }
+        setLoadToken((n) => n + 1);
+      } finally {
+        if (!controller.signal.aborted) setResolving(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [workspacePath, reloadToken]);
+
+  React.useEffect(() => {
+    if (activeProject === null || workspacePath === null) return undefined;
+    // Wait until the resolve has produced the list for this workspace. A manual
+    // refresh bumps loadToken after the resolve, so coverage never reads the old
+    // active project while the list is still being decided.
+    if (projectListFor !== workspacePath || resolving) return undefined;
     const controller = new AbortController();
     setBusy(true);
-    setError(null);
+    setRawError(null);
+    setReportProject(activeProject);
     setProgress({ percent: 0, label: '连接索引服务…' });
     const query =
-      `/api/gitnexus/coverage?repo=${encodeURIComponent(projectPath)}` +
+      `/api/gitnexus/coverage?repo=${encodeURIComponent(activeProject)}` +
       (wantsFresh ? '&refresh=1' : '') +
       '&stream=1';
 
@@ -1159,8 +1423,8 @@ export function CoveragePanel(props: SlotProps) {
           const payload = reports[0];
           if (payload === undefined) throw new Error('读取中断：没有收到完整报告。');
           if (controller.signal.aborted) return;
-          setReport(payload.report);
-          setMaintenance(payload.maintenance ?? null);
+          setRawReport(payload.report);
+          setRawMaintenance(payload.maintenance ?? null);
           setReadAt(
             typeof payload.readAt === 'string' ? payload.readAt : new Date().toISOString(),
           );
@@ -1183,22 +1447,22 @@ export function CoveragePanel(props: SlotProps) {
         // point of leading with the initialize command is that reaching it is
         // expected on a project that has never been analysed.
         if (res.status === 404 && body?.code === 'not-indexed') {
-          setReport({ repo: { indexed: false, path: projectPath } });
-          setMaintenance(null);
+          setRawReport({ repo: { indexed: false, path: activeProject } });
+          setRawMaintenance(null);
           setReadAt(body?.readAt ?? new Date().toISOString());
           return;
         }
         if (!body?.ok || body.report === undefined) {
           throw new Error(body?.message ?? `请求失败 (${res.status})`);
         }
-        setReport(body.report);
-        setMaintenance(body.maintenance ?? null);
+        setRawReport(body.report);
+        setRawMaintenance(body.maintenance ?? null);
         setReadAt(typeof body.readAt === 'string' ? body.readAt : new Date().toISOString());
       } catch (cause) {
         if (controller.signal.aborted) return;
         const error = cause as { name?: string; message?: string };
         if (error?.name === 'AbortError') return;
-        setError(String(error?.message ?? cause));
+        setRawError(String(error?.message ?? cause));
       } finally {
         if (!controller.signal.aborted) {
           setBusy(false);
@@ -1209,7 +1473,7 @@ export function CoveragePanel(props: SlotProps) {
 
     void load();
     return () => controller.abort();
-  }, [projectPath, reloadToken]);
+  }, [activeProject, projectListFor, workspacePath, loadToken, resolving]);
 
   /**
    * Read the Tier 0 verdict whenever the project or the index changes.
@@ -1369,18 +1633,29 @@ export function CoveragePanel(props: SlotProps) {
     [sessionId],
   );
 
-  const fallbackMaintenance = React.useMemo(
-    () => (maintenance === null && projectPath !== null ? { commands: [], rationale: [] } : maintenance),
-    [maintenance, projectPath],
+  const selectProject = React.useCallback(
+    (path: string): void => {
+      if (workspacePath === null) return;
+      setActiveProject(path);
+      setProjectsError(null);
+      rememberProject(workspacePath, path);
+    },
+    [workspacePath],
   );
 
   return h(CoverageView, {
     report,
-    maintenance: fallbackMaintenance,
+    maintenance,
     projectPath,
-    context: projectPath === null ? contextDiagnostic(props) : null,
-    busy,
-    progress,
+    workspacePath,
+    projects: visibleProjects,
+    projectsVisited: projectsReady ? projectList?.visited ?? 0 : undefined,
+    projectsTruncated: projectsReady ? projectList?.truncated === true : undefined,
+    projectsError: projectsReady ? projectsError : null,
+    onSelectProject: selectProject,
+    context: workspacePath === null ? contextDiagnostic(props) : null,
+    busy: busy || resolving,
+    progress: resolving ? { percent: 0, label: '正在查找项目索引…' } : progress,
     error,
     readAt,
     run,

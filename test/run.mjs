@@ -148,6 +148,7 @@ async function fixtureTests() {
   section('fixture: report assembly');
   const report = await analyzeCoverage(fixture.root, { env: {} });
   check('report marks repository as not indexed', report.repo.indexed === false);
+  check('the fixture has no .git and the report says so', report.repo.hasGit === false);
   check('totals.large === 2', report.totals.large === 2, `got ${report.totals.large}`);
   check(
     'large-files-skipped warning present',
@@ -166,6 +167,30 @@ async function fixtureTests() {
     'share of scanned volume is reported as a fraction',
     report.attribution.oversizeShareOfScanned > 0 && report.attribution.oversizeShareOfScanned < 1,
     `share=${report.attribution.oversizeShareOfScanned}`,
+  );
+
+  // A folder indexed with `--skip-git`: there is a manifest but no commit baseline.
+  // The report has to say that instead of letting the panel promise Git activity or an
+  // incremental refresh it cannot have.
+  await fs.mkdir(path.join(fixture.root, '.gitnexus'), { recursive: true });
+  await fs.writeFile(
+    path.join(fixture.root, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({
+      storagePath: path.join(fixture.root, '.gitnexus'),
+      stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0, embeddings: 0 },
+      fileHashes: { 'src/mod0.ts': 'deadbeef' },
+    }),
+  );
+  const noGitIndex = await analyzeCoverage(fixture.root, { env: {} });
+  check(
+    'an index in a non-git directory is reported as indexed without git',
+    noGitIndex.repo.indexed === true && noGitIndex.repo.hasGit === false,
+    JSON.stringify(noGitIndex.repo),
+  );
+  check(
+    'the report warns that the index has no commit baseline',
+    noGitIndex.warnings.some((w) => w.code === 'no-commit-baseline'),
+    JSON.stringify(noGitIndex.warnings.map((w) => w.code)),
   );
 
   await fs.rm(fixture.root, { recursive: true, force: true });
@@ -274,10 +299,139 @@ async function regressionTests() {
  * membership —and mocking either would leave the interesting behaviour (that an
  * unindexed absolute path is refused) untested.
  */
+/**
+ * The workspace-to-index search. A workspace is often a container, so the coverage
+ * route asks this module which project to describe; the ordering and the bounds are
+ * therefore part of the route's contract, not an implementation detail.
+ */
+async function discoveryTests() {
+  section('discovery: all GitNexus indexes under a workspace');
+  const { findIndexProjects } = await import('../lib/gitnexus/discover.js');
+
+  const root = fixturePath('discover');
+  await fs.rm(root, { recursive: true, force: true });
+  await fs.mkdir(path.join(root, 'apps', 'api', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(root, 'apps', 'api', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.mkdir(path.join(root, 'apps', 'web', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(root, 'apps', 'web', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.writeFile(path.join(root, 'apps', 'web', '.gitnexus', 'lbug'), '');
+  await fs.mkdir(path.join(root, 'node_modules', 'pkg', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(root, 'node_modules', 'pkg', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.mkdir(path.join(root, '.hidden', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(root, '.hidden', '.gitnexus', 'gitnexus.json'), '{}');
+
+  const found = await findIndexProjects(root);
+  const web = path.resolve(root, 'apps', 'web');
+  const api = path.resolve(root, 'apps', 'api');
+  check(
+    'collects every index below the workspace',
+    found.projects.length === 2 &&
+      found.projects.some((project) => project.path === web) &&
+      found.projects.some((project) => project.path === api),
+    JSON.stringify(found.projects.map((project) => project.path)),
+  );
+  check(
+    'ranks the complete index above the incomplete one at the same depth',
+    found.projects[0]?.path === web && found.projects[1]?.path === api,
+    JSON.stringify(found.projects.map((project) => [project.path, project.complete])),
+  );
+  check(
+    'reports distance, direction and metadata for each candidate',
+    found.projects.every(
+      (project) => project.depth === 2 && project.direction === 'descendant' && project.metaFile === 'gitnexus.json',
+    ),
+    JSON.stringify(found.projects),
+  );
+  check('an ordinary tree is not reported as truncated', found.truncated === false);
+
+  // Only dependency/hidden trees carry an index: the walk must not enter them.
+  const skippedRoot = fixturePath('discover-skipped');
+  await fs.rm(skippedRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(skippedRoot, 'node_modules', 'pkg', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(skippedRoot, 'node_modules', 'pkg', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.mkdir(path.join(skippedRoot, '.cache', 'pkg', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(skippedRoot, '.cache', 'pkg', '.gitnexus', 'gitnexus.json'), '{}');
+  const skipped = await findIndexProjects(skippedRoot);
+  check(
+    'does not descend into node_modules or hidden directories',
+    skipped.projects.length === 0 && skipped.visited === 1,
+    JSON.stringify(skipped),
+  );
+
+  // The workspace's own index wins over anything below it and stops the walk: a
+  // project's source tree is not a set of sibling projects.
+  await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(root, '.gitnexus', 'gitnexus.json'), '{}');
+  const atRoot = await findIndexProjects(root);
+  check(
+    'an index at the workspace root is the only candidate',
+    atRoot.projects.length === 1 &&
+      atRoot.projects[0].path === path.resolve(root) &&
+      atRoot.projects[0].depth === 0 &&
+      atRoot.projects[0].direction === 'self' &&
+      atRoot.visited === 1,
+    JSON.stringify(atRoot),
+  );
+
+  const noneRoot = fixturePath('discover-empty');
+  await fs.rm(noneRoot, { recursive: true, force: true });
+  await fs.mkdir(noneRoot, { recursive: true });
+  const none = await findIndexProjects(noneRoot);
+  check(
+    'a tree with no index yields an empty list',
+    none.projects.length === 0 && none.visited === 1 && none.truncated === false,
+    JSON.stringify(none),
+  );
+
+  // Bounds: the directory cap and the wall clock both stop the walk and say so,
+  // rather than turning a status read into an unbounded filesystem walk.
+  const limitRoot = fixturePath('discover-limit');
+  await fs.rm(limitRoot, { recursive: true, force: true });
+  for (const name of ['a', 'b', 'c']) await fs.mkdir(path.join(limitRoot, name), { recursive: true });
+  const limited = await findIndexProjects(limitRoot, { maxDirectories: 1 });
+  check(
+    'the directory cap stops the walk and marks it truncated',
+    limited.projects.length === 0 && limited.truncated === true,
+    JSON.stringify(limited),
+  );
+  let tick = 0;
+  const timed = await findIndexProjects(limitRoot, { timeoutMs: 1, now: () => (tick += 10) });
+  check(
+    'the time budget stops the walk and marks it truncated',
+    timed.projects.length === 0 && timed.truncated === true,
+    JSON.stringify(timed),
+  );
+
+  const deepRoot = fixturePath('discover-deep');
+  await fs.rm(deepRoot, { recursive: true, force: true });
+  await fs.mkdir(path.join(deepRoot, 'x', 'y', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(deepRoot, 'x', 'y', '.gitnexus', 'gitnexus.json'), '{}');
+  const capped = await findIndexProjects(deepRoot, { maxDepth: 1 });
+  check(
+    'the depth cap stops before an index and marks the result truncated',
+    capped.projects.length === 0 && capped.truncated === true,
+    JSON.stringify(capped),
+  );
+  const uncapped = await findIndexProjects(deepRoot);
+  check(
+    'without the cap the same index is found',
+    uncapped.projects[0]?.path === path.resolve(deepRoot, 'x', 'y') &&
+      uncapped.projects[0]?.depth === 2,
+    JSON.stringify(uncapped.projects),
+  );
+
+  await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(skippedRoot, { recursive: true, force: true });
+  await fs.rm(noneRoot, { recursive: true, force: true });
+  await fs.rm(limitRoot, { recursive: true, force: true });
+  await fs.rm(deepRoot, { recursive: true, force: true });
+}
+
 async function routeTests() {
   section('route: /api/gitnexus/coverage guards');
   const http = await import('node:http');
   const { mountCoverageRoute } = await import('../lib/routes/coverage.js');
+  const { mountProjectsRoute } = await import('../lib/routes/projects.js');
 
   /** @type {Array<{kind:string,path:string,handler:Function}>} */
   const registered = [];
@@ -300,9 +454,14 @@ async function routeTests() {
 
   /** Every `{ fresh }` the route asked the engine for, so the cache bypass is asserted. */
   const freshnessRequests = [];
+  /** The path the coverage route described, so exact-path semantics can be asserted. */
+  const requestedRepos = [];
+  const maintenanceRepos = [];
+  const disposeProjects = mountProjectsRoute(shimServer);
   const dispose = mountCoverageRoute(shimServer, {
     get: async (repoPath, options) => {
       freshnessRequests.push(options?.fresh === true);
+      requestedRepos.push(repoPath);
       options?.onProgress?.({
         phase: 'scan',
         percent: 42,
@@ -312,9 +471,21 @@ async function routeTests() {
       });
       return { stub: true, repoPath, totals: { large: 0 } };
     },
-    maintenance: (repoPath) => ({ commands: [{ mode: 'init', shell: "gitnexus analyze '" + repoPath + "'" }], rationale: [] }),
+    maintenance: (repoPath) => {
+      maintenanceRepos.push(repoPath);
+      return {
+        commands: [{ mode: 'init', shell: "gitnexus analyze '" + repoPath + "'" }],
+        rationale: [],
+      };
+    },
   });
-  check('route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/coverage');
+  check(
+    'routes registered',
+    registered.length === 2 &&
+      registered.some((route) => route.path === '/api/gitnexus/coverage') &&
+      registered.some((route) => route.path === '/api/gitnexus/projects'),
+    JSON.stringify(registered.map((route) => route.path)),
+  );
 
   const server = http.createServer((req, res) => {
     const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
@@ -380,20 +551,39 @@ async function routeTests() {
   const missing = await hit('/api/gitnexus/coverage');
   check('missing repo param rejected', missing.status === 400 && missing.body?.code === 'missing-repo', 'status=' + missing.status);
 
-  // The bound that replaced registry membership: a directory that is neither an index
-  // nor a project root is not described. This is what keeps the route from being a
-  // filesystem probe. It no longer requires an index — a git project without one is
-  // exactly the state the panel's scan-only view and initialize action serve.
-  const sysdir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent('C:\\Windows\\System32'));
-  check('a directory with no index and no git marker is refused', sysdir.status === 404 && sysdir.body?.code === 'not-a-project', 'status=' + sysdir.status + ' code=' + sysdir.body?.code);
-
+  // The bound that replaced project markers: the operator's working directory is
+  // answerable even when it has neither an index nor a `.git` marker. GitNexus can
+  // index a plain folder with `--skip-git`, and the scan-only report needs neither —
+  // refusing this state is the dead end the panel used to show.
   const tempDir = fixturePath('noindex');
   await fs.mkdir(tempDir, { recursive: true });
   const plainDir = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(tempDir));
-  check('a plain directory is refused too', plainDir.status === 404 && plainDir.body?.code === 'not-a-project', 'status=' + plainDir.status + ' code=' + plainDir.body?.code);
+  check(
+    'a plain directory is answered with a scan-only report',
+    plainDir.status === 200 && plainDir.body?.ok === true,
+    'status=' + plainDir.status + ' body=' + JSON.stringify(plainDir.body),
+  );
 
-  // A `.git` marker alone is enough for the bound: the engine's scan-only report is
-  // what makes "no index yet" informative instead of a 404 with no data.
+  const missingDir = await hit(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(path.join(tempDir, 'missing')),
+  );
+  check(
+    'a directory that does not exist is refused',
+    missingDir.status === 404 && missingDir.body?.code === 'not-a-directory',
+    'status=' + missingDir.status + ' code=' + missingDir.body?.code,
+  );
+
+  const rootDir = await hit(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(path.parse(tempDir).root),
+  );
+  check(
+    'a filesystem root is refused',
+    rootDir.status === 404 && rootDir.body?.code === 'not-a-directory',
+    'status=' + rootDir.status + ' code=' + rootDir.body?.code,
+  );
+
+  // A `.git` marker still works the same way; the relaxed bound must not take the
+  // scan-only report away from a git repository without an index.
   await fs.mkdir(path.join(tempDir, '.git'), { recursive: true });
   const noIndex = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(tempDir));
   check(
@@ -401,6 +591,78 @@ async function routeTests() {
     noIndex.status === 200 && noIndex.body?.ok === true,
     'status=' + noIndex.status + ' body=' + JSON.stringify(noIndex.body),
   );
+
+  // A container workspace: the projects route lists every index below it, and the
+  // selected path is then described exactly by coverage — no implicit redirect.
+  const container = fixturePath('nested-index');
+  await fs.rm(container, { recursive: true, force: true });
+  await fs.mkdir(path.join(container, 'apps', 'web', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(container, 'apps', 'web', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.writeFile(path.join(container, 'apps', 'web', '.gitnexus', 'lbug'), '');
+  await fs.mkdir(path.join(container, 'apps', 'api', '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(container, 'apps', 'api', '.gitnexus', 'gitnexus.json'), '{}');
+
+  const resolved = await hit(
+    '/api/gitnexus/projects?root=' + encodeURIComponent(container),
+  );
+  const resolvedWeb = path.resolve(container, 'apps', 'web');
+  const resolvedApi = path.resolve(container, 'apps', 'api');
+  check(
+    'the projects route lists every index below the workspace',
+    resolved.status === 200 &&
+      resolved.body?.ok === true &&
+      resolved.body.projects?.length === 2 &&
+      resolved.body.projects.some((project) => path.resolve(project.path) === resolvedWeb) &&
+      resolved.body.projects.some((project) => path.resolve(project.path) === resolvedApi),
+    JSON.stringify(resolved.body),
+  );
+  check(
+    'candidates carry distance, direction and completeness',
+    resolved.body.projects?.every(
+      (project) => project.depth === 2 && project.direction === 'descendant',
+    ) === true &&
+      resolved.body.projects?.find((project) => path.resolve(project.path) === resolvedWeb)?.complete === true,
+    JSON.stringify(resolved.body.projects),
+  );
+  const projectsMissing = await hit('/api/gitnexus/projects');
+  check(
+    'the projects route requires a root',
+    projectsMissing.status === 400 && projectsMissing.body?.code === 'missing-root',
+    'status=' + projectsMissing.status,
+  );
+  const projectsPost = await hit('/api/gitnexus/projects?root=' + encodeURIComponent(container), {
+    method: 'POST',
+  });
+  check('the projects route is read-only', projectsPost.status === 405, 'status=' + projectsPost.status);
+
+  const selected = await hit(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(resolvedWeb),
+  );
+  check(
+    'the selected project is described exactly',
+    selected.status === 200 &&
+      path.resolve(requestedRepos[requestedRepos.length - 1]) === resolvedWeb,
+    String(requestedRepos[requestedRepos.length - 1]),
+  );
+  check(
+    'maintenance targets the selected project',
+    path.resolve(maintenanceRepos[maintenanceRepos.length - 1]) === resolvedWeb,
+    String(maintenanceRepos[maintenanceRepos.length - 1]),
+  );
+
+  // Coverage itself no longer resolves: asking for the container describes the
+  // container, so an older client cannot have its refresh redirected somewhere else.
+  const containerReport = await hit(
+    '/api/gitnexus/coverage?repo=' + encodeURIComponent(container),
+  );
+  check(
+    'coverage describes the path it was given, not a discovered child',
+    containerReport.status === 200 &&
+      path.resolve(requestedRepos[requestedRepos.length - 1]) === path.resolve(container) &&
+      containerReport.body?.discovery === undefined,
+    JSON.stringify({ last: requestedRepos[requestedRepos.length - 1], discovery: containerReport.body?.discovery }),
+  );
+  await fs.rm(container, { recursive: true, force: true });
   await fs.rm(tempDir, { recursive: true, force: true });
 
   const post = await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path), { method: 'POST' });
@@ -411,6 +673,7 @@ async function routeTests() {
 
   await new Promise((resolve) => server.close(resolve));
   dispose();
+  disposeProjects();
   check('disposer clears the registration', registered.length === 0);
 }
 
@@ -833,6 +1096,27 @@ async function searchTests() {
   );
   check('the host parses the helper report', viaHelper.results[0]?.name === 'analyzeCoverage');
 
+  // A no-session helper spawn otherwise inherits the DSH application directory as
+  // its sandbox root; on Windows that grant fails under Program Files. The host must
+  // supply the repository-rooted policy, exactly as it does for analyze.
+  const searchPolicy = { mode: 'workspace-write', workspaceRoot: repo };
+  let searchPolicyRepo = null;
+  await searchViaHelper(repo, 'analyzeCoverage', {
+    shell: stubShell,
+    helperPath: 'C:/plugin/lib/bin/search-helper.js',
+    limit: 5,
+    sandboxPolicy: (repoPath) => {
+      searchPolicyRepo = repoPath;
+      return searchPolicy;
+    },
+  });
+  check(
+    'the search helper receives the repository-rooted sandbox policy',
+    captured?.sandboxPolicy === searchPolicy &&
+      path.resolve(searchPolicyRepo) === path.resolve(repo),
+    JSON.stringify({ policy: captured?.sandboxPolicy, asked: searchPolicyRepo }),
+  );
+
   const failingShell = {
     resolve: (request) => request,
     execute: async () => ({
@@ -1033,6 +1317,15 @@ async function analyzeTests() {
   check('--force is appended after --index-only', forcedLine.includes('analyze --index-only --force'), forcedLine);
   check('a normal command is not forced', !winLine.includes('--force'), winLine);
 
+  // The directory half of the same policy: a folder without `.git` is refused by the
+  // CLI even when its path is explicit, and `--skip-git` is its documented escape.
+  const noGitLine = analyzeCommandLine('C:\\tools\\gitnexus.cmd', 'D:\\repo', {
+    flavor: 'win32',
+    skipGit: true,
+  });
+  check('--skip-git is emitted for a folder without .git', noGitLine.includes('--skip-git'), noGitLine);
+  check('the path stays the last argument', noGitLine.trimEnd().endsWith("'D:\\repo'"), noGitLine);
+
   // The repair flag is a different operation, and the builder is the last place that
   // can keep the two contradictory flags apart: `--skip-fts --repair-fts` exits 0
   // having repaired nothing.
@@ -1201,6 +1494,27 @@ async function analyzeTests() {
       done.status('D:/Project/x')?.command.includes('plugin-home') === true,
     done.status('D:/Project/x')?.command,
   );
+  check(
+    'a directory without .git gets --skip-git automatically',
+    done.status('D:/Project/x')?.command.includes('--skip-git') === true,
+    done.status('D:/Project/x')?.command,
+  );
+
+  // The other half of that decision: a real git repository must not get the flag, or
+  // the index would silently lose its commit baseline.
+  const gitFixture = fixturePath('runner-git');
+  await fs.rm(gitFixture, { recursive: true, force: true });
+  await fs.mkdir(path.join(gitFixture, '.git'), { recursive: true });
+  const withGit = createAnalyzeRunner(stubShell({ exitCode: 0 }));
+  withGit.start(gitFixture);
+  await settle();
+  check(
+    'a git repository does not get --skip-git',
+    withGit.status(gitFixture)?.command.includes('--skip-git') === false,
+    withGit.status(gitFixture)?.command,
+  );
+  withGit.dispose();
+  await fs.rm(gitFixture, { recursive: true, force: true });
 
   // 0.1.3 pre-created parsedfile-store to dodge a worker mkdir. GitNexus deletes that
   // directory at the start of every parse, so a pre-created one turns each run into an
@@ -1573,8 +1887,13 @@ async function installTests() {
 
   // The two properties that make this safe to offer at all.
   const win = installCommandLine('C:\\Users\\u\\.dsh\\gitnexus-plus\\gitnexus', 'gitnexus@^1.6.12', { platform: 'win32' });
-  check('the install is an npm install', win.startsWith('npm install'), win);
+  check('the install is an npm install', win.includes('npm install'), win);
   check('it installs under a prefix rather than changing directory', win.includes("--prefix '"), win);
+  check(
+    'npm writes its cache inside the granted install tree',
+    win.includes('npm_config_cache') && win.includes('.npm-cache'),
+    win,
+  );
   // No `--registry`: the operator's npmrc is the only authority on where their packages
   // come from, and hardcoding one breaks exactly the users who need this path.
   check('no registry is hardcoded', !win.includes('--registry'), win);
@@ -1617,6 +1936,71 @@ async function installTests() {
   await new Promise((r) => setTimeout(r, 30));
   check('a sandbox refusal is denied, not failed', denied.status()?.state === 'denied');
   check('a denial says the plugin will not escalate', denied.status()?.message?.includes('不会申请扩权') === true);
+
+  // The install is a no-session spawn. Without a policy it inherits the DSH
+  // application directory, whose Windows ACL grant fails under Program Files; the
+  // install target is the only tree the command needs to write.
+  const installPolicy = { mode: 'workspace-write', workspaceRoot: prefix };
+  let policyPrefix = null;
+  let policyRequest = null;
+  const policyShell = {
+    shell: {
+      resolve: (req) => {
+        policyRequest = req;
+        return req;
+      },
+      execute: async () => ({
+        result: async () => ({ exitCode: 0, stdout: { text: 'added 206 packages' } }),
+      }),
+    },
+  };
+  const withPolicy = createInstallRunner({
+    ...policyShell,
+    prefix,
+    sandboxPolicy: (target) => {
+      policyPrefix = target;
+      return installPolicy;
+    },
+  });
+  withPolicy.start();
+  await new Promise((r) => setTimeout(r, 30));
+  check(
+    'the install policy is rooted at the install prefix',
+    policyRequest?.sandboxPolicy === installPolicy &&
+      path.resolve(policyPrefix) === path.resolve(prefix),
+    JSON.stringify({ asked: policyPrefix, policy: policyRequest?.sandboxPolicy }),
+  );
+
+  // A policy failure happens inside `shell.resolve`, before any process exists. It
+  // must become a failed install with the copyable command, not an exception that
+  // escapes the route as an opaque 500.
+  const brokenShell = createInstallRunner({
+    shell: {
+      resolve: () => {
+        throw new Error(
+          'sandbox mode "workspace-write" is requested but no sandbox backend is usable: ' +
+            'windows-acl-run: SetNamedSecurityInfoW failed (Win32 5): grantWrite(C:\\Program Files\\DSH Desktop)',
+        );
+      },
+      execute: async () => ({ result: async () => ({ exitCode: 0 }) }),
+    },
+    prefix,
+  });
+  check('a policy failure does not throw out of start()', (() => {
+    try {
+      brokenShell.start();
+      return true;
+    } catch {
+      return false;
+    }
+  })());
+  check(
+    'a policy failure becomes a failed run with the command',
+    brokenShell.status()?.state === 'failed' &&
+      brokenShell.status()?.message?.includes('普通终端') === true &&
+      brokenShell.status()?.message?.includes('windows-acl-run') === true,
+    JSON.stringify(brokenShell.status()),
+  );
 
   const noShell = createInstallRunner({ shell: null, prefix });
   noShell.start();
@@ -1710,6 +2094,51 @@ async function commandTests() {
 
   const noFts = maintenanceCommands('/x', { platform: 'linux', skipFts: false });
   check('passing skipFts: false explicitly is the same as the default', !noFts[0].argv.includes('--skip-fts'), noFts[0].argv);
+
+  // A plain folder: GitNexus refuses an explicit path without `.git` unless this flag
+  // is present, so every command offered for that directory must carry it.
+  const noGit = maintenanceCommands('/x', { platform: 'linux', skipGit: true });
+  check(
+    'a non-git directory gets --skip-git on both commands',
+    noGit.every((c) => c.argv.includes('--skip-git')),
+    noGit.map((c) => c.argv).join(' | '),
+  );
+  check(
+    '--skip-git precedes the quoted path',
+    noGit[0].argv.indexOf('--skip-git') < noGit[0].argv.indexOf("'/x'"),
+    noGit[0].argv,
+  );
+  check(
+    'the default commands omit --skip-git',
+    win.every((c) => !c.argv.includes('--skip-git')),
+    win.map((c) => c.argv).join(' | '),
+  );
+  check(
+    'the non-git command explains what is lost',
+    noGit[0].when.includes('没有提交基线') && noGit[0].when.includes('增量刷新'),
+    noGit[0].when,
+  );
+  const repairNoGit = maintenanceCommands('/x', {
+    platform: 'linux',
+    skipGit: true,
+    includeRepair: true,
+  }).find((c) => c.mode === 'repair-fts');
+  check(
+    'the repair command also carries --skip-git',
+    repairNoGit?.argv.includes('--skip-git') === true,
+    String(repairNoGit?.argv),
+  );
+  const rationaleNoGit = commandRationale({
+    skipFts: false,
+    skipGit: true,
+    memoryOff: true,
+    gitnexusHome: null,
+  });
+  check(
+    'the rationale explains --skip-git',
+    rationaleNoGit.some((n) => n.includes('--skip-git')),
+    JSON.stringify(rationaleNoGit),
+  );
 
   const single = maintenanceCommands("/home/o'brien/x", { platform: 'linux' });
   check('single quotes in a path are escaped', single[0].argv.includes("'\\''"), single[0].argv);
@@ -2202,11 +2631,13 @@ async function deltaRouteTests() {
     const outside = await hit(`?repo=${encodeURIComponent(path.join(import.meta.dirname, '..'))}`);
     check('the repository itself is answerable', outside.status === 200, `status=${outside.status}`);
 
-    const notProject = await hit(`?repo=${encodeURIComponent(os.tmpdir())}`);
+    const notProject = await hit(
+      `?repo=${encodeURIComponent(path.join(os.tmpdir(), `dsh-gitnexus-plus-missing-${process.pid}`))}`,
+    );
     check(
-      'a non-project directory is refused',
-      notProject.status === 404 && notProject.body?.code === 'not-a-project',
-      `status=${notProject.status}`,
+      'a directory that does not exist is refused',
+      notProject.status === 404 && notProject.body?.code === 'not-a-directory',
+      `status=${notProject.status} code=${notProject.body?.code}`,
     );
 
     const post = await hit(`?repo=${encodeURIComponent(project)}`, { method: 'POST' });
@@ -2374,8 +2805,12 @@ async function graphTests() {
       // Same request twice must spawn once: the projection is a pure function of the
       // index, the view/id and the budgets, and the index mtime is part of the key.
       let executed = 0;
+      let graphPolicy = null;
       const counting = {
-        resolve: (request) => request,
+        resolve: (request) => {
+          graphPolicy = request.sandboxPolicy;
+          return request;
+        },
         execute: async (spec) => {
           executed += 1;
           const { stdout, stderr } = await runCommand(spec.command, spec.workdir);
@@ -2384,13 +2819,24 @@ async function graphTests() {
           };
         },
       };
-      const options = { shell: counting, helperPath: helper, nodeBudget: 100 };
+      const repoPolicy = { mode: 'workspace-write', workspaceRoot: repo };
+      const options = {
+        shell: counting,
+        helperPath: helper,
+        nodeBudget: 100,
+        sandboxPolicy: () => repoPolicy,
+      };
       const first = await projectViaHelper(repo, 'communities', null, options);
       const second = await projectViaHelper(repo, 'communities', null, options);
       check(
         'a repeated projection is served from cache',
         executed === 1 && second.nodes.length === first.nodes.length,
         `executed=${executed} nodes=${second.nodes.length}`,
+      );
+      check(
+        'the graph helper receives the repository-rooted sandbox policy',
+        graphPolicy === repoPolicy,
+        JSON.stringify(graphPolicy),
       );
     } catch (error) {
       // Only a sandbox refusal is a skip. A missing shell or a quoting bug is this
@@ -2585,6 +3031,7 @@ async function realRepoSmoke() {
 
 console.log('\u001b[1mgitnexus-plus 路 coverage engine tests\u001b[0m');
 await fixtureTests();
+await discoveryTests();
 await binaryTests();
 await regressionTests();
 await crossCheckTests();

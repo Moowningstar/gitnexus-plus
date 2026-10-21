@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：0.1.4** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：0.1.5** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
@@ -24,7 +24,8 @@
 - **语言分布**：按字节拆分“能解析进图的语言 / 只识别格式的语言 / 其他”；GitNexus 不在时用内置扩展名映射，并标为 `builtin`，不冒充已解析。
 - **关键词搜索**：按图节点的 `name` / `filePath` 匹配，返回 kind、path、line；点击结果打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
 - **源码回退**：图查询子进程起不来时（无可用 shell 沙箱、DLL/ABI、索引忙），在索引清单内的文件里做有界源码行匹配，结果标为 `mode: "text"`。
-- **无索引也有信息**：git 项目尚未建索引时，显示扫描概览、语言分布和初始化命令，而不是空白面板。
+- **工作区多索引与切换器**：工作区本身可以是容器（例如 `D:\Project` 下放着 `gitnexus-plus/`、`viewer/`，或 `geo/` 下放着 `frontend/`、`backend/`）。面板会从当前工作区**向下**收集所有 `.gitnexus` 索引，默认选一个，标题栏显示“N 个索引”并可切换；选择按工作区记住。
+- **无索引也有信息**：git 项目或普通文件夹尚未建索引时，显示扫描概览、语言分布和初始化命令，而不是空白面板。普通文件夹的索引由 `--skip-git` 建立。
 - **维护**：初始化、增量刷新、全量重建（`--force`）都通过 DSH 的 shell 执行器运行，不自行请求提权。索引报告 FTS 不可用时，面板另外提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不重跑分析。
 
 ## 安装
@@ -71,12 +72,13 @@ npm install --prefix <DSH_HOME>/gitnexus-plus/gitnexus gitnexus@^1.6.12
 
 ## 使用
 
-面板会报告当前工作区指向的项目，不提供全局仓库列表。它以“项目根”（有 `.gitnexus` 索引或 `.git`）为边界，不会变成文件系统探测器。
+面板会报告当前工作区指向的项目，不提供全局仓库列表。它会从工作区开始**向下**收集索引：工作区自身和子目录里的 `.gitnexus` 都算候选，遇到已索引目录就不再向下钻。候选多于一个时，标题栏的路径位置变成切换器，下方写明“工作区 … · N 个索引 · 当前 <路径>”；切换后刷新、差量、搜索、图查询、维护命令都针对新项目，选择按工作区持久化。默认选择顺序是：上次选择 → 工作区自身 → 最近的子目录 → 完整索引优先 → 索引时间最新。找不到索引时，才退回描述工作区本身：目录必须存在、且不是文件系统根目录；既不需要 `.git`，也不需要索引。没有 `.git` 的普通文件夹照样能扫描，并可用 `--skip-git` 建索引（没有提交基线，也没有增量刷新）。路由不提供浏览/列举其它路径的接口。
 
 DSH 内暴露：
 
 - 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }`
 - 工具 `gitnexus_delta`：`{ repo }` —— 这次刷新会不会改变索引
+- 路由 `GET /api/gitnexus/projects?root=<workspace>`：列出工作区下的索引候选
 - 路由 `GET /api/gitnexus/coverage?repo=<project>`
 - 路由 `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - 路由 `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7`：单个文件的
@@ -114,9 +116,11 @@ npm test
 | 现象 | 这里怎么做 | 上游 GitNexus 路径 |
 | --- | --- | --- |
 | 面板说 GitNexus 不存在 | 自己安装，或用面板的安装按钮；非标准位置设 `GITNEXUS_CLI=/path/to/gitnexus/dist/cli/index.js`。 | [`gitnexus/README.md` — Requirements](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#requirements)、[Quick Start](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#quick-start) |
-| 项目还没有索引 | 点 **初始化索引**，或执行 `gitnexus analyze --index-only <repo>`。 | [`README.md` — CLI Reference](https://github.com/abhigyanpatwari/GitNexus/blob/main/README.md#cli-reference)、[`RUNBOOK.md` — Index out of date](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#index-out-of-date--stale-tools) |
+| 项目还没有索引 | 点 **初始化索引**，或执行 `gitnexus analyze --index-only <repo>`。目录不是 git 仓库时，面板的命令会自动带 `--skip-git`（上游要求），代价是没有提交基线与增量刷新。 | [`README.md` — CLI Reference](https://github.com/abhigyanpatwari/GitNexus/blob/main/README.md#cli-reference)、[`RUNBOOK.md` — Index out of date](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#index-out-of-date--stale-tools) |
+| 子目录里已有索引，切换器里却没有 | 面板只从当前工作区**向下**找，不会向上或找兄弟目录；默认跳过隐藏目录、`node_modules` 与构建产物，且有层数/目录数/时间上限。确认索引位于 `<工作区>/<子目录>/.gitnexus/gitnexus.json`；若它在被跳过的目录或很深的层级，直接把工作区设到该子目录。多个索引会在标题栏切换器里列出；搜索被截断时面板会写明“可能还有未列出的索引”。 | 本插件的目录发现；无上游 GitNexus 路径。 |
 | 刷新失败、`spawn EPERM`，或索引停在 `incremental-in-progress` | 面板命令已带 `GITNEXUS_MEMORY=off`、`NODE_OPTIONS=--max-old-space-size=8192`、`GITNEXUS_HOME=<repo>/.gitnexus/plugin-home`、`--index-only`。沙箱仍拒绝时，把命令复制到自己的终端跑；插件不会扩权。 | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors)、[Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
 | 刷新报 `EPERM … mkdir` 或 `rmdir '<repo>\.gitnexus\parsedfile-store'` | GitNexus 在每次解析开始时**删除**这个 run 级存储，解析过程中再由 worker 重新创建——两个方向都可能被拒。0.1.4 处理了两个成因：不再预建该目录（那是 0.1.3 的 `rmdir` 来源）；同时让分析器的 shell 调用带上**仓库**作为沙箱工作区根。面板路由没有 session，沙箱以前会回退到 DSH 应用目录，那条路径的写能力是**另一个身份**，仓库的写授权对它无效，于是 `.gitnexus` 里的写入全被拒。若仍失败，说明部署模式是只读——把复制出的命令放到普通终端执行。 | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors)、[`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus) |
+| Windows 报 `windows-acl-run: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\Program Files\DSH Desktop)` | 这是 DSH 的 Windows ACL 沙箱在给**工作区根**授权时失败；`D:\Program Files\DSH Desktop` 是 DSH 应用目录，不是项目。0.1.5 起搜索/图子进程使用被查询仓库作为策略根，安装使用插件前缀作为策略根，安装失败会返回可复制命令。如果**普通 shell 命令**仍报同一错误，说明会话工作区本身就是安装目录：把工作区切到可写项目；不要给 Program Files 加 ACL。 | 本插件的策略根修复；DSH 沙箱本身无上游 GitNexus 路径。 |
 | 增量分析卡住，或数据库报 `Maximum database size … has been reached` | 用 **全量重建**（`--force`），或按 clean slate 清理后重建。 | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus)、[`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | 刷新报 `EPERM … open '<repo>\.gitnexus\lbug.init.lock'` 或 `unable to acquire init lock` | 这是瞬时的文件锁，不是权限问题：报出该错误的机器上做过权限体检，`.gitnexus` 的权限是健康的。GitNexus 的第一个写操作就是这把锁，杀毒、索引器或上一次崩溃都可能持有它。插件会清掉残留锁并自动重试一次（运行状态里 `attempts: 2`）。仍失败就等一会儿再刷新，或把复制出的命令放到普通终端执行。 | 本插件的重试 + 分析器自己的锁文件；无上游 GitNexus 路径。 |
 | 搜索报 `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | 图查询在 `lib/bin/search-helper.js` 里跑，不在 Electron 宿主里加载原生模块；升级后重启 DSH，并确保 shell PATH 上有 `node`。helper 起不来时会回退源码。 | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
@@ -159,7 +163,9 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 ```
 
 全量重建再加 `--force`；只修搜索索引用 `--repair-fts`（面板在索引报告 FTS 不可用时提供
-**修复搜索索引（FTS）**，不会重跑分析）。
+**修复搜索索引（FTS）**，不会重跑分析）。目录没有 `.git` 时，命令还会带 `--skip-git`。
+
+- `--skip-git`：GitNexus 默认拒绝没有 `.git` 的目录（即使路径是显式传入的）；这个标记让它直接索引该目录。代价是索引没有提交基线、没有增量刷新，也没有 Git 活动，面板会如实说明。
 
 - `GITNEXUS_MEMORY=off`：阻止 CLI 通过管道重新 spawn 自己（受限沙箱会 `spawn EPERM`）。
 - `NODE_OPTIONS=--max-old-space-size=8192`：补上它本来想通过 respawn 拿到的 heap。
@@ -186,4 +192,6 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 - 只报告 GitNexus 索引的事实，不重写解析器，不重新实现图数据库。
 - 搜索的 graph 模式是名称/路径匹配，不搜正文；text 模式才按行匹配，且有上限。
 - 源码回退只覆盖索引清单里的文件，新文件需先刷新索引。
+- 没有 `.git` 的目录用 `--skip-git` 建的索引没有提交基线：门禁只能说“无法确认”，刷新是完整重分析（不是增量），Git 活动卡片也不会出现。
+- 子目录搜索是**有界**的：默认最多 12 层、4000 个目录、2 秒；跳过 `node_modules`、构建产物和所有隐藏目录，不跟随符号链接。多索引时默认按“工作区自身 → 最近 → 完整 → 最新”选择，标题栏可切换；搜索被上限截断时面板会说明“可能还有未列出的索引”。
 - 更深的设计与构建记录不放进公开 README；本文件只讲“做什么”和“出问题怎么处理”。
