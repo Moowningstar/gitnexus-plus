@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：0.1.5** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：0.1.6** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
