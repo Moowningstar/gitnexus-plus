@@ -42,6 +42,7 @@ import { ToolchainNotice } from '../sections/install';
 import { MemoizedLanguageSection } from '../sections/languages';
 import { LargeFileList } from '../sections/large-files';
 import { MaintenanceSection, type MaintenanceStartMode } from '../sections/maintenance';
+import { WorkspaceOverview } from '../sections/workspace';
 import { SearchSection } from '../sections/search';
 import { GraphSection } from '../sections/graph';
 import {
@@ -183,6 +184,10 @@ export interface CoverageViewProps {
   search?: SearchViewState;
   /** Graph projection state. Optional for the same reason as `search`. */
   graph?: GraphViewState;
+  /** Fired once the graph card is near the viewport, so the panel can defer its fetch. */
+  onGraphNear?: () => void;
+  /** Whether the panel has already been told the graph card is near. */
+  graphVisible?: boolean;
 }
 
 /**
@@ -307,11 +312,47 @@ export function CoverageView({
   onCancelInstall,
   search,
   graph,
+  onGraphNear,
+  graphVisible = false,
 }: CoverageViewProps) {
   // Whether an index exists decides which maintenance command is applicable. When
   // the project could not even be identified there is nothing to claim, so it is
   // false rather than assumed.
   const indexed = report?.repo?.indexed === true;
+  const graphCardRef = React.useRef<HTMLDivElement | null>(null);
+  // Hooks must stay above every early return below: the panel renders once with
+  // `report === null` while the first request is in flight, then again with the
+  // report. Declaring this state after the loading/no-index returns changed the
+  // hook count between those renders and crashed the sidebar with React #310.
+  const [activityDays, setActivityDays] = React.useState(7);
+
+  /**
+   * Tell the panel when the graph card is near the viewport.
+   *
+   * The view stays presentational: it owns the ref and the observer, but the fetch
+   * lives in the panel. A browser without IntersectionObserver reports immediately;
+   * the test harness records effects but deliberately does not run them.
+   */
+  React.useEffect(() => {
+    if (!indexed || graph === undefined) return undefined;
+    const node = graphCardRef.current;
+    if (node === null) return undefined;
+    if (typeof IntersectionObserver === 'undefined') {
+      onGraphNear?.();
+      return undefined;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onGraphNear?.();
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '200px', threshold: 0.01 },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [indexed, graph === undefined, onGraphNear]);
   // A maintenance payload with no commands is not a section: rendering its title
   // produced an empty card on failed reads and on hosts that predate the route.
   const maintenanceSection =
@@ -523,9 +564,13 @@ export function CoverageView({
   const { notable, context: contextWarnings } = splitWarnings(report.warnings);
   const ratio = coverageRatio(report);
 
-  // The header names the window the timeline is showing; the selection itself lives in
-  // the section, since the rows below are now the only entry point.
-  const [activityDays, setActivityDays] = React.useState(7);
+  // Multi-project workspaces get one aggregate card before the project-scoped ones.
+  // It is null for a single project, so the common case is unchanged.
+  const workspaceSection = h(WorkspaceOverview, {
+    projects: projects ?? [],
+    activePath: projectPath,
+    onSelectProject,
+  });
 
   // No index yet. This is the state the initialize command exists for, but it is
   // also a state in which the working tree is still readable: file counts, bytes,
@@ -631,6 +676,8 @@ export function CoverageView({
       onCancelInstall,
     }),
 
+    workspaceSection,
+
     h(
       'div',
       { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '3px' } },
@@ -726,6 +773,7 @@ export function CoverageView({
       h(ProvenanceBlock, {
         quality: report.graphQuality ?? null,
         provenance: report.provenance ?? null,
+        compatibility: report.compatibility ?? null,
       }),
     ),
 
@@ -737,24 +785,30 @@ export function CoverageView({
     graph === undefined || !indexed
       ? null
       : h(
-          Section,
-          {
-            wide: true,
-            title: '图视图',
-            meta: h(
-              'span',
-              { style: { ...MUTED, fontSize: '11px' } },
-              graph.projection === null
-                ? graph.routeState === 'missing'
-                  ? '宿主未挂载图路由'
-                  : graph.loading
-                    ? '读取中…'
-                    : '暂无图数据'
-                : `${graph.projection.view === 'communities' ? '社区聚合' : '单个社区'} · ` +
-                  `上限 ${graph.projection.budget.nodes} 节点 / ${graph.projection.budget.edges} 边`,
-            ),
-          },
-          h(GraphSection, { state: graph }),
+          'div',
+          { ref: graphCardRef, style: { gridColumn: '1 / -1', minWidth: 0 } },
+          h(
+            Section,
+            {
+              wide: true,
+              title: '图视图',
+              meta: h(
+                'span',
+                { style: { ...MUTED, fontSize: '11px' } },
+                graph.projection === null
+                  ? graph.routeState === 'missing'
+                    ? '宿主未挂载图路由'
+                    : graph.loading
+                      ? '读取中…'
+                      : graphVisible
+                        ? '暂无图数据'
+                        : '滚动到此处加载'
+                  : `${graph.projection.view === 'communities' ? '社区聚合' : '单个社区'} · ` +
+                    `上限 ${graph.projection.budget.nodes} 节点 / ${graph.projection.budget.edges} 边`,
+              ),
+            },
+            h(GraphSection, { state: graph }),
+          ),
         ),
 
     // Caveats, in one card, sharing a row with the provenance card.
@@ -1005,7 +1059,11 @@ export function CoveragePanel(props: SlotProps) {
    */
   const [graphRoute, setGraphRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   const [graphScope, setGraphScope] = React.useState<string | null>(null);
+  const [graphMode, setGraphMode] = React.useState<'communities' | 'symbols'>('communities');
   const [graphReload, setGraphReload] = React.useState(0);
+  /** Set once the graph card has entered the viewport; keeps the first fetch lazy. */
+  const [graphVisible, setGraphVisible] = React.useState(false);
+  const onGraphNear = React.useCallback(() => setGraphVisible(true), []);
   /** Which project the current projection belongs to, so a switch can clear it. */
   const graphRepoRef = React.useRef<string | null>(null);
   const running = run?.state === 'running' && runProject === projectPath;
@@ -1591,6 +1649,7 @@ export function CoveragePanel(props: SlotProps) {
       setGraphError(null);
       setGraphLoading(false);
       setGraphScope(null);
+      setGraphMode('communities');
       return undefined;
     }
     const projectChanged = graphRepoRef.current !== projectPath;
@@ -1602,6 +1661,7 @@ export function CoveragePanel(props: SlotProps) {
       // next render fetch the overview instead of asking the new project for an id it
       // cannot have.
       setGraphScope(null);
+      setGraphMode('communities');
     }
     if (!graphAvailable) {
       setGraphProjection(null);
@@ -1609,6 +1669,9 @@ export function CoveragePanel(props: SlotProps) {
       setGraphLoading(false);
       return undefined;
     }
+    // The visibility effect flips this once the card is near the viewport; until
+    // then the card keeps its empty state instead of issuing a request.
+    if (!graphVisible) return undefined;
     if (projectChanged && graphScope !== null) {
       // The setGraphScope(null) above re-runs this effect; do not also fire a request
       // for the old scope against the new project.
@@ -1618,7 +1681,7 @@ export function CoveragePanel(props: SlotProps) {
     setGraphLoading(true);
     setGraphError(null);
     const effectiveScope = projectChanged ? null : graphScope;
-    const view = effectiveScope === null ? 'communities' : 'community';
+    const view = effectiveScope === null ? graphMode : 'community';
     const suffix = effectiveScope === null ? '' : `&id=${encodeURIComponent(effectiveScope)}`;
     void (async () => {
       try {
@@ -1657,7 +1720,7 @@ export function CoveragePanel(props: SlotProps) {
       }
     })();
     return () => controller.abort();
-  }, [projectPath, reloadToken, graphScope, graphReload, graphAvailable]);
+  }, [projectPath, reloadToken, graphScope, graphMode, graphReload, graphAvailable, graphVisible]);
 
   /**
    * Open a symbol node, with the same fallbacks the search hits use.
@@ -1775,11 +1838,23 @@ export function CoveragePanel(props: SlotProps) {
       error: graphError,
       routeState: graphRoute,
       scope: graphScope,
-      onOpenCommunity: (id: string) => setGraphScope(id),
-      onBack: () => setGraphScope(null),
+      onOpenCommunity: (id: string) => {
+        setGraphScope(id);
+        setGraphMode('communities');
+      },
+      onOpenSymbols: () => {
+        setGraphScope(null);
+        setGraphMode('symbols');
+      },
+      onBack: () => {
+        setGraphScope(null);
+        setGraphMode('communities');
+      },
       onReload: () => setGraphReload((n) => n + 1),
       onOpenSymbol: openGraphNode,
     },
+    onGraphNear,
+    graphVisible,
   });
 }
 

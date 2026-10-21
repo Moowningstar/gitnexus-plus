@@ -1,6 +1,6 @@
 import { capabilityRows, compactNumber, graphQualitySummary } from '../format';
 import { MUTED, MetricGrid, StateDot, Tag, h } from '../primitives';
-import { ClientCapability, ClientGraphQuality, ClientProvenance } from '../types';
+import { ClientCapability, ClientCompatibility, ClientGraphQuality, ClientProvenance } from '../types';
 
 /**
  * Which query surfaces are live.
@@ -32,7 +32,7 @@ export function CapabilityStrip({ capabilities }: { capabilities: Record<string,
  *
  * @param {{quality: any, provenance: any}} props
  */
-export function ProvenanceBlock({ quality, provenance }: { quality: ClientGraphQuality | null; provenance: ClientProvenance | null }) {
+export function ProvenanceBlock({ quality, provenance, compatibility }: { quality: ClientGraphQuality | null; provenance: ClientProvenance | null; compatibility?: ClientCompatibility | null }) {
   const summary = graphQualitySummary(quality);
 
   return h(
@@ -72,6 +72,12 @@ export function ProvenanceBlock({ quality, provenance }: { quality: ClientGraphQ
               { label: 'FTS 配置', value: provenance.ftsProfile ?? '—' },
               { label: '跨语言属性', value: compactNumber(provenance.crossLanguageProperties ?? 0) },
               { label: '分析器', value: provenance.runnerCliVersion ?? '—' },
+              {
+                label: '索引/CLI',
+                value: compatibility === undefined || compatibility === null
+                  ? '—'
+                  : `${compatibility.indexedBy ?? '缺失'} / ${compatibility.installed ?? '缺失'}`,
+              },
             ],
           }),
         ),

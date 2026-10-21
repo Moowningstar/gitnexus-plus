@@ -327,8 +327,14 @@ export function MaintenanceSection({
                     ` · 检查用时 ${gate?.durationMs ?? 0}ms`,
                 ),
                 h('span', { style: { flex: 1 } }),
+                gate?.advice !== undefined && gate?.advice !== null
+                  ? h(Tag, { tone: 'outline' }, `建议：${gate.advice.label}`)
+                  : null,
                 gate?.truncated === true ? h(Tag, { tone: 'outline' }, '候选已截断') : null,
               ),
+              gate?.advice !== undefined && gate?.advice !== null
+                ? h('div', { style: { ...MUTED, fontSize: '11px' } }, gate.advice.reason)
+                : null,
               h(
                 'div',
                 {
@@ -363,9 +369,18 @@ export function MaintenanceSection({
             h(
               'div',
               { style: { ...MUTED, display: 'flex', flexDirection: 'column', gap: '2px' } },
+              gate.advice !== undefined && gate.advice !== null
+                ? h('div', null, `建议：${gate.advice.label} —— ${gate.advice.reason}`)
+                : null,
               gate.notes.slice(0, 3).map((note, index) => h('div', { key: index }, `· ${note}`)),
             )
-          : null,
+          : skipGit && indexed
+            ? h(
+                'div',
+                { style: MUTED },
+                '该目录没有 .git：索引由 --skip-git 建立，没有提交基线，只能重新分析，不能增量刷新。',
+              )
+            : null,
 
     commands.map((command) => {
       // The host's wording is written for the no-index state ("初始化索引", "该项目还没有

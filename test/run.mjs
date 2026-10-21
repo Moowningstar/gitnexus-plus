@@ -19,7 +19,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { analyzeCoverage, judgeMinified, formatBytes, looksGenerated } from '../lib/gitnexus/coverage.js';
+import { analyzeCoverage, judgeMinified, formatBytes, looksGenerated, readCompatibility } from '../lib/gitnexus/coverage.js';
 import { scanRepository } from '../lib/gitnexus/scan.js';
 import { loadScanPrimitives } from '../lib/gitnexus/root.js';
 import { readRegistry, normalizePathKey } from '../lib/gitnexus/index-meta.js';
@@ -2281,13 +2281,65 @@ async function formatTests() {
   const notIndexed = formatReport({ repo: { indexed: false, path: 'X:\\nope' } });
   check('unindexed report says so plainly', notIndexed.includes('NOT FOUND') && notIndexed.includes('gitnexus analyze'));
 
-  const report = await analyzeCoverage('D:\\project\\data-screen', {});
-  const text = formatReport(report);
-  check('renders the repository name', text.includes('data-screen'));
-  check('renders totals line', text.includes('scanned'));
-  check('renders language rows', text.includes('Languages'));
-  check('contains no ANSI escapes', !/\u001b\[/.test(text), JSON.stringify(text.slice(0, 60)));
-  check('withLanguages=false drops the breakdown', !formatReport(report, false).includes('Languages'));
+  // A disposable repository, so this test does not depend on a developer's D: drive.
+  const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-format-'));
+  const repo = path.join(fixtureRoot, 'data-screen');
+  await fs.mkdir(path.join(repo, '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'index.ts'), 'export const answer = 42;\n');
+  await fs.writeFile(
+    path.join(repo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0 }, branch: 'main' }),
+  );
+  try {
+    const report = await analyzeCoverage(repo, {});
+    const text = formatReport(report);
+    check('renders the repository name', text.includes('data-screen'));
+    check('renders totals line', text.includes('scanned'));
+    check('renders language rows', text.includes('Languages'));
+    check('contains no ANSI escapes', !/\u001b\[/.test(text), JSON.stringify(text.slice(0, 60)));
+    check('withLanguages=false drops the breakdown', !formatReport(report, false).includes('Languages'));
+  } finally {
+    await fs.rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function compatibilityTests() {
+  section('compatibility: index build CLI vs installed CLI');
+  check('matching versions are a match', readCompatibility('1.6.12', '1.6.12').status === 'match');
+  const mismatch = readCompatibility('1.6.6', '1.6.12');
+  check(
+    'different versions are a mismatch with both sides named',
+    mismatch.status === 'mismatch' && mismatch.message.includes('1.6.6') && mismatch.message.includes('1.6.12'),
+    JSON.stringify(mismatch),
+  );
+  check(
+    'a missing side is unknown, never a match',
+    readCompatibility(null, '1.6.12').status === 'unknown' && readCompatibility('', '').status === 'unknown',
+  );
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-compat-'));
+  const repo = path.join(root, 'data-screen');
+  await fs.mkdir(path.join(repo, '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'index.ts'), 'export const answer = 42;\n');
+  await fs.writeFile(
+    path.join(repo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({
+      stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0 },
+      branch: 'main',
+      runnerIdentity: { cliVersion: '1.6.6' },
+    }),
+  );
+  try {
+    const report = await analyzeCoverage(repo, { includeActivity: false });
+    check(
+      'a report carries the compatibility verdict and a warning',
+      report.compatibility.status === 'mismatch' &&
+        report.warnings.some((warning) => warning.code === 'version-mismatch'),
+      JSON.stringify({ compatibility: report.compatibility, warnings: report.warnings }),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }
 
 async function binaryTests() {
@@ -2395,7 +2447,7 @@ async function binaryTests() {
  */
 async function deltaTests() {
   section('delta: tier 0 comparison against the index snapshot');
-  const { readDelta, describeDelta } = await import('../lib/gitnexus/delta.js');
+  const { readDelta, describeDelta, refreshAdvice } = await import('../lib/gitnexus/delta.js');
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const { createHash } = await import('node:crypto');
@@ -2428,6 +2480,58 @@ async function deltaTests() {
     );
   }
 
+  // The tier rules are pure and independent of git; they encode the cases the old
+  // yes/no gate could not express (worktree basis, delete-heavy diffs, truncation).
+  {
+    const counts = {
+      checked: 0,
+      hashed: 0,
+      unchanged: 0,
+      modified: 0,
+      added: 0,
+      deleted: 0,
+      excluded: 0,
+    };
+    const advice = (patch = {}) =>
+      refreshAdvice({
+        indexed: true,
+        comparable: true,
+        needsRefresh: true,
+        certain: true,
+        basis: 'index',
+        truncated: false,
+        counts,
+        notes: [],
+        ...patch,
+      });
+    check('clean certain tree advises no refresh', advice({ needsRefresh: false }).tier === 'none');
+    check(
+      'clean worktree without a baseline is unknown, not none',
+      advice({ needsRefresh: false, certain: false, notes: ['没有提交基线'] }).tier === 'unknown',
+    );
+    check('missing index advises init', advice({ indexed: false, comparable: false }).tier === 'init');
+    check(
+      'index-basis dirty tree advises incremental',
+      advice({ counts: { ...counts, modified: 2, added: 1 } }).tier === 'incremental',
+    );
+    check(
+      'worktree-basis dirty tree advises reanalyze',
+      advice({ basis: 'worktree', counts: { ...counts, modified: 1 } }).tier === 'reanalyze',
+    );
+    check(
+      'truncated candidates advise reanalyze',
+      advice({ truncated: true, counts: { ...counts, modified: 1 } }).tier === 'reanalyze',
+    );
+    check(
+      'delete-heavy diff advises rebuild',
+      advice({ counts: { ...counts, modified: 20, deleted: 80 } }).tier === 'rebuild',
+    );
+    check(
+      'a small delete does not force rebuild',
+      advice({ counts: { ...counts, modified: 20, deleted: 49 } }).tier === 'incremental',
+    );
+  }
+
   // A confined DSH process cannot spawn a child over piped stdio (`spawn EPERM`), and
   // every fixture here needs a real `git`. That is a property of the environment, not
   // of the engine, so it is reported as a skip with the same wording the search-helper
@@ -2449,6 +2553,35 @@ async function deltaTests() {
     return;
   }
 
+
+  // A --skip-git index has no commit baseline and no git history to inspect. Delta must
+  // say "re-analyze", not run git and report a confusing not-a-repository failure.
+  {
+    const root = fixturePath('delta-no-git');
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.mkdir(path.join(root, 'src'), { recursive: true });
+    await fs.writeFile(path.join(root, 'src', 'a.ts'), 'export const a = 1;\n');
+    await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, '.gitnexus', 'gitnexus.json'),
+      JSON.stringify({
+        repoPath: root,
+        indexedAt: new Date().toISOString(),
+        lastCommit: '',
+        stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0, embeddings: 0 },
+        fileHashes: { 'src/a.ts': sha('export const a = 1;\n') },
+      }),
+    );
+    const report = await readDelta(root);
+    check(
+      'a --skip-git index is told to re-analyze, never incremental',
+      report.comparable === false &&
+        report.indexed === true &&
+        report.advice.tier === 'reanalyze' &&
+        report.notes.some((note) => note.includes('--skip-git')),
+      JSON.stringify({ comparable: report.comparable, advice: report.advice, notes: report.notes }),
+    );
+  }
 
   /** @param {string} name @param {Record<string,string>} files */
   const build = async (name, files) => {
@@ -2726,7 +2859,10 @@ async function graphTests() {
   check('a backslash is refused', sanitizeGraphId('comm_8\\') === null);
   check('an empty id is refused', sanitizeGraphId('   ') === null);
   check('an overlong id is refused', sanitizeGraphId('c'.repeat(300)) === null);
-  check('only the two views are known', isGraphView('communities') && isGraphView('community') && !isGraphView('neighbors'));
+  check(
+    'the three views are known',
+    isGraphView('communities') && isGraphView('community') && isGraphView('symbols') && !isGraphView('neighbors'),
+  );
 
   const repo = process.cwd();
   const hasStore = await fs
@@ -2739,6 +2875,11 @@ async function graphTests() {
   } else {
     const overview = await projectGraph(repo, { view: 'communities', nodeBudget: 10 });
     check('the overview returns community nodes', overview.nodes.length > 0 && overview.nodes[0].kind === 'Community', JSON.stringify(overview.nodes.slice(0, 2)));
+    check(
+      'the overview names a representative member file',
+      overview.nodes.some((node) => typeof node.representativeFile === 'string' && node.representativeFile !== ''),
+      JSON.stringify(overview.nodes.slice(0, 2)),
+    );
     check('the overview reports the true total', overview.total >= overview.nodes.length, `${overview.total} vs ${overview.nodes.length}`);
     check('the node budget is applied', overview.nodes.length <= 10, String(overview.nodes.length));
     check('a truncated overview says so', overview.truncated === overview.total > overview.nodes.length);
@@ -2753,6 +2894,31 @@ async function graphTests() {
     check(
       'the overview aggregates relation types',
       overview.edges.every((edge) => typeof edge.type === 'string' && edge.type !== '' && edge.weight >= 1),
+    );
+
+    const symbols = await projectGraph(repo, { view: 'symbols', nodeBudget: 20 });
+    check(
+      'the symbol view returns symbol nodes outside communities',
+      symbols.nodes.length > 0 && symbols.nodes[0].kind !== 'Community',
+      JSON.stringify(symbols.nodes.slice(0, 2)),
+    );
+    check(
+      'the symbol view reports the true symbol total and truncation',
+      symbols.total >= symbols.nodes.length && symbols.truncated === symbols.total > symbols.nodes.length,
+      `${symbols.total} total / ${symbols.nodes.length} shown`,
+    );
+    check(
+      'the symbol view explains the truncation',
+      symbols.notes.some((note) => note.includes('符号')) || !symbols.truncated,
+      JSON.stringify(symbols.notes),
+    );
+    check(
+      'every symbol edge has both endpoints in the node list',
+      (() => {
+        const ids = new Set(symbols.nodes.map((node) => node.id));
+        return symbols.edges.every((edge) => ids.has(edge.source) && ids.has(edge.target));
+      })(),
+      JSON.stringify(symbols.edges.slice(0, 3)),
     );
 
     const scope = overview.nodes[0].id;
@@ -2995,11 +3161,13 @@ async function graphTests() {
 
 async function realRepoSmoke() {
   section('smoke: report shape on a real indexed repository');
-  const repo = 'D:\\project\\data-screen';
+  // Default to this checkout: it has an index locally, and a CI checkout simply
+  // skips the smoke instead of failing on a hard-coded Windows path.
+  const repo = process.env.GITNEXUS_SMOKE_REPO ?? process.cwd();
   try {
     await fs.access(path.join(repo, '.gitnexus', 'gitnexus.json'));
   } catch {
-    check('data-screen indexed (skipped otherwise)', true, 'not present on this machine —skipped');
+    check('real repository indexed (skipped otherwise)', true, 'not present on this machine —skipped');
     return;
   }
   const started = Date.now();
@@ -3110,6 +3278,7 @@ await analyzeTests();
 await installTests();
 await commandTests();
 await formatTests();
+await compatibilityTests();
 await deltaTests();
 await graphTests();
 await realRepoSmoke();

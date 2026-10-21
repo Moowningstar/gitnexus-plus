@@ -53,7 +53,7 @@ import path from 'node:path';
 import { execFile, type ExecFileOptions } from 'node:child_process';
 import { promisify } from 'node:util';
 import { formatBytes } from './coverage.js';
-import { readIndexMeta, type IndexMeta } from './index-meta.js';
+import { readIndexMeta, hasGitMarker, type IndexMeta } from './index-meta.js';
 
 /**
  * `execFile`, promisified, resolved as decoded text.
@@ -92,6 +92,24 @@ export type DeltaBasis =
   | 'index'
   /** the index recorded no usable commit: only working-tree-vs-HEAD was checked */
   | 'worktree';
+
+/**
+ * What the operator should run next.
+ *
+ * This is deliberately a separate axis from {@link DeltaReport.needsRefresh}: "something
+ * changed" does not say whether the analyzer can consume that change incrementally.
+ * A worktree-basis comparison, or a delete-heavy diff, is exactly where an incremental
+ * run is a poor bet.
+ */
+export type RefreshTier = 'none' | 'incremental' | 'reanalyze' | 'rebuild' | 'init' | 'unknown';
+
+export interface RefreshAdvice {
+  tier: RefreshTier;
+  /** Short operator-facing label, e.g. 增量刷新. */
+  label: string;
+  /** Why this tier, in one sentence. */
+  reason: string;
+}
 
 export interface DeltaCounts {
   /** candidates examined */
@@ -145,6 +163,8 @@ export interface DeltaReport {
   truncated: boolean;
   /** operator-facing explanation of the verdict, in order of importance */
   notes: string[];
+  /** Which maintenance tier the evidence supports. */
+  advice: RefreshAdvice;
   durationMs: number;
   readAt: string;
 }
@@ -223,6 +243,67 @@ const ZERO_COUNTS: DeltaCounts = {
 };
 
 /**
+ * Turn the evidence into a maintenance recommendation.
+ *
+ * Kept as a pure function over the report's deciding fields so the rules can be tested
+ * without building a repository, and so the route never has to re-derive them.
+ */
+export function refreshAdvice(
+  report: Pick<
+    DeltaReport,
+    'indexed' | 'comparable' | 'needsRefresh' | 'certain' | 'basis' | 'truncated' | 'counts' | 'notes'
+  >,
+): RefreshAdvice {
+  if (!report.indexed) {
+    return { tier: 'init', label: '初始化索引', reason: '该项目还没有 GitNexus 索引' };
+  }
+  if (!report.comparable) {
+    return {
+      tier: 'unknown',
+      label: '无法判断',
+      reason: report.notes[0] ?? '索引无法与工作区比较',
+    };
+  }
+  if (!report.needsRefresh) {
+    return report.certain
+      ? { tier: 'none', label: '无需刷新', reason: '工作区与索引记录一致' }
+      : {
+          tier: 'unknown',
+          label: '无法判断',
+          reason: report.notes[0] ?? '没有可用的提交基线，无法确认索引是否最新',
+        };
+  }
+
+  const actionable = report.counts.modified + report.counts.added + report.counts.deleted;
+  if (report.basis !== 'index') {
+    return {
+      tier: 'reanalyze',
+      label: '重新分析',
+      reason: '没有可用的提交基线；增量刷新无法可靠消费这次改动',
+    };
+  }
+  if (report.truncated) {
+    return {
+      tier: 'reanalyze',
+      label: '重新分析',
+      reason: '候选文件被截断，增量刷新可能漏掉改动',
+    };
+  }
+  if (actionable > 0 && report.counts.deleted >= 50 && report.counts.deleted / actionable > 0.5) {
+    return {
+      tier: 'rebuild',
+      label: '全量重建',
+      reason: `删除占比过高（${report.counts.deleted}/${actionable}），增量刷新容易留下悬空边`,
+    };
+  }
+  return {
+    tier: 'incremental',
+    label: '增量刷新',
+    reason: `${report.counts.modified} 改 / ${report.counts.added} 增 / ${report.counts.deleted} 删，可由增量刷新消费`,
+  };
+}
+
+/**
  * Compare the working tree against the content the index recorded.
  *
  * @param repoPath absolute repository root
@@ -248,6 +329,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     certain: false,
     truncated: false,
     notes: [],
+    advice: { tier: 'unknown', label: '无法判断', reason: '索引无法与工作区比较' },
     durationMs: now() - startedAt,
     readAt: new Date().toISOString(),
     ...patch,
@@ -255,11 +337,29 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
 
   const meta: IndexMeta | null = await readIndexMeta(absRepo);
   if (meta === null) {
-    return empty({ notes: ['该项目还没有 GitNexus 索引，先初始化再说'] });
+    return empty({
+      notes: ['该项目还没有 GitNexus 索引，先初始化再说'],
+      advice: { tier: 'init', label: '初始化索引', reason: '该项目还没有 GitNexus 索引' },
+    });
   }
 
   const indexedCommit = meta.lastCommit === '' ? null : meta.lastCommit;
   const base: Partial<DeltaReport> = { indexed: true, indexedCommit };
+
+  // A `--skip-git` index has no commit to compare against and no git history to diff.
+  // Asking git here only produces a confusing "not a repository" report; the honest
+  // answer is that this project can only be re-analysed, never incrementally refreshed.
+  if (!hasGitMarker(absRepo)) {
+    return empty({
+      ...base,
+      notes: ['该目录没有 .git：索引是 --skip-git 建立的，没有提交基线，只能重新分析'],
+      advice: {
+        tier: 'reanalyze',
+        label: '重新分析',
+        reason: '该目录没有 .git，没有提交基线，无法增量刷新',
+      },
+    });
+  }
 
   // The map is normalized-key -> original key, and the hash is read through the
   // original: `fileHashes` is written by GitNexus, and a manifest whose keys use
@@ -273,6 +373,11 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     return empty({
       ...base,
       notes: ['该索引没有记录文件哈希（旧格式 manifest），无法判断内容是否变化 —— 直接刷新'],
+      advice: {
+        tier: 'rebuild',
+        label: '全量重建',
+        reason: '旧格式 manifest 没有文件哈希，无法差量判断',
+      },
     });
   }
 
@@ -318,6 +423,11 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
           ? '索引没有记录提交基线，且 git 也无法读取 HEAD —— 无法比较，直接刷新'
           : '索引记录的提交在本地 git 历史中已不可用，且无法读取 HEAD —— 无法比较，直接刷新',
       ],
+      advice: {
+        tier: 'reanalyze',
+        label: '重新分析',
+        reason: '索引没有可用的提交基线，且 git 无法读取 HEAD',
+      },
     });
   }
 
@@ -440,7 +550,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     notes.unshift(`索引内容已落后：${parts.join('、')}`);
   }
 
-  return {
+  const verdict = {
     repoPath: absRepo,
     indexed: true,
     comparable: true,
@@ -456,6 +566,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     durationMs: now() - startedAt,
     readAt: new Date().toISOString(),
   };
+  return { ...verdict, advice: refreshAdvice(verdict) };
 }
 
 /** One-line verdict for a tool result or a log line. */

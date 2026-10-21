@@ -1,5 +1,5 @@
 /**
- * `GET /api/gitnexus/graph?repo=<project>&view=communities|community&id=<community>`
+ * `GET /api/gitnexus/graph?repo=<project>&view=communities|community|symbols&id=<community>`
  *
  * The read-only endpoint behind the panel's graph view. Two views, both bounded on the
  * server: the browser never sends Cypher and never chooses how much of the graph to
@@ -43,7 +43,7 @@ export function mountGraphRoute(webServer: WebServerService, deps: GraphRouteDep
       sendJson(res, 400, {
         ok: false,
         code: 'invalid-view',
-        message: 'view must be one of: communities, community',
+        message: 'view must be one of: communities, community, symbols',
       });
       return;
     }

@@ -52,6 +52,7 @@ import {
   stalenessView,
   summaryLine,
 } from './format';
+import * as React from 'react';
 import {
   bindSidebarRight,
   contextDiagnostic,
@@ -70,13 +71,16 @@ import {
 import { GitActivitySection, activityView } from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
+import { buildGraph3DLayout, graph3DPath, Graph3DView } from './sections/graph3d';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
 import { FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
 import { LargeFileList } from './sections/large-files';
 import { MaintenanceSection } from './sections/maintenance';
+import { WorkspaceOverview, aggregateProjects } from './sections/workspace';
 import { SidebarRightApi } from './types';
 import { CoveragePanel, CoverageTitle, CoverageView, chooseProject } from './views/panel';
+import { PanelBoundary } from './views/boundary';
 
 /** Must match the `id` in the loader factory written by scripts/build-client.mjs. */
 const PLUGIN_ID = 'dsh-gitnexus-plus';
@@ -178,9 +182,34 @@ function apply(ctx: SlotsContext): void {
     });
   });
 
+  /**
+   * Wrapping the whole panel keeps a render failure inside the pane: without it
+   * React unmounts the subtree and the sidebar is simply black, which is
+   * indistinguishable from the plugin never loading.
+   */
+  const requiredComponents: ReadonlyArray<[string, unknown]> = [
+    ['PanelBoundary', PanelBoundary],
+    ['CoveragePanel', CoveragePanel],
+    ['WorkspaceOverview', WorkspaceOverview],
+    ['Graph3DView', Graph3DView],
+    ['ProvenanceBlock', ProvenanceBlock],
+  ];
+  const missingComponents = requiredComponents
+    .filter(([, component]) => typeof component !== 'function')
+    .map(([name]) => name);
+
+  const CoveragePanelWithBoundary = (props: React.ComponentProps<typeof CoveragePanel>) =>
+    missingComponents.length === 0
+      ? React.createElement(PanelBoundary, null, React.createElement(CoveragePanel, props))
+      : React.createElement(
+          'div',
+          { style: { padding: 12, color: '#fff', background: '#3a1111' } },
+          'GitNexus 缺少组件: ' + missingComponents.join(', '),
+        );
+
   safe('sidebar.right.pane.tab', () => {
     ctx.slots.inject('sidebar.right.pane.tab', () =>
-      ctx.slots.register({ name: 'sidebar.right.pane.tab', key: PLUGIN_ID }, CoveragePanel),
+      ctx.slots.register({ name: 'sidebar.right.pane.tab', key: PLUGIN_ID }, CoveragePanelWithBoundary),
     );
   });
 
@@ -218,6 +247,9 @@ export const __internals = {
     highlightLine,
     languageOf,
     communityColors,
+    buildGraph3DLayout,
+    graph3DPath,
+    Graph3DView,
     compactNumber,
     useProjectPath,
     contextDiagnostic,
@@ -235,6 +267,8 @@ export const __internals = {
     FileHistorySection,
     ProvenanceBlock,
     MaintenanceSection,
+    WorkspaceOverview,
+    aggregateProjects,
     CapabilityStrip,
     Section,
     classifyFileType,

@@ -29,11 +29,27 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Graph view** — the index's communities drawn on a canvas, with aggregated
   cross-community edges; click a community to see its member symbols and the relations
   among them, click a symbol to open its file at the line. Node and edge budgets are
-  applied by the host, and the view states what it left out.
+  applied by the host, and the view states what it left out. A **Symbol view** button
+  switches to a bounded all-symbol projection when a symbol outside the current
+  communities matters; it is explicitly truncated by file order, and the community view
+  remains the structural overview. The community overview is a
+  **3D** view in the card: it puts the same communities on a Z axis with per-community
+  colours, representative member files and shortest-path highlighting, so a dense core
+  can be rotated apart instead of settling into a flat hairball. Single click selects a
+  community; double-click opens its member symbols. **Expand** opens a centered
+dialog with the same projection and a community sidebar, not a full-screen mode. The
+  card defers its fetch until it is scrolled near the viewport.
+- **Refresh advice** — the staleness verdict also recommends one of `none` /
+  `incremental` / `reanalyze` / `rebuild` / `init` / `unknown`, so a worktree-only
+  comparison never reads as "safe to incrementally refresh" and a `--skip-git` index is
+  told to re-analyze instead of being offered an impossible incremental run.
 - **Index coverage** — lists the oversized files `gitnexus analyze` skipped, with size,
   language share, and generated/minified signals.
 - **Index freshness** — indexed commit vs `HEAD`, classified `current` / `behind` /
   `diverged` / `unknown`, plus the uncommitted-change count.
+- **Version consistency** — compares the GitNexus CLI that wrote the index
+  (`runnerIdentity.cliVersion`) with the CLI installed now. A mismatch is reported as a
+  warning, not silently rendered as if the index and the query path agreed.
 - **Graph composition** — nodes, edges, communities, processes, embeddings, edges per node.
 - **Git activity × index** — recent commits, authors, branches and most-changed files,
   each file marked **indexed**, **excluded by design**, or **missing from the index**.
@@ -151,6 +167,12 @@ npm run check
 npm test
 ```
 
+`npm test` builds and runs the engine, plugin and client suites. The suite no longer
+depends on a developer's `D:` drive: the format test builds a disposable repository, and
+the real-repository smoke test defaults to this checkout (or `GITNEXUS_SMOKE_REPO`) and
+skips when it has no index. `.github/workflows/ci.yml` runs `npm ci`, `npm run check` and
+`npm test` on Windows and Ubuntu with Node 22 and 24.
+
 Search has two modes:
 
 - **graph** — the normal path. The host does not load native `lbug`; it starts
@@ -265,9 +287,14 @@ the related features puts that use under it.**
 - The refresh gate compares content hashes of the files the index recorded. It cannot
   see a change the analyzer would make for its own reasons (a schema upgrade, a new
   feature mode); **仍然刷新** exists for exactly that case.
-- The graph view draws communities, not every symbol: the overview is the community
-  graph, and a drill-down shows at most the configured node budget of one community's
-  members. Both say when they are truncated.
+- The graph view draws communities by default, not every symbol: the overview is the
+  community graph, and a drill-down shows at most the configured node budget of one
+  community's members. The **Symbol view** is a bounded all-symbol projection ordered by
+  file and explicitly truncated, not a claim of completeness. Both say when they are
+  truncated.
+- The 3D overview draws community nodes only; member symbols remain in the 2D drill-down.
+  It is the card's default community view, not a separate full-screen mode, so the sidebar
+  stays the one place the graph lives.
 - The plugin reports facts about a GitNexus index; it does not rewrite the parser or
   reimplement the graph database.
 - Graph search matches names/paths, not bodies; the text fallback matches lines and is

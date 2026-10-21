@@ -234,6 +234,7 @@ const primitivesStub = {
  * making a single synchronous render possible.
  */
 const ReactFacade = {
+  Component: React.Component,
   createElement: React.createElement,
   cloneElement: React.cloneElement,
   isValidElement: React.isValidElement,
@@ -791,6 +792,19 @@ const repos = [
 const view = render(I.CoverageView, { report, ...viewProps });
 
 check('a settled report shows no progress bar', !view.tags.includes('progress'));
+
+// Regression guard for React #310: the panel renders with `report === null` while
+// the first request is in flight, then renders again with the report. A hook
+// declared after the loading/no-index early returns changes the hook count between
+// those two renders and crashes the whole sidebar.
+const panelSource = readFileSync(path.join(root, 'src/client/views/panel.ts'), 'utf8');
+const activityHookAt = panelSource.indexOf('const [activityDays');
+const reportGuardAt = panelSource.indexOf('if (report === null)');
+check(
+  'CoverageView declares its activity state before the loading return',
+  activityHookAt >= 0 && reportGuardAt >= 0 && activityHookAt < reportGuardAt,
+  `hook@${activityHookAt}, guard@${reportGuardAt}`,
+);
 
 const loadingView = render(I.CoverageView, {
   report: null,
@@ -1621,6 +1635,7 @@ const graphState = (patch) => ({
   routeState: 'ready',
   scope: null,
   onOpenCommunity: () => {},
+  onOpenSymbols: () => {},
   onBack: () => {},
   onReload: () => {},
   onOpenSymbol: () => {},
@@ -1640,13 +1655,74 @@ check(
 );
 check(
   'the reachable list mirrors the drawn nodes',
-  overview.text.includes('Test · 26') && overview.text.includes('Routes · 18'),
+  overview.text.includes('Test #43') && overview.text.includes('Routes #8'),
   overview.text.slice(-700),
 );
 check(
   'the card explains the interaction and the budget',
   overview.text.includes('滚轮缩放') && overview.text.includes('220'),
   overview.text.slice(-700),
+);
+check(
+  'the community overview renders the inline 3D view',
+  overview.text.includes('选择社区') && overview.text.includes('拖拽旋转'),
+  overview.text.slice(-700),
+);
+
+const symbolsGraph = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  graph: graphState({
+    projection: {
+      view: 'symbols',
+      scope: null,
+      nodes: [
+        { id: 'Function:src/a.ts:load@1:2', kind: 'Function', name: 'load', filePath: 'src/a.ts', startLine: 1 },
+      ],
+      edges: [],
+      total: 2945,
+      truncated: true,
+      budget: { nodes: 220, edges: 800 },
+      notes: ['共 2945 个符号，按文件顺序显示前 1 个；可用社区视图看全貌'],
+      readAt: new Date().toISOString(),
+    },
+  }),
+});
+check(
+  'the symbol view names itself and offers the community view',
+  symbolsGraph.text.includes('符号全图') &&
+    symbolsGraph.text.includes('社区视图') &&
+    symbolsGraph.text.includes('2945') &&
+    symbolsGraph.text.includes('load'),
+  symbolsGraph.text.slice(-800),
+);
+check(
+  'the symbol view explains its truncation',
+  symbolsGraph.text.includes('按文件顺序') && symbolsGraph.text.includes('截断'),
+  symbolsGraph.text.slice(-800),
+);
+
+const deferredGraph = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  graph: graphState({ projection: null }),
+  graphVisible: false,
+});
+check(
+  'a graph card that has not been reached says it is deferred',
+  deferredGraph.text.includes('滚动到此处加载'),
+  deferredGraph.text.slice(-500),
+);
+const visibleEmptyGraph = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  graph: graphState({ projection: null }),
+  graphVisible: true,
+});
+check(
+  'a reached graph card with no projection says so',
+  visibleEmptyGraph.text.includes('暂无图数据') && !visibleEmptyGraph.text.includes('滚动到此处加载'),
+  visibleEmptyGraph.text.slice(-500),
 );
 
 // Community colours come from a greedy colouring of the community graph, so adjacent
@@ -1675,6 +1751,54 @@ check(
     'the colouring covers every node',
     coloured.size === 3 && [...coloured.values()].every((c) => /^#[0-9a-f]{6}$/.test(c)),
     JSON.stringify([...coloured]),
+  );
+}
+
+// The 3D layout is pure so it can be tested without a canvas.
+{
+  const nodes = [
+    { id: 'a', kind: 'Community', name: 'A', filePath: null, startLine: null, symbolCount: 4 },
+    { id: 'b', kind: 'Community', name: 'B', filePath: null, startLine: null, symbolCount: 8 },
+    { id: 'c', kind: 'Community', name: 'C', filePath: null, startLine: null, symbolCount: 2 },
+  ];
+  const layout3d = I.buildGraph3DLayout(nodes, [
+    { source: 'a', target: 'b', type: 'CALLS', weight: 1 },
+    { source: 'b', target: 'a', type: 'CALLS', weight: 2 },
+    { source: 'b', target: 'c', type: 'USES', weight: 3 },
+  ]);
+  check(
+    '3D layout covers every community and aggregates edges',
+    layout3d.nodes.length === 3 &&
+      layout3d.byId.size === 3 &&
+      layout3d.components === 1 &&
+      layout3d.edges.length === 2 &&
+      layout3d.edges.some((edge) => edge.weight === 3),
+    JSON.stringify(layout3d.edges),
+  );
+  check(
+    '3D shortest path walks the community graph',
+    JSON.stringify(I.graph3DPath('a', 'c', layout3d.edges)) === '["a","b","c"]',
+    JSON.stringify(I.graph3DPath('a', 'c', layout3d.edges)),
+  );
+  check(
+    '3D path reports disconnected components instead of inventing a route',
+    I.graph3DPath('a', 'd', layout3d.edges) === null,
+  );
+}
+
+{
+  const view3d = render(I.Graph3DView, {
+    projection: graphState({}).projection,
+    onOpenCommunity: () => {},
+  });
+  check(
+    'the inline 3D view renders its selector, path control and truncated source',
+    view3d.text.includes('选择社区') &&
+      view3d.text.includes('路径') &&
+      view3d.text.includes('双击') &&
+      view3d.text.includes('共 39 个社区') &&
+      view3d.text.includes('220'),
+    view3d.text.slice(0, 700),
   );
 }
 
@@ -1749,6 +1873,80 @@ check(
 // rather than showing an empty frame in every profile that has not restarted yet.
 const noGraph = render(I.CoverageView, { report, ...viewProps });
 check('a host without the graph route renders no graph card', !noGraph.text.includes('社区总览'));
+
+// ---------------------------------------------------------------------------
+// Workspace aggregate
+// ---------------------------------------------------------------------------
+
+section('workspace: aggregate projects');
+
+const wsProject = (patch) => ({
+  path: '/workspace/a',
+  name: 'a',
+  relPath: 'a',
+  kind: 'index',
+  hasGit: true,
+  direction: 'descendant',
+  depth: 1,
+  indexedAt: '2026-10-21T00:00:00Z',
+  lastCommit: 'abc1234',
+  branch: 'main',
+  stats: { files: 10, nodes: 20, edges: 30, communities: 4, processes: 5, embeddings: 0 },
+  complete: true,
+  metaFile: '/workspace/a/.gitnexus/gitnexus.json',
+  ...patch,
+});
+const wsProjects = [
+  wsProject({}),
+  wsProject({
+    path: '/workspace/b',
+    name: 'b',
+    relPath: 'b',
+    stats: { files: 5, nodes: 5, edges: 7, communities: 1, processes: 2, embeddings: 3 },
+    complete: false,
+  }),
+  wsProject({
+    path: '/workspace/c',
+    name: 'c',
+    relPath: 'c',
+    kind: 'git',
+    stats: null,
+    complete: false,
+  }),
+];
+const wsTotals = I.aggregateProjects(wsProjects);
+check(
+  'workspace totals sum indexed projects and count unindexed ones',
+  wsTotals.indexed === 2 &&
+    wsTotals.unindexed === 1 &&
+    wsTotals.files === 15 &&
+    wsTotals.nodes === 25 &&
+    wsTotals.edges === 37 &&
+    wsTotals.communities === 5 &&
+    wsTotals.processes === 7 &&
+    wsTotals.embeddings === 3,
+  JSON.stringify(wsTotals),
+);
+const wsView = render(I.WorkspaceOverview, {
+  projects: wsProjects,
+  activePath: '/workspace/a',
+  onSelectProject: () => {},
+});
+check(
+  'the workspace card names the aggregate and its projects',
+  wsView.text.includes('工作区概览') &&
+    wsView.text.includes('2 个已索引') &&
+    wsView.text.includes('1 个未索引') &&
+    wsView.text.includes('合计 15 个文件') &&
+    wsView.text.includes('a') &&
+    wsView.text.includes('b'),
+  wsView.text,
+);
+const wsSingle = render(I.WorkspaceOverview, {
+  projects: [wsProject({})],
+  activePath: '/workspace/a',
+});
+check('a single-project workspace renders no aggregate card', !wsSingle.text.includes('工作区概览'), wsSingle.text);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

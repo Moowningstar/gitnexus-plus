@@ -32,9 +32,9 @@ import { loadAdapter } from './search.js';
 import type { ShellLike } from './analyze.js';
 
 /** The projections a caller may ask for. Anything else is refused, not guessed. */
-export type GraphView = 'communities' | 'community';
+export type GraphView = 'communities' | 'community' | 'symbols';
 
-export const GRAPH_VIEWS: readonly GraphView[] = ['communities', 'community'];
+export const GRAPH_VIEWS: readonly GraphView[] = ['communities', 'community', 'symbols'];
 
 /** A node as the view needs it — enough to draw it, label it, and open its file. */
 export interface GraphNode {
@@ -47,6 +47,14 @@ export interface GraphNode {
   startLine: number | null;
   /** Community nodes only: how many symbols it holds. */
   symbolCount?: number;
+  /**
+   * Community nodes only: the file with the most member symbols.
+   *
+   * GitNexus's community label is a folder name, so it repeats (`Gitnexus` ×18). A
+   * representative file is what makes two communities with the same label readable
+   * without opening each one.
+   */
+  representativeFile?: string | null;
 }
 
 export interface GraphEdge {
@@ -135,7 +143,7 @@ export function sanitizeGraphId(raw: unknown): string | null {
 
 /** Whether a value names a projection this module implements. */
 export function isGraphView(value: unknown): value is GraphView {
-  return value === 'communities' || value === 'community';
+  return value === 'communities' || value === 'community' || value === 'symbols';
 }
 
 function clampBudget(value: number | undefined, fallback: number, max: number): number {
@@ -256,6 +264,29 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
       });
     }
 
+    // The label alone repeats across sibling folders. Ask which member file each
+    // community draws the most symbols from; the client prints that next to the label.
+    // This is one extra read per overview, bounded by the member count, not a drill-down
+    // per community.
+    const representativeRows = rowsOf(
+      await runQuery(
+        `MATCH (s)-[:CodeRelation {type:'MEMBER_OF'}]->(c:Community)
+         RETURN c.id AS communityId, s.filePath AS filePath, count(*) AS weight
+         ORDER BY weight DESC
+         LIMIT 2000`,
+      ),
+    );
+    const representativeByCommunity = new Map<string, string>();
+    for (const row of representativeRows) {
+      const communityId = asString(row.communityId);
+      const filePath = typeof row.filePath === 'string' ? row.filePath : '';
+      if (communityId === '' || filePath === '' || representativeByCommunity.has(communityId)) continue;
+      representativeByCommunity.set(communityId, filePath);
+    }
+    for (const node of nodes) {
+      node.representativeFile = representativeByCommunity.get(node.id) ?? null;
+    }
+
     // Cross-community edges are aggregated from the member-to-member relations: one
     // edge per pair of communities per relation type. Two directions are collapsed
     // (`ca.id < cb.id`) so the view does not draw every link twice.
@@ -281,7 +312,7 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
         weight: typeof row.weight === 'number' ? row.weight : 1,
       });
     }
-  } else {
+  } else if (view === 'community') {
     const scopeLiteral = scope as string;
     const memberRows = rowsOf(
       await runQuery(
@@ -336,6 +367,57 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
     if (total === 0 && nodes.length === 0) {
       notes.push('该社区没有成员符号；索引可能是旧版本，或社区已被重新划分。');
     }
+  } else {
+    // All-symbol view: bounded and honest about the truncation. Communities answer
+    // "where is the weight"; this view answers "can I see a symbol outside my community".
+    const symbolRows = rowsOf(
+      await runQuery(
+        `MATCH (s)
+         WHERE s.filePath IS NOT NULL
+         RETURN s.id AS id, label(s) AS kind, s.name AS name,
+                s.filePath AS filePath, s.startLine AS startLine
+         ORDER BY filePath, startLine
+         LIMIT ${nodeBudget}`,
+      ),
+    );
+    total = countOf(
+      await runQuery('MATCH (s) WHERE s.filePath IS NOT NULL RETURN count(*) AS total'),
+    );
+    for (const row of symbolRows) {
+      const id = asString(row.id);
+      if (id === '') continue;
+      const { name, filePath, startLine, kind } = row;
+      nodes.push({
+        id,
+        kind: asString(kind),
+        name: asString(name) === '' ? id : asString(name),
+        filePath: typeof filePath === 'string' && filePath !== '' ? filePath : null,
+        startLine: toLine(startLine),
+      });
+    }
+
+    const edgeRows = rowsOf(
+      await runQuery(
+        `MATCH (a)-[r:CodeRelation]->(b)
+         WHERE a.filePath IS NOT NULL AND b.filePath IS NOT NULL
+           AND r.type IN ['CALLS','USES','ACCESSES','IMPORTS','IMPLEMENTS','EXTENDS',
+                          'HAS_METHOD','HAS_PROPERTY','DEFINES']
+         RETURN a.id AS source, b.id AS target, r.type AS type, count(*) AS weight
+         ORDER BY weight DESC
+         LIMIT ${edgeBudget}`,
+      ),
+    );
+    for (const row of edgeRows) {
+      const source = asString(row.source);
+      const target = asString(row.target);
+      if (source === '' || target === '') continue;
+      edges.push({
+        source,
+        target,
+        type: asString(row.type),
+        weight: typeof row.weight === 'number' ? row.weight : 1,
+      });
+    }
   }
 
   // An edge whose endpoint fell outside the node budget cannot be drawn. Dropping it
@@ -353,7 +435,9 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
     notes.push(
       view === 'communities'
         ? `共 ${total} 个社区，显示符号数最多的 ${nodes.length} 个`
-        : `该社区共 ${total} 个符号，显示前 ${nodes.length} 个`,
+        : view === 'symbols'
+          ? `共 ${total} 个符号，按文件顺序显示前 ${nodes.length} 个；可用社区视图看全貌`
+          : `该社区共 ${total} 个符号，显示前 ${nodes.length} 个`,
     );
   }
   if (edges.length >= edgeBudget) {

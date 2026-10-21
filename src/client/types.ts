@@ -94,6 +94,14 @@ export interface ClientProvenance {
   runnerCliVersion?: string | null;
 }
 
+/** Whether the installed GitNexus CLI matches the one that wrote the index. */
+export interface ClientCompatibility {
+  indexedBy?: string | null;
+  installed?: string | null;
+  status?: 'match' | 'mismatch' | 'unknown' | string;
+  message?: string;
+}
+
 /** One oversized file the size cap dropped. */
 export interface ClientLargeFile {
   path: string;
@@ -229,6 +237,7 @@ export interface ClientReport {
   capabilities?: Record<string, ClientCapability>;
   staleness?: ClientStaleness;
   provenance?: ClientProvenance | null;
+  compatibility?: ClientCompatibility | null;
   graphQuality?: ClientGraphQuality | null;
   warnings?: ClientWarning[];
   languages?: ClientLanguages | null;
@@ -368,6 +377,12 @@ export interface ClientDelta {
   certain?: boolean;
   truncated: boolean;
   notes: string[];
+  /** Absent on hosts before the advice field; the UI falls back to needsRefresh. */
+  advice?: {
+    tier: 'none' | 'incremental' | 'reanalyze' | 'rebuild' | 'init' | 'unknown';
+    label: string;
+    reason: string;
+  } | null;
   durationMs: number;
   readAt: string;
 }
@@ -381,6 +396,8 @@ export interface ClientGraphNode {
   startLine: number | null;
   /** Community nodes only. */
   symbolCount?: number;
+  /** Community nodes only: the member file with the most symbols, when the host sends it. */
+  representativeFile?: string | null;
 }
 
 export interface ClientGraphEdge {
@@ -397,7 +414,7 @@ export interface ClientGraphEdge {
  * say how much it left out is a view that can be mistaken for the whole graph.
  */
 export interface ClientGraphProjection {
-  view: 'communities' | 'community';
+  view: 'communities' | 'community' | 'symbols';
   scope: string | null;
   nodes: ClientGraphNode[];
   edges: ClientGraphEdge[];
@@ -425,6 +442,7 @@ export interface GraphViewState {
   /** The community being drilled into, or null for the overview. */
   scope: string | null;
   onOpenCommunity: (id: string) => void;
+  onOpenSymbols: () => void;
   onBack: () => void;
   onReload: () => void;
   onOpenSymbol: (node: ClientGraphNode) => void;

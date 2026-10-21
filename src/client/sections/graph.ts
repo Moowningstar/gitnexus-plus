@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Button, HAIRLINE, MUTED, SOFT_BG, Tag, h } from '../primitives';
 import { ClientGraphEdge, ClientGraphNode, GraphViewState } from '../types';
+import { Graph3DView } from './graph3d';
 
 /**
  * The graph card: a bounded, interactive view of the index.
@@ -196,7 +197,7 @@ function fitTransform(points: Map<string, Point>): { x: number; y: number; k: nu
 }
 
 export function GraphSection({ state }: { state: GraphViewState }) {
-  const { projection, loading, error, routeState, scope, onOpenCommunity, onBack, onReload, onOpenSymbol } = state;
+  const { projection, loading, error, routeState, scope, onOpenCommunity, onOpenSymbols, onBack, onReload, onOpenSymbol } = state;
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const transform = React.useRef<{ x: number; y: number; k: number }>({ x: 0, y: 0, k: 1 });
   const drag = React.useRef<{ x: number; y: number; moved: boolean; active: boolean }>({
@@ -451,7 +452,7 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       'div',
       { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
       scope === null
-        ? h('span', { style: { fontWeight: 600 } }, '社区总览')
+        ? h('span', { style: { fontWeight: 600 } }, projection?.view === 'symbols' ? '符号全图' : '社区总览')
         : h('span', { style: { fontWeight: 600 } }, `社区 ${scope}`),
       projection === null
         ? null
@@ -464,6 +465,17 @@ export function GraphSection({ state }: { state: GraphViewState }) {
           ),
       projection?.truncated === true ? h(Tag, { tone: 'outline' }, '已截断') : null,
       h('span', { style: { flex: 1 } }),
+      projection === null
+        ? null
+        : h(
+            Button,
+            {
+              variant: 'ghost',
+              onClick: projection.view === 'symbols' ? onBack : onOpenSymbols,
+              disabled: loading,
+            },
+            projection.view === 'symbols' ? '社区视图' : '符号视图',
+          ),
       scope === null ? null : h(Button, { variant: 'ghost', onClick: onBack }, '← 全部社区'),
       h(Button, { variant: 'ghost', onClick: onReload, disabled: loading }, loading ? '读取中…' : '重读图'),
     ),
@@ -472,6 +484,11 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       ? null
       : h('div', { style: { ...MUTED, color: 'var(--dsw-alias-state-error-primary, inherit)' } }, error),
 
+    projection?.view === 'communities'
+      ? h(Graph3DView, { projection, onOpenCommunity })
+      : h(
+          React.Fragment,
+          null,
     h(
       'div',
       {
@@ -592,8 +609,11 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       'div',
       { style: MUTED },
       scope === null
-        ? '点一个社区看它的成员符号；滚轮缩放、拖动平移。节点数与边数由宿主限制，超出部分会明确标注。'
+        ? projection?.view === 'symbols'
+          ? '点一个符号会在文件查看器中打开它；这是全仓库符号的截断视图，社区视图更适合看整体结构。'
+          : '点一个社区看它的成员符号；滚轮缩放、拖动平移。节点数与边数由宿主限制，超出部分会明确标注。'
         : '点一个符号会在文件查看器中打开它并定位到行；滚轮缩放、拖动平移。',
     ),
+      ),
   );
 }

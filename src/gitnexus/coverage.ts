@@ -169,6 +169,58 @@ export interface ProvenanceInfo {
   runnerCliVersion: string | null;
 }
 
+/** How the CLI that is installed relates to the CLI that wrote the index. */
+export type VersionCompatibility = 'match' | 'mismatch' | 'unknown';
+
+export interface CompatibilityInfo {
+  /** `runnerIdentity.cliVersion` recorded in the index, when it has one. */
+  indexedBy: string | null;
+  /** The GitNexus CLI the plugin can run now. */
+  installed: string | null;
+  status: VersionCompatibility;
+  message: string;
+}
+
+/**
+ * Compare the version that built the index with the version installed now.
+ *
+ * String equality, not semver: the useful signal is "these are not the same
+ * build", and a range check would call 1.6.12 and 1.6.6 compatible while their
+ * storage versions can differ. If either side is missing the answer is
+ * `unknown`, never `match` — an absent record is not evidence of agreement.
+ */
+export function readCompatibility(indexedBy: string | null, installed: string | null): CompatibilityInfo {
+  const normalize = (value: string | null): string | null => {
+    if (value === null) return null;
+    const trimmed = value.trim();
+    return trimmed === '' ? null : trimmed;
+  };
+  const index = normalize(indexedBy);
+  const cli = normalize(installed);
+  if (index === null || cli === null) {
+    return {
+      indexedBy: index,
+      installed: cli,
+      status: 'unknown',
+      message: `无法确认索引与当前 CLI 的版本关系（索引记录 ${index ?? '缺失'}，当前 ${cli ?? '缺失'}）。`,
+    };
+  }
+  if (index === cli) {
+    return {
+      indexedBy: index,
+      installed: cli,
+      status: 'match',
+      message: `索引与当前 CLI 均为 GitNexus ${cli}。`,
+    };
+  }
+  return {
+    indexedBy: index,
+    installed: cli,
+    status: 'mismatch',
+    message: `索引由 GitNexus ${index} 构建，当前 CLI 是 ${cli}；查询/刷新行为可能不一致。`,
+  };
+}
+
 /** Where the effective size cap came from — re-exported from `scan.ts`. */
 
 export interface CapInfo {
@@ -349,6 +401,7 @@ export interface CoverageReport {
   capabilities: Record<string, CapabilityEntry>;
   staleness: StalenessInfo;
   provenance: ProvenanceInfo | null;
+  compatibility: CompatibilityInfo;
   graphQuality: GraphQuality | null;
   warnings: ReportWarning[];
   languages: LanguageBreakdown | null;
@@ -802,6 +855,16 @@ export async function analyzeCoverage(
     });
   }
 
+  const compatibility = readCompatibility(meta?.runnerIdentity?.cliVersion ?? null, scan.gitnexusVersion);
+  if (compatibility.status === 'mismatch') {
+    warnings.push({
+      level: 'warn',
+      code: 'version-mismatch',
+      message: compatibility.message,
+      evidence: { indexedBy: compatibility.indexedBy, installed: compatibility.installed },
+    });
+  }
+
   const languagesReport =
     options.includeLanguages === false
       ? null
@@ -912,6 +975,7 @@ export async function analyzeCoverage(
         : 0,
       runnerCliVersion: meta.runnerIdentity?.cliVersion ?? null,
     },
+    compatibility,
     // Graph quality: receiver members the resolver could not type. GitNexus's own
     // `impact`/`context` read this to publish an `exact` vs `lower-bound` verdict,
     // so it is the honest caveat to put in front of a reader.
