@@ -1108,6 +1108,9 @@ async function searchTests() {
     check('real search runs against the indexed repository (skipped)', true, 'no .gitnexus/lbug on this machine');
   }
 
+  // The helper boundary and source fallback need a real index; a CI checkout has
+  // none, so keep the validation-only checks below and skip the indexed ones.
+  if (hasStore) {
   let captured = null;
   const stubShell = {
     resolve(request) {
@@ -1239,6 +1242,7 @@ async function searchTests() {
     fallback.mode === 'text' && fallback.results.length > 0 && fallback.warning !== null,
     JSON.stringify(fallback).slice(0, 400),
   );
+  }
 
   const empty = await searchSymbols(repo, '   ').catch((error) => error);
   check('an empty query is rejected', empty instanceof SearchError && empty.code === 'invalid-query', String(empty));
