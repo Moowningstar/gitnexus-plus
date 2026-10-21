@@ -616,8 +616,7 @@ export async function analyzeCoverage(
   for (let index = 0; index < scan.large.length; index += 1) {
     const file = scan.large[index];
     const lang = classifyFile(file.path, detector);
-    /** @type {FileShape | null} */
-    let minified = null;
+    let minified: FileShape | null = null;
     if (minifiedProbes < minifiedBudget) {
       minifiedProbes += 1;
       minified = await judgeMinified(path.join(absRepo, file.path), file.size);

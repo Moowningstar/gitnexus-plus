@@ -161,12 +161,9 @@ export function passWriteGuard(req: IncomingMessage, res: ServerResponse): boole
 /**
  * Read a JSON body with a hard byte cap.
  *
- * Bounded because the cap is the only thing standing between a malformed client
- * and unbounded host memory — and this plugin's bodies are at most a few fields.
- *
- * @param {import('node:http').IncomingMessage} req
- * @param {number} [maxBytes]
- * @returns {Promise<Record<string, unknown>>}
+ * The body is bounded by `maxBytes` (8 KiB by default). That cap is the only thing
+ * standing between a malformed client and unbounded host memory — and this plugin's
+ * bodies are at most a few fields.
  */
 export async function readJsonBody(req: IncomingMessage, maxBytes = 8 * 1024): Promise<unknown> {
   return new Promise((resolve, reject) => {
