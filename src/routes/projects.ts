@@ -1,11 +1,12 @@
 /**
- * `GET /api/gitnexus/projects?root=<workspace>` — which indexes live under a workspace.
+ * `GET /api/gitnexus/projects?root=<workspace>` — which projects live under a workspace.
  *
  * The panel's workspace is often a container rather than one project. This route is the
- * read-only resolve step: it reports every GitNexus index at or below the workspace,
- * with enough metadata for a switcher, and never describes an arbitrary directory
- * outside the one the caller named. The client chooses one and asks the existing
- * coverage/delta/graph/search routes for that exact path.
+ * read-only resolve step: it reports the workspace itself, every GitNexus index at or
+ * below it, and git repositories that have no index yet, with enough metadata for a
+ * switcher. It never describes an arbitrary directory outside the one the caller named.
+ * The client chooses one and asks the existing coverage/delta/graph/search routes for
+ * that exact path.
  *
  * Keeping resolution out of `coverage` matters: a project switch must not re-read the
  * project list, a refresh must not silently change which project is described, and an

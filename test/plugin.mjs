@@ -262,16 +262,19 @@ section('analyze route: force is explicit');
       },
     };
     await analyzeRoute.handler(req, res);
-    // The handler is wrapped in a promise-guard; the response is written synchronously
-    // by this route, so the body is final by the next turn.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The POST path validates the target with an async stat; wait for the response
+    // rather than assuming it was synchronous.
+    for (let attempt = 0; attempt < 20 && body === ''; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     return JSON.parse(body);
   };
 
-  const plain = await call('/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe'));
+  const target = path.resolve('.');
+  const plain = await call('/api/gitnexus/analyze?repo=' + encodeURIComponent(target));
   check('a POST without force asks for an incremental run', plain.run?.force === false, JSON.stringify(plain.run));
   const forced = await call(
-    '/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe') + '&force=1',
+    '/api/gitnexus/analyze?repo=' + encodeURIComponent(target) + '&force=1',
   );
   check('force=1 reaches the runner', forced.run?.force === true, JSON.stringify(forced.run));
   check('the forced run names --force in its command', String(forced.run?.command ?? '').includes('--force'), forced.run?.command);
@@ -279,7 +282,7 @@ section('analyze route: force is explicit');
   // The repair mode is a different write, and it must not be confused with either of
   // the other two: not forced, and never asking to skip the indexes it repairs.
   const repair = await call(
-    '/api/gitnexus/analyze?repo=' + encodeURIComponent('D:\\Project\\force-probe') + '&mode=repair-fts',
+    '/api/gitnexus/analyze?repo=' + encodeURIComponent(target) + '&mode=repair-fts',
   );
   check('mode=repair-fts reaches the runner', repair.run?.repairFts === true, JSON.stringify(repair.run));
   check('a repair run is not a forced rebuild', repair.run?.force === false, JSON.stringify(repair.run));
@@ -288,6 +291,23 @@ section('analyze route: force is explicit');
     String(repair.run?.command ?? '').includes('--repair-fts') &&
       !String(repair.run?.command ?? '').includes('--skip-fts'),
     repair.run?.command,
+  );
+
+  // The mutating route must not hand a missing path or a whole drive to analyze.
+  const missing = await call(
+    '/api/gitnexus/analyze?repo=' + encodeURIComponent(path.resolve('test/.fixtures/analyze-missing-target')),
+  );
+  check(
+    'a missing analyze target is refused',
+    missing.code === 'not-a-directory',
+    JSON.stringify(missing),
+  );
+  const driveRoot = path.parse(target).root;
+  const atRoot = await call('/api/gitnexus/analyze?repo=' + encodeURIComponent(driveRoot));
+  check(
+    'a filesystem root is refused',
+    atRoot.code === 'not-a-directory',
+    JSON.stringify(atRoot),
   );
 }
 

@@ -15,13 +15,15 @@
  *
  * WHAT THIS ROUTE DOES NOT DO
  * ---------------------------
- * It does not escalate. The runner never sets `sandboxPolicy`, so the process is
- * confined exactly as the deployment confines every other command. A refusal comes
- * back as `denied` and is not retried wider — see `gitnexus/analyze.ts`, which is
- * where that decision lives and is tested.
+ * It does not escalate. The runner never chooses a mode or widens one; it only
+ * forwards the policy the host resolved (rooted at the repository), so an agentless
+ * route does not fall back to the DSH application directory. A refusal comes back as
+ * `denied` and is not retried wider — see `gitnexus/analyze.ts`, which is where that
+ * decision lives and is tested.
  */
 
 import path from 'node:path';
+import { isExistingDirectory, isFilesystemRoot } from '../gitnexus/index-meta.js';
 import { guardHandler, passGuard, passWriteGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { AnalyzeStatus } from '../gitnexus/analyze.js';
@@ -65,6 +67,17 @@ export function mountAnalyzeRoute(webServer: WebServerService, deps: AnalyzeRout
       // cross-origin page can reach loopback; `Origin` is what separates it from the
       // desktop shell's own fetch.
       if (!passWriteGuard(req, res)) return;
+      // Indexing a missing path or a whole filesystem root is never what the panel
+      // means, and the runner would hand `C:\` to `analyze --skip-git` before it
+      // failed. Validate the same boundary the read-only routes use.
+      if (!(await isExistingDirectory(absRepo)) || isFilesystemRoot(absRepo)) {
+        sendJson(res, 404, {
+          ok: false,
+          code: 'not-a-directory',
+          message: `目录不存在、不是文件夹，或是文件系统根目录：${absRepo}`,
+        });
+        return;
+      }
       // `force=1` is the full rebuild. It is an explicit query flag rather than a
       // body field because the panel's only other POST parameter is the repo, and a
       // flag in the URL is visible in the run's own command and in a log.

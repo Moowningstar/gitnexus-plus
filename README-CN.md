@@ -78,7 +78,7 @@ DSH 内暴露：
 
 - 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }`
 - 工具 `gitnexus_delta`：`{ repo }` —— 这次刷新会不会改变索引
-- 路由 `GET /api/gitnexus/projects?root=<workspace>`：列出工作区下的索引候选
+- 路由 `GET /api/gitnexus/projects?root=<workspace>`：列出工作区下的项目（已索引与未索引 git）
 - 路由 `GET /api/gitnexus/coverage?repo=<project>`
 - 路由 `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - 路由 `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7`：单个文件的

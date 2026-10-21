@@ -127,7 +127,7 @@ Inside DSH:
 
 - tool `gitnexus_coverage`: `{ repo, includeLanguages? }`
 - tool `gitnexus_delta`: `{ repo }` — would a refresh change anything?
-- route `GET /api/gitnexus/projects?root=<workspace>` — the workspace's index candidates
+- route `GET /api/gitnexus/projects?root=<workspace>` — the workspace's projects (indexed and unindexed git)
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's

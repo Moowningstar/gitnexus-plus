@@ -429,7 +429,7 @@ export function CoverageView({
               : activeDiffers
                 ? `工作区：${workspacePath ?? ''} · 当前 ${projectPath ?? ''}`
                 : null,
-            projectsTruncated === true ? '项目搜索达到上限，可能还有未列出的索引。' : null,
+            projectsTruncated === true ? '项目搜索达到上限，可能还有未列出的项目。' : null,
             projectsError !== null && projectsError !== undefined
               ? `项目列表读取失败：${projectsError}`
               : null,
@@ -947,6 +947,8 @@ export function CoveragePanel(props: SlotProps) {
   const report = reportVisible ? rawReport : null;
   const maintenance = reportVisible ? rawMaintenance : null;
   const error = reportVisible ? rawError : null;
+  /** The graph is only meaningful for an index; a scan-only project has no projection. */
+  const graphAvailable = report?.repo?.indexed === true;
   const [busy, setBusy] = React.useState(false);
   const [progress, setProgress] = React.useState<LoadingProgress | null>(null);
   const [reloadToken, setReloadToken] = React.useState(0);
@@ -976,6 +978,8 @@ export function CoveragePanel(props: SlotProps) {
   // "not run yet" rather than as a failure.
   const [run, setRun] = React.useState<ClientAnalyzeRun | null>(null);
   const [runError, setRunError] = React.useState<string | null>(null);
+  /** Which project the run status belongs to; a switch must not show it elsewhere. */
+  const [runProject, setRunProject] = React.useState<string | null>(null);
   /** The Tier 0 verdict, or null while unknown (no route on this host, or not read yet). */
   const [delta, setDelta] = React.useState<ClientDelta | null>(null);
   const [deltaError, setDeltaError] = React.useState<string | null>(null);
@@ -986,6 +990,8 @@ export function CoveragePanel(props: SlotProps) {
    * gate and no explanation. Same lesson as the graph card: absent is a state to name.
    */
   const [deltaRoute, setDeltaRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
+  /** Which project the current gate reading belongs to, so a switch can clear it. */
+  const deltaRepoRef = React.useRef<string | null>(null);
   /** The bounded graph projection, its scope, and the load state around it. */
   const [graphProjection, setGraphProjection] = React.useState<ClientGraphProjection | null>(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
@@ -1000,7 +1006,9 @@ export function CoveragePanel(props: SlotProps) {
   const [graphRoute, setGraphRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   const [graphScope, setGraphScope] = React.useState<string | null>(null);
   const [graphReload, setGraphReload] = React.useState(0);
-  const running = run?.state === 'running';
+  /** Which project the current projection belongs to, so a switch can clear it. */
+  const graphRepoRef = React.useRef<string | null>(null);
+  const running = run?.state === 'running' && runProject === projectPath;
 
   /**
    * Poll while a run is in flight.
@@ -1020,6 +1028,7 @@ export function CoveragePanel(props: SlotProps) {
         const next: ClientAnalyzeRun | null = body.run ?? null;
         // Polls fire every second; only a changed verdict should re-render the report.
         setRun((previous) => (sameRun(previous, next) ? previous : next));
+        setRunProject(projectPath);
         // A finished run changed the index, so the report on screen is now a reading of
         // the previous one. This is the whole reason the run was started.
         if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
@@ -1039,6 +1048,7 @@ export function CoveragePanel(props: SlotProps) {
   const startRun = React.useCallback(async (mode: MaintenanceStartMode = 'refresh'): Promise<void> => {
     if (projectPath === null) return;
     setRunError(null);
+    setRunProject(projectPath);
     try {
       // One request, three modes. Sending them as flags rather than a body keeps the
       // operation visible in the URL the host logs alongside the command it ran.
@@ -1051,13 +1061,15 @@ export function CoveragePanel(props: SlotProps) {
       const body = await res.json().catch(() => null);
       if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
       setRun(body.run ?? null);
-      } catch (cause) {
+      setRunProject(projectPath);
+    } catch (cause) {
       setRunError(String((cause as Error)?.message ?? cause));
     }
   }, [projectPath]);
 
   const cancelRun = React.useCallback(async (): Promise<void> => {
     if (projectPath === null) return;
+    setRunProject(projectPath);
     try {
       const res = await fetch(routeUrl(`/api/gitnexus/analyze?repo=${encodeURIComponent(projectPath)}`), {
         method: 'DELETE',
@@ -1348,9 +1360,11 @@ export function CoveragePanel(props: SlotProps) {
         const remembered = readRememberedProject(workspacePath);
         const next = chooseProject(list.projects, workspacePath, remembered);
         setActiveProject(next);
-        if (remembered !== null && next !== remembered) {
+        if (remembered !== null && next !== remembered && list.truncated !== true) {
           // The remembered project disappeared; persist the fallback so the next open
-          // does not look for it again.
+          // does not look for it again. A truncated walk never proves it disappeared:
+          // it may simply not have reached it before the bound, so keep the preference
+          // and let a later complete resolve restore it.
           rememberProject(workspacePath, next);
         }
         setLoadToken((n) => n + 1);
@@ -1379,6 +1393,15 @@ export function CoveragePanel(props: SlotProps) {
     // active project while the list is still being decided.
     if (projectListFor !== workspacePath || resolving) return undefined;
     const controller = new AbortController();
+    // A project switch must not leave the previous report, maintenance payload or
+    // read time under the new path. A refresh of the same project keeps them readable
+    // while the new reading is fetched.
+    if (reportProject !== activeProject) {
+      setRawReport(null);
+      setRawMaintenance(null);
+      setRawError(null);
+      setReadAt(null);
+    }
     setBusy(true);
     setRawError(null);
     setReportProject(activeProject);
@@ -1505,10 +1528,15 @@ export function CoveragePanel(props: SlotProps) {
    * changed; there is no polling here for the same reason the run poll is conditional.
    */
   React.useEffect(() => {
-    if (projectPath === null) {
+    // A gate read for the previous project must not be shown under the new one. A
+    // refresh of the same project keeps the readable verdict while it is re-read.
+    if (deltaRepoRef.current !== projectPath) {
+      deltaRepoRef.current = projectPath;
       setDelta(null);
       setDeltaError(null);
       setDeltaRoute('unknown');
+    }
+    if (projectPath === null) {
       return undefined;
     }
     const controller = new AbortController();
@@ -1546,12 +1574,6 @@ export function CoveragePanel(props: SlotProps) {
     return () => controller.abort();
   }, [projectPath, reloadToken]);
 
-  // A different project means the previous drill-down is another repository's
-  // community: keeping the scope would ask the new project for an id that cannot exist.
-  React.useEffect(() => {
-    setGraphScope(null);
-  }, [projectPath]);
-
   /**
    * Read the graph projection for the current scope.
    *
@@ -1564,14 +1586,40 @@ export function CoveragePanel(props: SlotProps) {
    */
   React.useEffect(() => {
     if (projectPath === null) {
+      graphRepoRef.current = null;
       setGraphProjection(null);
       setGraphError(null);
+      setGraphLoading(false);
+      setGraphScope(null);
+      return undefined;
+    }
+    const projectChanged = graphRepoRef.current !== projectPath;
+    if (projectChanged) {
+      graphRepoRef.current = projectPath;
+      setGraphProjection(null);
+      setGraphError(null);
+      // The previous scope is another repository's community. Clearing it makes the
+      // next render fetch the overview instead of asking the new project for an id it
+      // cannot have.
+      setGraphScope(null);
+    }
+    if (!graphAvailable) {
+      setGraphProjection(null);
+      setGraphError(null);
+      setGraphLoading(false);
+      return undefined;
+    }
+    if (projectChanged && graphScope !== null) {
+      // The setGraphScope(null) above re-runs this effect; do not also fire a request
+      // for the old scope against the new project.
       return undefined;
     }
     const controller = new AbortController();
     setGraphLoading(true);
-    const view = graphScope === null ? 'communities' : 'community';
-    const suffix = graphScope === null ? '' : `&id=${encodeURIComponent(graphScope)}`;
+    setGraphError(null);
+    const effectiveScope = projectChanged ? null : graphScope;
+    const view = effectiveScope === null ? 'communities' : 'community';
+    const suffix = effectiveScope === null ? '' : `&id=${encodeURIComponent(effectiveScope)}`;
     void (async () => {
       try {
         const res = await fetch(
@@ -1609,7 +1657,7 @@ export function CoveragePanel(props: SlotProps) {
       }
     })();
     return () => controller.abort();
-  }, [projectPath, reloadToken, graphScope, graphReload]);
+  }, [projectPath, reloadToken, graphScope, graphReload, graphAvailable]);
 
   /**
    * Open a symbol node, with the same fallbacks the search hits use.
@@ -1661,6 +1709,9 @@ export function CoveragePanel(props: SlotProps) {
     [workspacePath],
   );
 
+  const visibleRun = runProject === projectPath ? run : null;
+  const visibleRunError = runProject === projectPath ? runError : null;
+
   return h(CoverageView, {
     report,
     maintenance,
@@ -1676,8 +1727,8 @@ export function CoveragePanel(props: SlotProps) {
     progress: resolving ? { percent: 0, label: '正在查找项目索引…' } : progress,
     error,
     readAt,
-    run,
-    runError,
+    run: visibleRun,
+    runError: visibleRunError,
     delta,
     deltaError,
     deltaRoute,
