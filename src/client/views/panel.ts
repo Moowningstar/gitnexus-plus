@@ -64,10 +64,10 @@ import {
 /**
  * Pick the project a workspace opens on.
  *
- * An explicit remembered choice wins while it still exists; then the workspace's own
- * index; then the first candidate (the host ranks by distance, completeness and
- * recency). Never invents a path: a workspace with no indexes opens on itself, which
- * is the scan-only state.
+ * An explicit remembered choice wins while it still exists. Otherwise an indexed
+ * project is preferred over an unindexed git repository, and the workspace's own index
+ * wins over a descendant. A workspace with no indexes opens on the workspace itself —
+ * the scan-only state, with the unindexed git projects available in the switcher.
  */
 export function chooseProject(
   projects: ClientProject[],
@@ -78,7 +78,13 @@ export function chooseProject(
     const hit = projects.find((project) => project.path === remembered);
     if (hit !== undefined) return hit.path;
   }
-  const self = projects.find((project) => project.path === workspace);
+  const selfIndex = projects.find(
+    (project) => project.direction === 'self' && project.kind === 'index',
+  );
+  if (selfIndex !== undefined) return selfIndex.path;
+  const indexed = projects.find((project) => project.kind === 'index');
+  if (indexed !== undefined) return indexed.path;
+  const self = projects.find((project) => project.direction === 'self');
   if (self !== undefined) return self.path;
   return projects[0]?.path ?? workspace;
 }
@@ -318,6 +324,17 @@ export function CoverageView({
   // The workspace and the active project are different facts when the index lives in a
   // subdirectory. The path position becomes a switcher when there is more than one.
   const projectChoices = projects ?? [];
+  const indexedProjectCount = projectChoices.filter((project) => project.kind === 'index').length;
+  const gitProjectCount = projectChoices.filter((project) => project.kind === 'git').length;
+  const projectLabel = (project: ClientProject): string => {
+    const base =
+      project.relPath === ''
+        ? `${project.name}（本工作区）`
+        : project.relPath === project.name
+          ? project.name
+          : `${project.name} — ${project.relPath}`;
+    return project.kind === 'git' ? `${base}（未索引）` : base;
+  };
   const activeInChoices = projectChoices.some((project) => project.path === projectPath);
   const showSwitcher =
     projectChoices.length > 1 &&
@@ -366,11 +383,7 @@ export function CoverageView({
                   h(
                     'option',
                     { key: project.path, value: project.path },
-                    project.relPath === ''
-                      ? `${project.name}（本工作区）`
-                      : project.relPath === project.name
-                        ? project.name
-                        : `${project.name} — ${project.relPath}`,
+                    projectLabel(project),
                   ),
                 ),
               ),
@@ -406,9 +419,13 @@ export function CoverageView({
           { style: { ...MUTED, fontSize: '11px', minWidth: 0, overflowWrap: 'anywhere' } },
           [
             showSwitcher
-              ? `工作区：${workspacePath ?? ''} · ${projectChoices.length} 个索引 · 当前 ${
-                  projectPath ?? ''
-                }`
+              ? `工作区：${workspacePath ?? ''} · ${projectChoices.length} 个项目` +
+                (indexedProjectCount > 0
+                  ? `（${indexedProjectCount} 个已索引）`
+                  : gitProjectCount > 0
+                    ? `（${gitProjectCount} 个 git 项目未索引）`
+                    : '') +
+                ` · 当前 ${projectPath ?? ''}`
               : activeDiffers
                 ? `工作区：${workspacePath ?? ''} · 当前 ${projectPath ?? ''}`
                 : null,
@@ -542,16 +559,17 @@ export function CoverageView({
               ? '该目录不是 git 仓库，也没有 GitNexus 索引。下面是工作区扫描结果；仍可建立索引（--skip-git），但没有提交基线与增量刷新，也不会有 Git 活动。'
               : '该项目还没有 GitNexus 索引。下面是工作区扫描结果；初始化后可看到图谱、查询能力与 Git 活动对账。',
           ),
-          Array.isArray(projects) && projects.length === 0
+          Array.isArray(projects)
             ? h(
                 'span',
                 { style: { ...MUTED, fontSize: '11px' } },
                 projectsError !== null && projectsError !== undefined
                   ? `项目列表读取失败：${projectsError}；已按工作区描述。`
-                  : `已在 ${projectsVisited ?? 0} 个目录中查找 GitNexus 索引` +
-                    (projectsTruncated === true
-                      ? '，搜索达到上限，可能还有未检查的子目录。'
-                      : '，没有找到。'),
+                  : indexedProjectCount === 0 && gitProjectCount > 0
+                    ? `已在 ${projectsVisited ?? 0} 个目录中查找；工作区内有 ${gitProjectCount} 个 git 项目尚未建索引，可在标题栏切换后初始化。`
+                    : indexedProjectCount === 0
+                      ? `已在 ${projectsVisited ?? 0} 个目录中查找，没有找到 GitNexus 索引或 git 仓库。`
+                      : null,
               )
             : null,
         ),

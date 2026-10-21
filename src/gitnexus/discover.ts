@@ -27,14 +27,22 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { readIndexMeta } from './index-meta.js';
 
-/** One indexed project found under the workspace. */
+/** One project found under the workspace. */
 export interface ProjectCandidate {
-  /** Absolute directory carrying `.gitnexus`. */
+  /** Absolute directory carrying `.gitnexus` or `.git`. */
   path: string;
   /** Basename, for a compact switcher label. */
   name: string;
   /** Path relative to the workspace; empty for the workspace itself. */
   relPath: string;
+  /**
+   * `index` — a readable GitNexus manifest;
+   * `git` — a git repository without an index;
+   * `workspace` — the workspace itself, with neither.
+   */
+  kind: 'index' | 'git' | 'workspace';
+  /** Whether the directory carries a `.git` marker. */
+  hasGit: boolean;
   /** Whether this is the workspace itself or a descendant. */
   direction: 'self' | 'descendant';
   /** Distance below the workspace; 0 for the workspace itself. */
@@ -125,14 +133,17 @@ function hasGraphStore(dir: string): boolean {
 }
 
 /**
- * Rank candidates for a default selection.
+ * Rank candidates for display and for a default selection.
  *
- * The workspace itself wins; then the nearest descendant; a complete index beats one
- * whose graph store is missing; the more recently indexed project breaks a tie; the
- * path is the final deterministic tie-break.
+ * The workspace itself comes first; indexed projects before unindexed git repositories;
+ * a complete index before one whose graph store is missing; the more recently indexed
+ * project before an older one; the path is the final deterministic tie-break.
  */
 function rankProjects(a: ProjectCandidate, b: ProjectCandidate): number {
   if (a.direction !== b.direction) return a.direction === 'self' ? -1 : 1;
+  const kindRank = (project: ProjectCandidate): number =>
+    project.kind === 'index' ? 0 : project.kind === 'git' ? 1 : 2;
+  if (kindRank(a) !== kindRank(b)) return kindRank(a) - kindRank(b);
   if (a.depth !== b.depth) return a.depth - b.depth;
   if (a.complete !== b.complete) return a.complete ? -1 : 1;
   const aAt = a.indexedAt ?? '';
@@ -142,11 +153,12 @@ function rankProjects(a: ProjectCandidate, b: ProjectCandidate): number {
 }
 
 /**
- * Find every GitNexus index at or below `root`.
+ * Find every project at or below `root`: indexed directories, git repositories without
+ * an index, and the workspace itself when it is only a container.
  *
- * Never throws: an unreadable directory is skipped, and a missing root yields an empty
- * result. The caller decides what an empty list means (the panel falls back to a
- * scan-only report and offers the initialize action).
+ * Never throws: an unreadable directory is skipped. The caller decides what each kind
+ * means; the panel shows unindexed git projects so they can be initialized instead of
+ * reporting a bare "no index" for a workspace that clearly has subprojects.
  *
  * @param root absolute working directory to search from
  */
@@ -181,11 +193,14 @@ export async function findIndexProjects(
     }
 
     const meta = await readIndexMeta(dir);
+    const hasGit = existsSync(path.join(dir, '.git'));
     if (meta !== null) {
       projects.push({
         path: dir,
         name: path.basename(dir),
         relPath: path.relative(absolute, dir).replace(/\\/g, '/'),
+        kind: 'index',
+        hasGit,
         direction: dir === absolute ? 'self' : 'descendant',
         depth,
         indexedAt: meta.indexedAt === '' ? null : meta.indexedAt,
@@ -197,6 +212,46 @@ export async function findIndexProjects(
       });
       // A project boundary: its own subdirectories are source, not sibling projects.
       continue;
+    }
+
+    if (hasGit) {
+      projects.push({
+        path: dir,
+        name: path.basename(dir),
+        relPath: path.relative(absolute, dir).replace(/\\/g, '/'),
+        kind: 'git',
+        hasGit: true,
+        direction: dir === absolute ? 'self' : 'descendant',
+        depth,
+        indexedAt: null,
+        lastCommit: null,
+        branch: null,
+        stats: null,
+        complete: false,
+        metaFile: null,
+      });
+      // A git project without an index is still a project: its source is not a set of
+      // sibling projects. It appears in the switcher so the operator can initialize it.
+      continue;
+    }
+
+    if (dir === absolute) {
+      projects.push({
+        path: dir,
+        name: path.basename(dir),
+        relPath: '',
+        kind: 'workspace',
+        hasGit: false,
+        direction: 'self',
+        depth: 0,
+        indexedAt: null,
+        lastCommit: null,
+        branch: null,
+        stats: null,
+        complete: false,
+        metaFile: null,
+      });
+      // The workspace is a container; keep walking for its indexed/git children.
     }
 
     let entries: Array<{ name: string; isDirectory(): boolean }>;

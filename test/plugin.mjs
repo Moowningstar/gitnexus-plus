@@ -378,25 +378,37 @@ section('coverage route: a plain folder is described');
   );
   await fs.writeFile(path.join(container, 'pkg', '.gitnexus', 'lbug'), '');
   await fs.writeFile(path.join(container, 'pkg', 'index.ts'), 'export const nested = 1;\n');
+  await fs.mkdir(path.join(container, 'legacy', '.git'), { recursive: true });
   const nestedProject = path.resolve(container, 'pkg');
+  const legacyProject = path.resolve(container, 'legacy');
 
   const resolved = await callWith(
     projectsRoute,
     '/api/gitnexus/projects?root=' + encodeURIComponent(container),
   );
+  const nestedCandidate = resolved.projects?.find(
+    (project) => path.resolve(project.path) === nestedProject,
+  );
+  const legacyCandidate = resolved.projects?.find(
+    (project) => path.resolve(project.path) === legacyProject,
+  );
   check(
-    'the projects route lists the index below the container',
+    'the projects route lists the index and the unindexed git project',
     resolved.ok === true &&
-      resolved.projects?.length === 1 &&
-      path.resolve(resolved.projects[0].path) === nestedProject,
+      resolved.projects?.length === 3 &&
+      nestedCandidate !== undefined &&
+      legacyCandidate !== undefined,
     JSON.stringify(resolved),
   );
   check(
-    'the candidate carries its distance and completeness',
-    resolved.projects?.[0]?.depth === 1 &&
-      resolved.projects?.[0]?.direction === 'descendant' &&
-      resolved.projects?.[0]?.complete === true,
-    JSON.stringify(resolved.projects?.[0]),
+    'the candidates carry kind, distance and completeness',
+    nestedCandidate?.depth === 1 &&
+      nestedCandidate?.direction === 'descendant' &&
+      nestedCandidate?.complete === true &&
+      nestedCandidate?.kind === 'index' &&
+      legacyCandidate?.kind === 'git' &&
+      legacyCandidate?.complete === false,
+    JSON.stringify({ nestedCandidate, legacyCandidate }),
   );
 
   const selected = await call(

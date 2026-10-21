@@ -319,28 +319,50 @@ async function discoveryTests() {
   await fs.writeFile(path.join(root, 'node_modules', 'pkg', '.gitnexus', 'gitnexus.json'), '{}');
   await fs.mkdir(path.join(root, '.hidden', '.gitnexus'), { recursive: true });
   await fs.writeFile(path.join(root, '.hidden', '.gitnexus', 'gitnexus.json'), '{}');
+  // A git project without an index is a candidate too, not a reason to keep walking
+  // into its source tree.
+  await fs.mkdir(path.join(root, 'apps', 'legacy', '.git'), { recursive: true });
 
   const found = await findIndexProjects(root);
   const web = path.resolve(root, 'apps', 'web');
   const api = path.resolve(root, 'apps', 'api');
+  const legacy = path.resolve(root, 'apps', 'legacy');
   check(
-    'collects every index below the workspace',
-    found.projects.length === 2 &&
+    'collects the workspace, indexes and unindexed git projects',
+    found.projects.length === 4 &&
       found.projects.some((project) => project.path === web) &&
-      found.projects.some((project) => project.path === api),
-    JSON.stringify(found.projects.map((project) => project.path)),
+      found.projects.some((project) => project.path === api) &&
+      found.projects.some((project) => project.path === legacy),
+    JSON.stringify(found.projects.map((project) => [project.path, project.kind])),
   );
   check(
-    'ranks the complete index above the incomplete one at the same depth',
-    found.projects[0]?.path === web && found.projects[1]?.path === api,
-    JSON.stringify(found.projects.map((project) => [project.path, project.complete])),
+    'the workspace container is a candidate and comes first',
+    found.projects[0]?.path === path.resolve(root) &&
+      found.projects[0]?.kind === 'workspace' &&
+      found.projects[0]?.direction === 'self',
+    JSON.stringify(found.projects[0]),
   );
   check(
-    'reports distance, direction and metadata for each candidate',
-    found.projects.every(
-      (project) => project.depth === 2 && project.direction === 'descendant' && project.metaFile === 'gitnexus.json',
-    ),
+    'ranks the complete index above the incomplete one, indexes above git',
+    found.projects[1]?.path === web &&
+      found.projects[1]?.complete === true &&
+      found.projects[2]?.path === api &&
+      found.projects[3]?.path === legacy &&
+      found.projects[3]?.kind === 'git' &&
+      found.projects[3]?.complete === false,
+    JSON.stringify(found.projects.map((project) => [project.path, project.kind, project.complete])),
+  );
+  check(
+    'index candidates report distance, direction and metadata',
+    found.projects
+      .filter((project) => project.kind === 'index')
+      .every((project) => project.depth === 2 && project.metaFile === 'gitnexus.json'),
     JSON.stringify(found.projects),
+  );
+  check(
+    'git candidates carry no manifest metadata',
+    found.projects.find((project) => project.path === legacy)?.indexedAt === null &&
+      found.projects.find((project) => project.path === legacy)?.hasGit === true,
   );
   check('an ordinary tree is not reported as truncated', found.truncated === false);
 
@@ -354,9 +376,35 @@ async function discoveryTests() {
   const skipped = await findIndexProjects(skippedRoot);
   check(
     'does not descend into node_modules or hidden directories',
-    skipped.projects.length === 0 && skipped.visited === 1,
+    skipped.projects.length === 1 &&
+      skipped.projects[0].kind === 'workspace' &&
+      skipped.visited === 1,
     JSON.stringify(skipped),
   );
+
+  // A container of git repositories with no index: every git root is listed, and the
+  // workspace itself remains the scan target.
+  const gitRoot = fixturePath('discover-git');
+  await fs.rm(gitRoot, { recursive: true, force: true });
+  for (const name of ['admin', 'backend', 'frontend']) {
+    await fs.mkdir(path.join(gitRoot, name, '.git'), { recursive: true });
+  }
+  // Nested inside an already-git project: it must not be visited or listed.
+  await fs.mkdir(path.join(gitRoot, 'admin', 'src', '.git'), { recursive: true });
+  const gitProjects = await findIndexProjects(gitRoot);
+  check(
+    'lists every git project under the workspace',
+    gitProjects.projects.filter((project) => project.kind === 'git').length === 3 &&
+      gitProjects.projects[0].kind === 'workspace',
+    JSON.stringify(gitProjects.projects.map((project) => [project.path, project.kind])),
+  );
+  check(
+    'a git project stops the walk at its source tree',
+    gitProjects.visited === 4 &&
+      !gitProjects.projects.some((project) => project.path.includes(`${path.sep}src`)),
+    JSON.stringify({ visited: gitProjects.visited, projects: gitProjects.projects.map((project) => project.path) }),
+  );
+  await fs.rm(gitRoot, { recursive: true, force: true });
 
   // The workspace's own index wins over anything below it and stops the walk: a
   // project's source tree is not a set of sibling projects.
@@ -378,8 +426,11 @@ async function discoveryTests() {
   await fs.mkdir(noneRoot, { recursive: true });
   const none = await findIndexProjects(noneRoot);
   check(
-    'a tree with no index yields an empty list',
-    none.projects.length === 0 && none.visited === 1 && none.truncated === false,
+    'a tree with no index or git project still lists the workspace',
+    none.projects.length === 1 &&
+      none.projects[0].kind === 'workspace' &&
+      none.visited === 1 &&
+      none.truncated === false,
     JSON.stringify(none),
   );
 
@@ -391,14 +442,19 @@ async function discoveryTests() {
   const limited = await findIndexProjects(limitRoot, { maxDirectories: 1 });
   check(
     'the directory cap stops the walk and marks it truncated',
-    limited.projects.length === 0 && limited.truncated === true,
+    limited.projects.length === 1 && limited.projects[0].kind === 'workspace' && limited.truncated === true,
     JSON.stringify(limited),
   );
   let tick = 0;
-  const timed = await findIndexProjects(limitRoot, { timeoutMs: 1, now: () => (tick += 10) });
+  // Let the root be examined, then jump past the budget: the workspace candidate must
+  // survive even when the walk is cut short.
+  const timed = await findIndexProjects(limitRoot, {
+    timeoutMs: 1,
+    now: () => (tick++ < 2 ? 0 : 100),
+  });
   check(
     'the time budget stops the walk and marks it truncated',
-    timed.projects.length === 0 && timed.truncated === true,
+    timed.projects.length === 1 && timed.projects[0].kind === 'workspace' && timed.truncated === true,
     JSON.stringify(timed),
   );
 
@@ -409,14 +465,14 @@ async function discoveryTests() {
   const capped = await findIndexProjects(deepRoot, { maxDepth: 1 });
   check(
     'the depth cap stops before an index and marks the result truncated',
-    capped.projects.length === 0 && capped.truncated === true,
+    capped.projects.length === 1 && capped.projects[0].kind === 'workspace' && capped.truncated === true,
     JSON.stringify(capped),
   );
   const uncapped = await findIndexProjects(deepRoot);
   check(
     'without the cap the same index is found',
-    uncapped.projects[0]?.path === path.resolve(deepRoot, 'x', 'y') &&
-      uncapped.projects[0]?.depth === 2,
+    uncapped.projects[1]?.path === path.resolve(deepRoot, 'x', 'y') &&
+      uncapped.projects[1]?.depth === 2,
     JSON.stringify(uncapped.projects),
   );
 
@@ -601,27 +657,29 @@ async function routeTests() {
   await fs.writeFile(path.join(container, 'apps', 'web', '.gitnexus', 'lbug'), '');
   await fs.mkdir(path.join(container, 'apps', 'api', '.gitnexus'), { recursive: true });
   await fs.writeFile(path.join(container, 'apps', 'api', '.gitnexus', 'gitnexus.json'), '{}');
+  await fs.mkdir(path.join(container, 'apps', 'legacy', '.git'), { recursive: true });
 
   const resolved = await hit(
     '/api/gitnexus/projects?root=' + encodeURIComponent(container),
   );
   const resolvedWeb = path.resolve(container, 'apps', 'web');
   const resolvedApi = path.resolve(container, 'apps', 'api');
+  const resolvedLegacy = path.resolve(container, 'apps', 'legacy');
   check(
-    'the projects route lists every index below the workspace',
+    'the projects route lists the workspace, indexes and unindexed git projects',
     resolved.status === 200 &&
       resolved.body?.ok === true &&
-      resolved.body.projects?.length === 2 &&
+      resolved.body.projects?.length === 4 &&
       resolved.body.projects.some((project) => path.resolve(project.path) === resolvedWeb) &&
-      resolved.body.projects.some((project) => path.resolve(project.path) === resolvedApi),
+      resolved.body.projects.some((project) => path.resolve(project.path) === resolvedApi) &&
+      resolved.body.projects.some((project) => path.resolve(project.path) === resolvedLegacy),
     JSON.stringify(resolved.body),
   );
   check(
-    'candidates carry distance, direction and completeness',
-    resolved.body.projects?.every(
-      (project) => project.depth === 2 && project.direction === 'descendant',
-    ) === true &&
-      resolved.body.projects?.find((project) => path.resolve(project.path) === resolvedWeb)?.complete === true,
+    'candidates carry kind, distance and completeness',
+    resolved.body.projects?.[0]?.kind === 'workspace' &&
+      resolved.body.projects?.find((project) => path.resolve(project.path) === resolvedWeb)?.complete === true &&
+      resolved.body.projects?.find((project) => path.resolve(project.path) === resolvedLegacy)?.kind === 'git',
     JSON.stringify(resolved.body.projects),
   );
   const projectsMissing = await hit('/api/gitnexus/projects');

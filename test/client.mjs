@@ -1145,6 +1145,8 @@ const project = (pathValue, name, relPath, indexedAt) => ({
   path: pathValue,
   name,
   relPath,
+  kind: 'index',
+  hasGit: true,
   direction: 'descendant',
   depth: 1,
   indexedAt,
@@ -1173,8 +1175,60 @@ check(
 check(
   'the header keeps the active project path and the workspace scope',
   nested.text.includes('D:\\demo\\frontend') &&
-    nested.text.includes('工作区：D:\\demo · 2 个索引'),
+    nested.text.includes('工作区：D:\\demo · 2 个项目（2 个已索引）'),
   nested.text.slice(0, 400),
+);
+
+// A container whose children are git repositories but have no indexes: list them so
+// the operator can see the subprojects and initialize one, instead of a bare "none".
+const workspaceContainer = {
+  ...frontend,
+  path: 'D:\\demo',
+  name: 'demo',
+  relPath: '',
+  kind: 'workspace',
+  hasGit: false,
+  direction: 'self',
+  depth: 0,
+  indexedAt: null,
+  stats: null,
+  complete: false,
+  metaFile: null,
+};
+const adminGit = {
+  ...frontend,
+  path: 'D:\\demo\\admin',
+  name: 'admin',
+  relPath: 'admin',
+  kind: 'git',
+  complete: false,
+  indexedAt: null,
+  stats: null,
+  metaFile: null,
+};
+const gitProjects = render(I.CoverageView, {
+  report: { ...noIndexReport, repo: { indexed: false, hasGit: false, path: 'D:\\demo' } },
+  ...viewProps,
+  workspacePath: 'D:\\demo',
+  projectPath: 'D:\\demo',
+  projects: [workspaceContainer, adminGit],
+  projectsVisited: 42,
+  onSelectProject: () => {},
+});
+check(
+  'a container with unindexed git projects shows a switcher',
+  gitProjects.tags.includes('select'),
+  gitProjects.tags.join(','),
+);
+check(
+  'unindexed projects are labelled in the switcher',
+  gitProjects.text.includes('admin（未索引）'),
+  gitProjects.text.slice(0, 300),
+);
+check(
+  'the scan state names the unindexed git projects',
+  gitProjects.text.includes('1 个 git 项目尚未建索引'),
+  gitProjects.text.slice(0, 500),
 );
 
 // No index below the workspace: the scan-only state says how far the search went,
@@ -1216,10 +1270,25 @@ check(
   'a stale remembered project falls back to the ranking',
   I.chooseProject([frontend, backend], 'D:\\demo', 'D:\\demo\\gone') === 'D:\\demo\\frontend',
 );
-const workspaceProject = { ...frontend, path: 'D:\\demo', name: 'demo', relPath: '', depth: 0 };
+const workspaceProject = {
+  ...frontend,
+  path: 'D:\\demo',
+  name: 'demo',
+  relPath: '',
+  depth: 0,
+  direction: 'self',
+};
 check(
   'the workspace index wins by default',
   I.chooseProject([frontend, workspaceProject], 'D:\\demo', null) === 'D:\\demo',
+);
+check(
+  'an indexed child wins over a container workspace',
+  I.chooseProject([workspaceContainer, frontend], 'D:\\demo', null) === 'D:\\demo\\frontend',
+);
+check(
+  'an unindexed container stays on the workspace overview',
+  I.chooseProject([workspaceContainer, adminGit], 'D:\\demo', null) === 'D:\\demo',
 );
 check(
   'a workspace with no indexes opens on itself',

@@ -265,12 +265,15 @@ export interface ClientToolchain {
   verdict: 'ready' | 'library-only' | 'absent';
 }
 
-/** One indexed project under the current workspace. */
+/** One project under the current workspace, indexed or not. */
 export interface ClientProject {
   path: string;
   name: string;
   /** Path relative to the workspace; empty for the workspace itself. */
   relPath: string;
+  /** `index`, `git` (no index yet), or the workspace itself when it is a container. */
+  kind: 'index' | 'git' | 'workspace';
+  hasGit: boolean;
   direction: 'self' | 'descendant';
   depth: number;
   indexedAt: string | null;
@@ -289,7 +292,7 @@ export interface ClientProject {
   metaFile: string | null;
 }
 
-/** The host's answer to “which indexes live under this workspace?”. */
+/** The host's answer to “which projects live under this workspace?”. */
 export interface ClientProjectList {
   root: string;
   projects: ClientProject[];

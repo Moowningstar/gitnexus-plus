@@ -24,7 +24,7 @@
 - **语言分布**：按字节拆分“能解析进图的语言 / 只识别格式的语言 / 其他”；GitNexus 不在时用内置扩展名映射，并标为 `builtin`，不冒充已解析。
 - **关键词搜索**：按图节点的 `name` / `filePath` 匹配，返回 kind、path、line；点击结果打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
 - **源码回退**：图查询子进程起不来时（无可用 shell 沙箱、DLL/ABI、索引忙），在索引清单内的文件里做有界源码行匹配，结果标为 `mode: "text"`。
-- **工作区多索引与切换器**：工作区本身可以是容器（例如 `D:\Project` 下放着 `gitnexus-plus/`、`viewer/`，或 `geo/` 下放着 `frontend/`、`backend/`）。面板会从当前工作区**向下**收集所有 `.gitnexus` 索引，默认选一个，标题栏显示“N 个索引”并可切换；选择按工作区记住。
+- **工作区多项目与切换器**：工作区本身可以是容器（例如 `D:\Project` 下放着 `gitnexus-plus/`、`viewer/`，或 `geo/` 下放着 `frontend/`、`backend/`）。面板会从当前工作区**向下**收集工作区自身、已索引项目，以及尚未建索引的 git 仓库；默认选一个，标题栏显示项目数并可切换；选择按工作区记住。未索引的 git 项目也会列出来，选中后可以针对该目录初始化。
 - **无索引也有信息**：git 项目或普通文件夹尚未建索引时，显示扫描概览、语言分布和初始化命令，而不是空白面板。普通文件夹的索引由 `--skip-git` 建立。
 - **维护**：初始化、增量刷新、全量重建（`--force`）都通过 DSH 的 shell 执行器运行，不自行请求提权。索引报告 FTS 不可用时，面板另外提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不重跑分析。
 
@@ -72,7 +72,7 @@ npm install --prefix <DSH_HOME>/gitnexus-plus/gitnexus gitnexus@^1.6.12
 
 ## 使用
 
-面板会报告当前工作区指向的项目，不提供全局仓库列表。它会从工作区开始**向下**收集索引：工作区自身和子目录里的 `.gitnexus` 都算候选，遇到已索引目录就不再向下钻。候选多于一个时，标题栏的路径位置变成切换器，下方写明“工作区 … · N 个索引 · 当前 <路径>”；切换后刷新、差量、搜索、图查询、维护命令都针对新项目，选择按工作区持久化。默认选择顺序是：上次选择 → 工作区自身 → 最近的子目录 → 完整索引优先 → 索引时间最新。找不到索引时，才退回描述工作区本身：目录必须存在、且不是文件系统根目录；既不需要 `.git`，也不需要索引。没有 `.git` 的普通文件夹照样能扫描，并可用 `--skip-git` 建索引（没有提交基线，也没有增量刷新）。路由不提供浏览/列举其它路径的接口。
+面板会报告当前工作区指向的项目，不提供全局仓库列表。它会从工作区开始**向下**收集：工作区自身、子目录里的 `.gitnexus` 索引，以及还没有索引的 git 仓库；遇到已索引或带 `.git` 的目录就把它当项目边界，不再向下钻。候选多于一个时，标题栏的路径位置变成切换器，下方写明“工作区 … · N 个项目（X 个已索引）· 当前 <路径>”；未索引项目会标注“未索引”。切换后刷新、差量、搜索、图查询、维护命令都针对新项目，选择按工作区持久化。默认选择顺序是：上次选择 → 工作区自身索引 → 第一个已索引项目 → 工作区扫描。没有已索引项目时停在“本工作区”扫描，并列出未索引的 git 项目供初始化。目录必须存在、且不是文件系统根目录；没有 `.git` 的普通文件夹照样能扫描，并可用 `--skip-git` 建索引（没有提交基线，也没有增量刷新）。路由不提供浏览/列举其它路径的接口。
 
 DSH 内暴露：
 
@@ -117,7 +117,7 @@ npm test
 | --- | --- | --- |
 | 面板说 GitNexus 不存在 | 自己安装，或用面板的安装按钮；非标准位置设 `GITNEXUS_CLI=/path/to/gitnexus/dist/cli/index.js`。 | [`gitnexus/README.md` — Requirements](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#requirements)、[Quick Start](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#quick-start) |
 | 项目还没有索引 | 点 **初始化索引**，或执行 `gitnexus analyze --index-only <repo>`。目录不是 git 仓库时，面板的命令会自动带 `--skip-git`（上游要求），代价是没有提交基线与增量刷新。 | [`README.md` — CLI Reference](https://github.com/abhigyanpatwari/GitNexus/blob/main/README.md#cli-reference)、[`RUNBOOK.md` — Index out of date](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#index-out-of-date--stale-tools) |
-| 子目录里已有索引，切换器里却没有 | 面板只从当前工作区**向下**找，不会向上或找兄弟目录；默认跳过隐藏目录、`node_modules` 与构建产物，且有层数/目录数/时间上限。确认索引位于 `<工作区>/<子目录>/.gitnexus/gitnexus.json`；若它在被跳过的目录或很深的层级，直接把工作区设到该子目录。多个索引会在标题栏切换器里列出；搜索被截断时面板会写明“可能还有未列出的索引”。 | 本插件的目录发现；无上游 GitNexus 路径。 |
+| 子目录里已有索引，切换器里却没有 | 面板只从当前工作区**向下**找，不会向上或找兄弟目录；默认跳过隐藏目录、`node_modules` 与构建产物，且有层数/目录数/时间上限。确认索引位于 `<工作区>/<子目录>/.gitnexus/gitnexus.json`；若它在被跳过的目录或很深的层级，直接把工作区设到该子目录。多个项目会在标题栏切换器里列出，未建索引的 git 项目也会列出；搜索被截断时面板会写明“可能还有未列出的项目”。 | 本插件的目录发现；无上游 GitNexus 路径。 |
 | 刷新失败、`spawn EPERM`，或索引停在 `incremental-in-progress` | 面板命令已带 `GITNEXUS_MEMORY=off`、`NODE_OPTIONS=--max-old-space-size=8192`、`GITNEXUS_HOME=<repo>/.gitnexus/plugin-home`、`--index-only`。沙箱仍拒绝时，把命令复制到自己的终端跑；插件不会扩权。 | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors)、[Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
 | 刷新报 `EPERM … mkdir` 或 `rmdir '<repo>\.gitnexus\parsedfile-store'` | GitNexus 在每次解析开始时**删除**这个 run 级存储，解析过程中再由 worker 重新创建——两个方向都可能被拒。0.1.4 处理了两个成因：不再预建该目录（那是 0.1.3 的 `rmdir` 来源）；同时让分析器的 shell 调用带上**仓库**作为沙箱工作区根。面板路由没有 session，沙箱以前会回退到 DSH 应用目录，那条路径的写能力是**另一个身份**，仓库的写授权对它无效，于是 `.gitnexus` 里的写入全被拒。若仍失败，说明部署模式是只读——把复制出的命令放到普通终端执行。 | [`RUNBOOK.md` — LadybugDB / lock errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#ladybugdb--lock-errors)、[`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus) |
 | Windows 报 `windows-acl-run: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:\Program Files\DSH Desktop)` | 这是 DSH 的 Windows ACL 沙箱在给**工作区根**授权时失败；`D:\Program Files\DSH Desktop` 是 DSH 应用目录，不是项目。0.1.5 起搜索/图子进程使用被查询仓库作为策略根，安装使用插件前缀作为策略根，安装失败会返回可复制命令。如果**普通 shell 命令**仍报同一错误，说明会话工作区本身就是安装目录：把工作区切到可写项目；不要给 Program Files 加 ACL。 | 本插件的策略根修复；DSH 沙箱本身无上游 GitNexus 路径。 |
@@ -193,5 +193,5 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 - 搜索的 graph 模式是名称/路径匹配，不搜正文；text 模式才按行匹配，且有上限。
 - 源码回退只覆盖索引清单里的文件，新文件需先刷新索引。
 - 没有 `.git` 的目录用 `--skip-git` 建的索引没有提交基线：门禁只能说“无法确认”，刷新是完整重分析（不是增量），Git 活动卡片也不会出现。
-- 子目录搜索是**有界**的：默认最多 12 层、4000 个目录、2 秒；跳过 `node_modules`、构建产物和所有隐藏目录，不跟随符号链接。多索引时默认按“工作区自身 → 最近 → 完整 → 最新”选择，标题栏可切换；搜索被上限截断时面板会说明“可能还有未列出的索引”。
+- 子目录搜索是**有界**的：默认最多 12 层、4000 个目录、2 秒；跳过 `node_modules`、构建产物和所有隐藏目录，不跟随符号链接。多项目时默认优先已索引项目（上次选择 → 工作区自身索引 → 第一个已索引 → 工作区扫描），标题栏可切换；遇到已索引或 `.git` 目录即停止下钻；搜索被上限截断时面板会说明“可能还有未列出的项目”。
 - 更深的设计与构建记录不放进公开 README；本文件只讲“做什么”和“出问题怎么处理”。
