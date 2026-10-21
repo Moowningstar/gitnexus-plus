@@ -1155,8 +1155,9 @@ async function searchTests() {
   check('the host parses the helper report', viaHelper.results[0]?.name === 'analyzeCoverage');
 
   // A no-session helper spawn otherwise inherits the DSH application directory as
-  // its sandbox root; on Windows that grant fails under Program Files. The host must
-  // supply the repository-rooted policy, exactly as it does for analyze.
+  // its sandbox root; on Windows that grant fails under Program Files. The policy is
+  // rooted at `.gitnexus`, not the repository: Windows propagates the inheritable ACE
+  // across the whole workspace, which is minutes on a large tree.
   const searchPolicy = { mode: 'workspace-write', workspaceRoot: repo };
   let searchPolicyRepo = null;
   await searchViaHelper(repo, 'analyzeCoverage', {
@@ -1169,9 +1170,9 @@ async function searchTests() {
     },
   });
   check(
-    'the search helper receives the repository-rooted sandbox policy',
+    'the search helper receives the index-rooted sandbox policy',
     captured?.sandboxPolicy === searchPolicy &&
-      path.resolve(searchPolicyRepo) === path.resolve(repo),
+      path.resolve(searchPolicyRepo) === path.resolve(repo, '.gitnexus'),
     JSON.stringify({ policy: captured?.sandboxPolicy, asked: searchPolicyRepo }),
   );
 
@@ -2878,11 +2879,15 @@ async function graphTests() {
         },
       };
       const repoPolicy = { mode: 'workspace-write', workspaceRoot: repo };
+      let graphPolicyRoot = null;
       const options = {
         shell: counting,
         helperPath: helper,
         nodeBudget: 100,
-        sandboxPolicy: () => repoPolicy,
+        sandboxPolicy: (root) => {
+          graphPolicyRoot = root;
+          return repoPolicy;
+        },
       };
       const first = await projectViaHelper(repo, 'communities', null, options);
       const second = await projectViaHelper(repo, 'communities', null, options);
@@ -2892,9 +2897,10 @@ async function graphTests() {
         `executed=${executed} nodes=${second.nodes.length}`,
       );
       check(
-        'the graph helper receives the repository-rooted sandbox policy',
-        graphPolicy === repoPolicy,
-        JSON.stringify(graphPolicy),
+        'the graph helper receives the index-rooted sandbox policy',
+        graphPolicy === repoPolicy &&
+          path.resolve(graphPolicyRoot) === path.resolve(repo, '.gitnexus'),
+        JSON.stringify({ policy: graphPolicy, asked: graphPolicyRoot }),
       );
     } catch (error) {
       // Only a sandbox refusal is a skip. A missing shell or a quoting bug is this

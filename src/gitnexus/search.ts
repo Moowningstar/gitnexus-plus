@@ -322,15 +322,18 @@ export interface HelperSearchOptions {
   managedPrefix?: string;
   limit?: number;
   /**
-   * A policy the host resolved for this repository.
+   * A policy the host resolved for this repository's index directory.
    *
    * A panel route has no session, so the deployment's default resolves to the DSH
    * application directory. On Windows that directory is under Program Files, where
    * the ACL sandbox cannot grant workspace-write (`SetNamedSecurityInfoW`, Win32 5).
-   * The helper only needs the repository (and its private temp), so the host supplies
-   * the same repository-rooted policy it already supplies to `analyze`.
+   * The helper only reads the graph and writes locks/caches inside `.gitnexus`, so the
+   * policy is rooted there rather than at the repository: the ACL grant propagates an
+   * inheritable ACE across the whole tree, which DSH itself notes takes minutes on a
+   * large workspace. Rooting at `.gitnexus` keeps the grant small; the mode is still
+   * the deployment's.
    */
-  sandboxPolicy?: (repoPath: string) => unknown;
+  sandboxPolicy?: (indexPath: string) => unknown;
 }
 
 function quoteFor(value: string): string {
@@ -450,7 +453,7 @@ export async function searchViaHelper(
   }
 
   const limit = clampLimit(options.limit);
-  const sandboxPolicy = options.sandboxPolicy?.(absRepo);
+  const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
   const args = [options.helperPath, absRepo, query, String(limit), options.managedPrefix ?? '']
     .map(quoteFor)
     .join(' ');

@@ -383,11 +383,14 @@ export interface HelperGraphOptions {
   nodeBudget?: number;
   edgeBudget?: number;
   /**
-   * A policy the host resolved for this repository. Same reason as the search helper:
-   * a no-session route otherwise falls back to the DSH application directory, whose
-   * Windows ACL grant fails under Program Files.
+   * A policy the host resolved for this repository's index directory.
+   *
+   * A no-session route otherwise falls back to the DSH application directory, whose
+   * Windows ACL grant fails under Program Files. Rooting at `.gitnexus` also keeps the
+   * inheritable ACE small: granting the whole repository makes Windows propagate it
+   * across every source file (minutes on a large workspace).
    */
-  sandboxPolicy?: (repoPath: string) => unknown;
+  sandboxPolicy?: (indexPath: string) => unknown;
 }
 
 function quoteFor(value: string): string {
@@ -529,7 +532,7 @@ export async function projectViaHelper(
     .map(quoteFor)
     .join(' ');
   const command = `node ${args}`;
-  const sandboxPolicy = options.sandboxPolicy?.(absRepo);
+  const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
 
   let result: {
     exitCode?: number | null;
