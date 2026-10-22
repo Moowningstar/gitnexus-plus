@@ -471,6 +471,32 @@ export interface ClientAnalyzeRun {
 }
 
 /**
+ * The GitNexus web server's state, as the host reports it.
+ *
+ * The SPA is the 3D view this panel now relies on instead of drawing one itself, so
+ * "is it running" is not a detail — the card has to say whether the operator can open
+ * it, and when not, why. `repoResolvable` is separate from `state === 'ready'` because
+ * a server can be running perfectly well while holding another repository's registry;
+ * in that case there is nothing useful to embed and the card must say so rather than
+ * open a 3D view of the wrong code.
+ */
+export interface ClientWebViewStatus {
+  state: 'stopped' | 'starting' | 'ready' | 'failed' | 'unavailable';
+  repoPath: string;
+  /** The embeddable SPA URL, or null when there is nothing to open. */
+  url: string | null;
+  port: number | null;
+  /** `managed` is this plugin's child process; `adopted` was already running. */
+  owner: 'managed' | 'adopted' | null;
+  repoResolvable: boolean;
+  registryHome: string | null;
+  command: string | null;
+  startedAt: number | null;
+  message: string | null;
+  output: string;
+}
+
+/**
  * One keyword hit from the graph search.
  *
  * `kind` is GitNexus's node label (Function, Class, File, …), not a translated

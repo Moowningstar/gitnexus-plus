@@ -45,6 +45,7 @@ import { MaintenanceSection, type MaintenanceStartMode } from '../sections/maint
 import { WorkspaceOverview } from '../sections/workspace';
 import { SearchSection } from '../sections/search';
 import { GraphSection } from '../sections/graph';
+import { WebViewSection } from '../sections/webview';
 import {
   ClientAnalyzeRun,
   ClientDelta,
@@ -779,6 +780,18 @@ export function CoverageView({
 
       )
     ),
+
+    // The 3D view sits above the 2D fallback, and only once there is an index: the
+    // whole point of starting a server is to show this repository's graph, and doing so
+    // for a directory that has never been analysed would embed a view of some other
+    // project. The card decides that itself — this is only the visibility gate.
+    projectPath === null || !indexed
+      ? null
+      : h(
+          'div',
+          { style: { gridColumn: '1 / -1', minWidth: 0 } },
+          h(WebViewSection, { projectPath }),
+        ),
 
     // The graph is the index's own shape, not a derived statistic: it belongs directly
     // under the overview, before the caveats that explain its omissions.

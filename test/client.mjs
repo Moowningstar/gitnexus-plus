@@ -907,11 +907,11 @@ check('renders the commit histogram', view.text.includes('每') && /峰值/.test
 // full-width cards stretches every row across a metre of empty space.
 check(
   'every section renders as a card element',
-  // Exactly the eight cards: 关键词搜索, 索引概览, 语言分布, 需要注意,
-  // 解析质量与溯源, 被跳过的超大文件, Git 活动, 维护命令. Pinned rather than a
+  // Exactly the nine cards: 关键词搜索, 索引概览, 语言分布, 需要注意 (as applicable),
+  // 解析质量与溯源, 被跳过的超大文件, Git 活动, 维护命令, 3D 视图. Pinned rather than a
   // floor, because the failure this guards against is a section quietly losing its
   // card wrapper — which shows up as a lower count, not a higher one.
-  view.tags.filter((t) => t === 'section').length === 8,
+  view.tags.filter((t) => t === 'section').length === 9,
   'sections=' + view.tags.filter((t) => t === 'section').length,
 );
 check(
@@ -1655,7 +1655,7 @@ check(
 );
 check(
   'the reachable list mirrors the drawn nodes',
-  overview.text.includes('Test #43') && overview.text.includes('Routes #8'),
+  overview.text.includes('Test · 26') && overview.text.includes('Routes · 18'),
   overview.text.slice(-700),
 );
 check(
@@ -1664,8 +1664,10 @@ check(
   overview.text.slice(-700),
 );
 check(
-  'the community overview renders the inline 3D view',
-  overview.text.includes('选择社区') && overview.text.includes('拖拽旋转'),
+  'the community overview uses the canvas renderer (no 3D controls) and keeps the legend',
+  overview.text.includes('个社区') &&
+    overview.text.includes('点一个社区看它的成员符号') &&
+    !overview.text.includes('拖拽旋转'),
   overview.text.slice(-700),
 );
 
@@ -1754,51 +1756,126 @@ check(
   );
 }
 
-// The 3D layout is pure so it can be tested without a canvas.
+// The 3D view is not drawn by this panel any more — it embeds GitNexus's own web UI —
+// so what is left to test is the mapping from server state to a decision, and the
+// sentence the card says before anything can render.
 {
-  const nodes = [
-    { id: 'a', kind: 'Community', name: 'A', filePath: null, startLine: null, symbolCount: 4 },
-    { id: 'b', kind: 'Community', name: 'B', filePath: null, startLine: null, symbolCount: 8 },
-    { id: 'c', kind: 'Community', name: 'C', filePath: null, startLine: null, symbolCount: 2 },
-  ];
-  const layout3d = I.buildGraph3DLayout(nodes, [
-    { source: 'a', target: 'b', type: 'CALLS', weight: 1 },
-    { source: 'b', target: 'a', type: 'CALLS', weight: 2 },
-    { source: 'b', target: 'c', type: 'USES', weight: 3 },
-  ]);
-  check(
-    '3D layout covers every community and aggregates edges',
-    layout3d.nodes.length === 3 &&
-      layout3d.byId.size === 3 &&
-      layout3d.components === 1 &&
-      layout3d.edges.length === 2 &&
-      layout3d.edges.some((edge) => edge.weight === 3),
-    JSON.stringify(layout3d.edges),
-  );
-  check(
-    '3D shortest path walks the community graph',
-    JSON.stringify(I.graph3DPath('a', 'c', layout3d.edges)) === '["a","b","c"]',
-    JSON.stringify(I.graph3DPath('a', 'c', layout3d.edges)),
-  );
-  check(
-    '3D path reports disconnected components instead of inventing a route',
-    I.graph3DPath('a', 'd', layout3d.edges) === null,
-  );
-}
+  const view = (patch) => ({
+    state: 'ready',
+    repoPath: 'D:/repo',
+    url: 'http://127.0.0.1:4747/?repo=D%3A%2Frepo',
+    port: 4747,
+    owner: 'managed',
+    repoResolvable: true,
+    registryHome: 'D:/repo/.gitnexus/plugin-home',
+    command: 'gitnexus serve --port 4747',
+    startedAt: 1,
+    message: null,
+    output: '',
+    ...patch,
+  });
 
-{
-  const view3d = render(I.Graph3DView, {
-    projection: graphState({}).projection,
-    onOpenCommunity: () => {},
+  check('web view summary: nothing known yet', I.webViewSummary(null, 'unknown').text === '未知');
+  check(
+    'web view summary: a host without the route is a warning',
+    I.webViewSummary(null, 'missing').dot === 'warning' && I.webViewSummary(null, 'missing').text === '宿主未挂载',
+  );
+  check(
+    'web view summary: a managed server that can see this repository is 已就绪',
+    I.webViewSummary(view({}), 'present').text === '已就绪',
+  );
+  check(
+    'web view summary: an adopted server says so',
+    I.webViewSummary(view({ owner: 'adopted' }), 'present').text === '外部服务已就绪',
+  );
+  check(
+    'web view summary: a running server with the wrong registry is a warning, not a ready',
+    I.webViewSummary(view({ repoResolvable: false }), 'present').dot === 'warning',
+  );
+  check(
+    'web view summary: a failure reads as a failure',
+    I.webViewSummary(view({ state: 'failed' }), 'present').dot === 'error',
+  );
+
+  const stopped = render(I.WebViewCard, {
+    // The real "stopped" status has no owner and no port, so it must not offer to stop
+    // a server it does not have.
+    view: view({ state: 'stopped', url: null, owner: null, port: null, startedAt: null, repoResolvable: false }),
+    route: 'present',
+    busy: null,
+    error: null,
+    onAct: async () => null,
   });
   check(
-    'the inline 3D view renders its selector, path control and truncated source',
-    view3d.text.includes('选择社区') &&
-      view3d.text.includes('路径') &&
-      view3d.text.includes('双击') &&
-      view3d.text.includes('共 39 个社区') &&
-      view3d.text.includes('220'),
-    view3d.text.slice(0, 700),
+    'the card offers to start the server before anything is running',
+    stopped.text.includes('启动并打开 3D 视图') && !stopped.text.includes('停止服务'),
+    stopped.text.slice(0, 400),
+  );
+
+  const ready = render(I.WebViewCard, {
+    view: view({}),
+    route: 'present',
+    busy: null,
+    error: null,
+    onAct: async () => null,
+  });
+  check(
+    'a ready card shows the URL, both openings and the stop control',
+    ready.text.includes('http://127.0.0.1:4747/?repo=') &&
+      ready.text.includes('打开 3D 视图') &&
+      ready.text.includes('在新标签页打开') &&
+      ready.text.includes('停止服务'),
+    ready.text.slice(0, 500),
+  );
+
+  const adopted = render(I.WebViewCard, {
+    view: view({ owner: 'adopted' }),
+    route: 'present',
+    busy: null,
+    error: null,
+    onAct: async () => null,
+  });
+  check(
+    'an adopted server is never offered for stopping, and the card says why',
+    adopted.text.includes('外部启动的服务') && !adopted.text.includes('停止服务'),
+    adopted.text.slice(0, 500),
+  );
+
+  const failed = render(I.WebViewCard, {
+    view: view({ state: 'failed', url: null, message: '等待 GitNexus Web 服务响应超时（25 秒）', output: 'Error: boom' }),
+    route: 'present',
+    busy: null,
+    error: null,
+    onAct: async () => null,
+  });
+  check(
+    'a failed card repeats the host message and keeps the output reachable',
+    failed.text.includes('等待 GitNexus Web 服务响应超时') && failed.text.includes('服务输出'),
+    failed.text.slice(0, 500),
+  );
+
+  const missing = render(I.WebViewCard, {
+    view: null,
+    route: 'missing',
+    busy: null,
+    error: null,
+    onAct: async () => null,
+  });
+  check(
+    'a host that predates this route is named as such',
+    missing.text.includes('没有挂载 3D 视图的服务端'),
+    missing.text.slice(0, 300),
+  );
+
+  // The stateful wrapper is only asserted on its first paint: it fetches on mount, and
+  // this renderer deliberately does not run effects.
+  const section = render(I.WebViewSection, { projectPath: 'D:/repo' });
+  check(
+    'the section starts from the unknown state and describes itself',
+    section.text.includes('3D 视图') &&
+      section.text.includes('未知') &&
+      section.text.includes('GitNexus 自带的 Web 端'),
+    section.text.slice(0, 300),
   );
 }
 

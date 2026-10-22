@@ -38,6 +38,7 @@ import { mountFileHistoryRoute } from './routes/file-history.js';
 import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
+import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
 import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
@@ -45,6 +46,7 @@ import { projectViaHelper } from './gitnexus/graph.js';
 import { searchWithFallback } from './gitnexus/search.js';
 import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
 import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
+import { createWebViewRunner } from './gitnexus/webview.js';
 
 /**
  * Whether a service resolved from the context has the shape the runner needs.
@@ -106,6 +108,15 @@ export interface PluginConfig {
   /** Wall-clock ceiling for that install. Compiling native modules is slow. */
   installTimeoutMs: number;
   /**
+   * First port the GitNexus web server is offered.
+   *
+   * 4747 is the CLI's own default, so an operator who already runs `gitnexus serve`
+   * gets that server adopted instead of a second one on an unexpected port. When the
+   * port is free the plugin takes it; when it is held by something that cannot see
+   * this repository, the following few ports are tried.
+   */
+  webViewPort: number;
+  /**
    * Redirect for GitNexus's global registry write. Empty means
    * `<project>/.gitnexus/plugin-home`, inside the workspace. The global
    * `~/.gitnexus` is outside a confined host's writable scope, and a refresh that
@@ -124,6 +135,7 @@ export const Config = Schema.object({
   analyzeTimeoutMs: Schema.natural().default(600000),
   gitnexusInstallDir: Schema.string().default(''),
   installTimeoutMs: Schema.natural().default(1200000),
+  webViewPort: Schema.natural().default(4747),
   gitnexusHome: Schema.string().default(''),
 });
 
@@ -518,6 +530,20 @@ export function apply(ctx: Context, config: PluginConfig): void {
         // directory: the runner creates it and roots the policy there.
         sandboxPolicy: sandboxPolicyForRoot,
       });
+      // The web view is a long-lived child process, so it gets its own runner rather
+      // than sharing the analyze runner's single-run-per-repository bookkeeping: those
+      // runs are finite and awaited, this one is neither.
+      const webView = createWebViewRunner({
+        shell: searchShell,
+        toolchain: managedToolchain,
+        port: config.webViewPort,
+        memoryOff: config.memoryOff,
+        heapMb: config.analyzeHeapMb,
+        // Empty means "find the registry that owns this repository"; a configured home
+        // is tried first, exactly as the analyze runner does it.
+        gitnexusHome: config.gitnexusHome,
+        sandboxPolicy: sandboxPolicyForRoot,
+      });
 
       const disposers = [
         mountProjectsRoute(svcCtx.webServer),
@@ -567,6 +593,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
               sandboxPolicy: sandboxPolicyForRoot,
             }),
         }),
+        mountWebViewRoute(svcCtx.webServer, {
+          status: (repoPath) => webView.status(repoPath),
+          start: (repoPath) => webView.start(repoPath),
+          restart: (repoPath) => webView.restart(repoPath),
+          stop: () => webView.stop(),
+        }),
       ];
       ctx.effect(() => () => {
         for (const dispose of disposers) dispose();
@@ -574,6 +606,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
         // holding a handle onto a server that no longer exists.
         analyze.dispose();
         install.dispose();
+        // Last, and after the routes are gone: the web server is a child process that
+        // outlives an idle panel by design, so it must be stopped explicitly here.
+        webView.dispose();
         cache.clear();
       }, 'gitnexus-plus: HTTP routes');
     });

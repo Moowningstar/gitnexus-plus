@@ -71,7 +71,7 @@ import {
 import { GitActivitySection, activityView } from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
-import { buildGraph3DLayout, graph3DPath, Graph3DView } from './sections/graph3d';
+import { WebViewCard, WebViewSection, webViewSummary } from './sections/webview';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
 import { FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
@@ -191,7 +191,7 @@ function apply(ctx: SlotsContext): void {
     ['PanelBoundary', PanelBoundary],
     ['CoveragePanel', CoveragePanel],
     ['WorkspaceOverview', WorkspaceOverview],
-    ['Graph3DView', Graph3DView],
+    ['WebViewSection', WebViewSection],
     ['ProvenanceBlock', ProvenanceBlock],
   ];
   const missingComponents = requiredComponents
@@ -247,9 +247,9 @@ export const __internals = {
     highlightLine,
     languageOf,
     communityColors,
-    buildGraph3DLayout,
-    graph3DPath,
-    Graph3DView,
+    WebViewSection,
+    WebViewCard,
+    webViewSummary,
     compactNumber,
     useProjectPath,
     contextDiagnostic,

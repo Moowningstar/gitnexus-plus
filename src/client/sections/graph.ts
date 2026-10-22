@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Button, HAIRLINE, MUTED, SOFT_BG, Tag, h } from '../primitives';
 import { ClientGraphEdge, ClientGraphNode, GraphViewState } from '../types';
-import { Graph3DView } from './graph3d';
 
 /**
  * The graph card: a bounded, interactive view of the index.
@@ -484,11 +483,10 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       ? null
       : h('div', { style: { ...MUTED, color: 'var(--dsw-alias-state-error-primary, inherit)' } }, error),
 
-    projection?.view === 'communities'
-      ? h(Graph3DView, { projection, onOpenCommunity })
-      : h(
-          React.Fragment,
-          null,
+    // One renderer for every view. The communities overview used to get a separate 3D
+    // drawing, which is what 0.1.7 removed: the real 3D lives in the GitNexus web UI now
+    // (see the 3D 视图 card), and this canvas stays as the always-available fallback —
+    // it colours communities by palette and draws their members when one is opened.
     h(
       'div',
       {
@@ -614,6 +612,5 @@ export function GraphSection({ state }: { state: GraphViewState }) {
           : '点一个社区看它的成员符号；滚轮缩放、拖动平移。节点数与边数由宿主限制，超出部分会明确标注。'
         : '点一个符号会在文件查看器中打开它并定位到行；滚轮缩放、拖动平移。',
     ),
-      ),
   );
 }
