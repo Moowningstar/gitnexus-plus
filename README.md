@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.6](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.6)** ·
+**Current release: [0.1.7](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.7)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -32,13 +32,30 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   applied by the host, and the view states what it left out. A **Symbol view** button
   switches to a bounded all-symbol projection when a symbol outside the current
   communities matters; it is explicitly truncated by file order, and the community view
-  remains the structural overview. The community overview is a
-  **3D** view in the card: it puts the same communities on a Z axis with per-community
-  colours, representative member files and shortest-path highlighting, so a dense core
-  can be rotated apart instead of settling into a flat hairball. Single click selects a
-  community; double-click opens its member symbols. **Expand** opens a centered
-dialog with the same projection and a community sidebar, not a full-screen mode. The
-  card defers its fetch until it is scrolled near the viewport.
+  remains the structural overview. Single click selects a community; **Expand** opens a
+  centered dialog with the same projection and a community sidebar, not a full-screen
+  mode. The card defers its fetch until it is scrolled near the viewport.
+- **3D view** — the full, rotatable graph is GitNexus's own web UI, embedded instead of
+  reimplemented. The panel starts `gitnexus serve` (one process per plugin host, stopped
+  when the plugin unloads) and shows the SPA in an overlay iframe, with **open in a new
+  tab** and **stop the server** beside it. The server is spawned with the same CLI the
+  analyzer uses, against the `GITNEXUS_HOME` registry that actually holds this
+  repository, so the URL opens *this* project rather than another indexed one. A failed
+  start surfaces the process's own output — a version-mismatched index shows
+  `Trying to read a database file with a different version` instead of a blank frame. An
+  existing server on the port is adopted (and never killed) when it can see the
+  repository. Port and embedding are configurable; see `webViewPort`.
+- **AI settings, pre-filled** — the SPA keeps its provider settings in `sessionStorage`,
+  which a cross-origin iframe cannot be written to. The plugin therefore serves it a
+  generated `index.html` (through `GITNEXUS_WEB_DIST`) that seeds `gitnexus-llm-settings`
+  before the app boots, taking provider, key and model from
+  `GITNEXUS_PLUS_AI_PROVIDER` / `GITNEXUS_PLUS_AI_API_KEY` /
+  `GITNEXUS_PLUS_AI_MODEL` (plus optional `GITNEXUS_PLUS_AI_BASE_URL` for
+  OpenAI-compatible endpoints, Azure endpoints and Ollama hosts), so chat works without
+  pasting a key into every tab. Unset variables leave the dialog untouched; a partial or
+  misspelled set is explained on the card (`缺少 GITNEXUS_PLUS_AI_MODEL…`) while the
+  server still starts. The generated page is removed with the server, an adopted server is
+  never touched, and the key never reaches the panel — only provider, model and endpoint.
 - **Refresh advice** — the staleness verdict also recommends one of `none` /
   `incremental` / `reanalyze` / `rebuild` / `init` / `unknown`, so a worktree-only
   comparison never reads as "safe to incrementally refresh" and a `--skip-git` index is
@@ -265,6 +282,25 @@ forces FTS on, because enabling it is a repair (`gitnexus analyze --repair-fts`)
 incremental refresh — so the panel exposes it as its own action, and a repair run never
 carries `--skip-fts` (the CLI accepts that pair and exits 0 having done nothing).
 
+### AI settings for the embedded web UI
+
+The embedded GitNexus SPA has its own chat, and its AI settings are stored per tab. Export
+these in the environment DSH starts from, and the panel seeds them whenever it starts the
+server:
+
+| Variable | Meaning |
+| --- | --- |
+| `GITNEXUS_PLUS_AI_PROVIDER` | One of `openai`, `gemini`, `anthropic`, `azure-openai`, `ollama`, `openrouter`, `minimax`, `glm`, `deepseek`. Common aliases are accepted (`google`, `claude`, `azure`, `z.ai`, `open-ai`). |
+| `GITNEXUS_PLUS_AI_API_KEY` | The provider key. Not needed for `ollama`. |
+| `GITNEXUS_PLUS_AI_MODEL` | Model id as the provider spells it, e.g. `gpt-4o-mini`, `gemini-2.0-flash`, `llama3.2`. |
+| `GITNEXUS_PLUS_AI_BASE_URL` | Optional. OpenAI-compatible endpoint, Azure endpoint (required for `azure-openai`), or Ollama host. |
+
+Nothing is sent over the network to configure this: the page the server hands out seeds
+`sessionStorage` inline, before the SPA's module script runs. With none of the variables
+set the dialog is left exactly as it was, and the card says so. A partial set (say,
+provider and model but no key) is reported on the card and the server still starts, so a
+typo never costs you the 3D view.
+
 ## License (read before commercial use)
 
 This plugin is **MIT** (see [LICENSE](LICENSE)).
@@ -292,9 +328,18 @@ the related features puts that use under it.**
   community's members. The **Symbol view** is a bounded all-symbol projection ordered by
   file and explicitly truncated, not a claim of completeness. Both say when they are
   truncated.
-- The 3D overview draws community nodes only; member symbols remain in the 2D drill-down.
-  It is the card's default community view, not a separate full-screen mode, so the sidebar
-  stays the one place the graph lives.
+- The 3D view is a second process, started on demand: it needs the `gitnexus` CLI on the
+  machine and, on a host with no shell executor, only the manual command is offered.
+  Embedding is display-only — the iframe is another origin, so the panel cannot script
+  into it; select things in the SPA itself, or open it in its own tab.
+- A server started by hand on the configured port is adopted only when its registry lists
+  this repository; otherwise the plugin tries the next port rather than killing it. The
+  card says which case it is in. An adopted server keeps its own page, so the AI settings
+  cannot be seeded into it — fill the dialog once by hand there.
+- The seeded AI settings live in `sessionStorage`, exactly like hand-entered ones: the
+  SPA clears them when the tab closes, and the plugin re-seeds them on the next start.
+  Nothing is written to the repository or to `~/.dsh` beyond the generated page, which is
+  deleted when the server stops.
 - The plugin reports facts about a GitNexus index; it does not rewrite the parser or
   reimplement the graph database.
 - Graph search matches names/paths, not bodies; the text fallback matches lines and is

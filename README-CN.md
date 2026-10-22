@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：0.1.6** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：0.1.7** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
@@ -16,7 +16,9 @@
 ## 插件做什么
 
 - **刷新门禁（Tier 0）**：在给出刷新按钮之前，用工作区文件与索引记录的 sha256（`.gitnexus/gitnexus.json` 的 `fileHashes`）比对，报告真正变化的内容：改 / 增 / 删，以及被索引策略排除的文件。工作区没变时毫秒级给出结论、**不启动分析器**，按钮直接说明"无需刷新"，而不是让你等一次几分钟的重建。只有比对**锚定在索引记录的提交**上时才会说"已是最新"；索引没记录提交时会退化为工作区与 `HEAD` 比较，并明确说"无法确认"，而不是冒充新鲜。
-- **图视图**：把索引里的社区画在 canvas 上，跨社区关系按权重聚合；点社区看成员符号及它们之间的关系，点符号在文件查看器里定位到行。节点与边预算由宿主限制，并明确写出省略了多少。社区之外的符号可用**符号视图**切换查看：它是按文件顺序截断的全仓库符号投影，结构全貌仍看社区视图。卡片总览是 **3D**：同一批社区放到 Z 轴、按社区着色、标注代表文件，并支持最短路径高亮；双击社区进入成员符号；**展开**是居中弹窗而不是全屏。卡片滚动到视口附近才发起图请求。
+- **图视图**：把索引里的社区画在 canvas 上，跨社区关系按权重聚合；点社区看成员符号及它们之间的关系，点符号在文件查看器里定位到行。节点与边预算由宿主限制，并明确写出省略了多少。社区之外的符号可用**符号视图**切换查看：它是按文件顺序截断的全仓库符号投影，结构全貌仍看社区视图。**展开**是居中弹窗而不是全屏。卡片滚动到视口附近才发起图请求。
+- **3D 视图**：完整、可旋转的图直接复用 GitNexus 自带的 Web 前端，而不是自己重画。面板按需启动 `gitnexus serve`（每个宿主一个进程，插件卸载时停止），在自己的弹层 iframe 里展示，旁边有**在新标签页打开**和**停止服务**。服务用与分析器同一个 CLI 启动，并带上**真正登记了这个仓库**的 `GITNEXUS_HOME` 注册表，所以 URL 打开的是当前项目而不是别的已索引仓库；启动失败时把子进程自己的输出显示出来（索引版本不匹配会看到 `Trying to read a database file with a different version`，而不是一片空白）。端口上已有的服务只要能看见本仓库就直接接管、绝不杀掉。端口可配置（`webViewPort`）。
+- **AI 设置自动填好**：SPA 把供应商设置存在 `sessionStorage` 里，而跨源的 iframe 写不进去。插件改为给服务端一份生成的 `index.html`（通过 `GITNEXUS_WEB_DIST`），在 SPA 的模块脚本运行**之前**就把 `gitnexus-llm-settings` 种好；供应商、Key、模型分别取自 `GITNEXUS_PLUS_AI_PROVIDER` / `GITNEXUS_PLUS_AI_API_KEY` / `GITNEXUS_PLUS_AI_MODEL`，可选 `GITNEXUS_PLUS_AI_BASE_URL`（OpenAI 兼容端点、Azure 端点、Ollama 地址）。于是每个标签页都不用再手贴 Key。一个变量都没设时对话框保持原样；设了一半或写错（比如少了 `GITNEXUS_PLUS_AI_MODEL`）会在卡片上说明，服务照常启动。生成的页面随服务一起删除，接管的外部服务绝不改动；Key 只写进那一个页面，卡片上只看得到供应商、模型和端点。
 - **刷新建议**：陈旧度判断同时给出 `无需刷新` / `增量刷新` / `重新分析` / `全量重建` / `初始化索引` / `无法判断`。没有提交基线时不会把“工作区没改”说成可增量刷新；`--skip-git` 索引会明确建议重新分析。
 - **索引覆盖**：列出被 `gitnexus analyze` 跳过的超大文件，给出大小、语言占比，以及生成物/压缩文件的判断信号。
 - **索引新鲜度**：索引提交与 `HEAD` 对比，分为 `current` / `behind` / `diverged` / `unknown`，并给出未提交变更数。
@@ -111,6 +113,19 @@ npm test
 
 点击结果行会用 `ctx.sidebarRight.openResourceIn(sessionId, address, { params: { line } })` 打开平台文件查看器并定位行；没有该服务时退回复制路径。
 
+### 给内嵌 Web 端的 AI 设置
+
+内嵌的 GitNexus SPA 自带对话，AI 设置按标签页保存在 `sessionStorage` 里。在 DSH 启动的环境里导出下面这些变量，面板每次启动服务时都会替你填好：
+
+| 变量 | 含义 |
+| --- | --- |
+| `GITNEXUS_PLUS_AI_PROVIDER` | `openai`、`gemini`、`anthropic`、`azure-openai`、`ollama`、`openrouter`、`minimax`、`glm`、`deepseek` 之一；常见别名也认（`google`、`claude`、`azure`、`z.ai`、`open-ai`）。 |
+| `GITNEXUS_PLUS_AI_API_KEY` | 供应商 Key；`ollama` 不需要。 |
+| `GITNEXUS_PLUS_AI_MODEL` | 供应商那边的模型 id，例如 `gpt-4o-mini`、`gemini-2.0-flash`、`llama3.2`。 |
+| `GITNEXUS_PLUS_AI_BASE_URL` | 可选。OpenAI 兼容端点、Azure 端点（`azure-openai` 必填）或 Ollama 地址。 |
+
+这些值不经过网络：服务端交出去的那一页在 SPA 模块脚本运行前用内联脚本写 `sessionStorage`。一个变量都没设时对话框原样不动，卡片会说明这一点；设了一半（比如有供应商和模型但没有 Key）会在卡片上报错，服务仍然启动，写错变量不会连 3D 视图一起丢掉。
+
 ## 遇到问题怎么解决
 
 先看面板自己报的状态：`GitNexus 不存在`、`没有索引`、`索引过期`、`FTS 不可用`。下面的表只处理插件边界内的事，其余指向上游 GitNexus 的文档路径。
@@ -131,6 +146,8 @@ npm test
 | 门禁显示“无法确认”，而不是“无需刷新” | 索引没有记录提交，所以只能比较工作区。受限沙箱里的 analyze 起不了 `git` 子进程，manifest 的 `lastCommit` 因此为空——本机实测：同一条命令在普通终端会写入提交，在沙箱里留空。想要更强的结论，把复制出的命令在沙箱外跑一次；无论哪种状态，刷新按钮都可用。 | 本插件差量引擎 + 分析器的 git 访问；无上游 GitNexus 路径。 |
 | 图视图空白，或报 404 | 404 说明宿主还没有 `/api/gitnexus/graph` 路由，重启 DSH，而不是只刷新页面。空白画布但下面有说明，通常是索引还没有社区（旧索引）或索引忙：刷新索引即可。节点数按预算截断，卡片会写明省略了多少。 | 本插件宿主路由；图数据本身来自 GitNexus 索引。 |
 | 图视图对某些项目一直加载或 504，另一些正常 | Windows ACL 沙箱第一次给 workspace 授权时会把可继承 ACE 传播到整棵仓库树，大仓库可能超过 25 秒 helper 超时；已授权过的项目则很快。0.1.5 起搜索/图 helper 的 workspace 根收窄到 `<repo>/.gitnexus`，只覆盖索引目录；重启 DSH 后生效。仍失败时确认 `.gitnexus/lbug` 存在，并检查是否有另一个 analyze 正占用该索引。 | 本插件的 sandbox 策略根；图数据本身来自 GitNexus 索引。 |
+| 3D 视图打不开，或弹层里一片空白 | 先看卡片上的状态文案：`不可用` 表示宿主没有 shell 执行器，或本机没有 `gitnexus`（卡片会给出安装命令）；`启动失败` 会附上子进程自己的输出，端口被占（`EADDRINUSE`）与索引版本不匹配（`database file version`）是最常见的两种。`服务在跑，但索引对不上` 说明端口上的服务注册表里没有本仓库：先刷新本仓库索引，或停掉外部启动的服务。卡片整个缺失/报 404 则是宿主没挂载路由，重启 DSH。 | 本插件的 web 视图生命周期；SPA 是 GitNexus 包里的 `web/` 目录。 |
+| 3D 视图里 AI 设置还是空的 | 卡片上的 **AI 设置** 一行会说明原因：`没有设置 GITNEXUS_PLUS_AI_* 环境变量` 就是没配置，按上面那张表导出变量后重启 DSH 或点**重新启动**；`缺少 GITNEXUS_PLUS_AI_MODEL` / `缺少 GITNEXUS_PLUS_AI_API_KEY` 是配了一半；`外部启动的服务` 说明端口上那个服务不是插件起的，它的页面改不了，只能在弹层里手填一次。变量是 DSH 进程的环境，改完必须重启 DSH 才会被读到。 | 本插件的注入页面（`GITNEXUS_WEB_DIST`）；SPA 的设置存在自己的 `sessionStorage` 里。 |
 | 点击搜索结果没有打开文件 | 点击依赖 `ctx.sidebarRight.openResourceIn`；没有该服务的 profile 会退回复制 `path:line`。重启 DSH；仍不行就用“复制”。 | 面板/DSH 边界，无上游 GitNexus 路径。 |
 | 文件时间线报 404/401 | 客户端先热更新了，宿主还没加载 `/api/gitnexus/file-history` 路由。重启 DSH，不是只刷新页面。 | 本插件宿主路由；无上游 GitNexus 路径。 |
 | 分析内存不足 | 保留面板的 `NODE_OPTIONS` / `GITNEXUS_MEMORY`，或手动提高 heap；必要时全量重建。 | [`gitnexus/README.md` — Analysis runs out of memory](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analysis-runs-out-of-memory)、[`RUNBOOK.md` — Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
@@ -192,6 +209,9 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 - 覆盖与搜索是只读的；维护是单独确认的写操作，不会自动触发。
 - 刷新门禁比对的是索引记录过的文件内容哈希。它看不到分析器因自身原因必须重跑的情况（schema 升级、新的分析特性）；**仍然刷新** 就是为这种情况留的。
 - 社区图不画全部符号：总览是社区图，下钻最多显示一个社区的节点预算那么多成员；符号视图是全仓库符号的有界截断投影，按文件顺序取前 N 个，不能当成完整图。两者都会标注是否截断。
+- 3D 视图是第二个进程，按需启动：需要本机有 `gitnexus` CLI；宿主没有 shell 执行器时只提供手动执行的命令。嵌入是只读展示——iframe 是另一个源，面板脚本进不去，操作请在 SPA 里做，或用**在新标签页打开**。
+- 端口上手工启动的服务，只有注册表里列了本仓库才会被接管，否则插件换下一个端口而不是杀掉它；卡片会说明是哪一种。接管来的服务用的是它自己的页面，AI 设置注入不到，需要在那边的对话框里手填一次。
+- 注入的 AI 设置和手填的一样存在 `sessionStorage`：标签页关闭时 SPA 会清掉，下次启动时插件重新注入。生成的那份页面放在 `$DSH_HOME/gitnexus-plus/webview/`，服务停止时删除；除此之外不写仓库，也不写 `~/.dsh`。
 - 只报告 GitNexus 索引的事实，不重写解析器，不重新实现图数据库。
 - 搜索的 graph 模式是名称/路径匹配，不搜正文；text 模式才按行匹配，且有上限。
 - 源码回退只覆盖索引清单里的文件，新文件需先刷新索引。
