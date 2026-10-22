@@ -46,6 +46,13 @@ import path from 'node:path';
 import { defaultGitnexusHome } from './commands.js';
 import { globalDir, normalizePathKey, readRegistry } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
+import {
+  llmSettingsSeed,
+  readAiSettings,
+  type AiSettingsRead,
+  type AiProvider,
+} from './ai-settings.js';
+import { defaultWebDistRoot, locateWebDist, prepareWebDist, removeWebDist } from './webdist.js';
 import type { ShellLike } from './analyze.js';
 
 /** Where a web view got to. `unavailable` is decided before anything is spawned. */
@@ -87,6 +94,23 @@ export interface WebViewStatus {
   message: string | null;
   /** The tail of the server's output, once it has exited. */
   output: string;
+  /** What happened to the AI settings the SPA reads on load. */
+  ai: WebViewAiStatus;
+}
+
+/**
+ * The outcome of seeding the SPA's AI settings.
+ *
+ * `injected` is about the page this plugin served, not about the operator's intent: an
+ * adopted server keeps its own `index.html`, so there is nothing to seed even when the
+ * variables are set. `reason` is always safe to show — it never contains the key.
+ */
+export interface WebViewAiStatus {
+  injected: boolean;
+  provider: AiProvider | null;
+  model: string | null;
+  baseUrl: string | null;
+  reason: string | null;
 }
 
 /** The slice of the executor's process handle this module uses. */
@@ -143,6 +167,21 @@ export interface WebViewRunnerOptions {
    * repository can plausibly have been registered.
    */
   registryHomes?: (repoPath: string) => string[];
+  /**
+   * Where the AI settings come from. Defaults to `readAiSettings(process.env)`, and is a
+   * function so a restart picks up a changed environment without rebuilding the runner.
+   */
+  aiSettings?: () => AiSettingsRead;
+  /**
+   * Directory the seeded `index.html` is generated in. Defaults to
+   * `$DSH_HOME/gitnexus-plus/webview`, with one subdirectory per port.
+   */
+  webDistRoot?: string;
+  /**
+   * The packaged `web/` directory to copy, when the caller (or a test) already knows it.
+   * `null` explicitly disables the search and therefore the injection.
+   */
+  webDistSource?: string | null;
 }
 
 export interface WebViewRunner {
@@ -199,6 +238,8 @@ export function serveCommandLine(
     heapMb?: number;
     viaNode?: boolean;
     gitnexusHome?: string | null;
+    /** Overrides the served SPA directory (`GITNEXUS_WEB_DIST`); see `src/gitnexus/webdist.ts`. */
+    webDist?: string | null;
   } = {},
 ): string {
   const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
@@ -216,15 +257,19 @@ export function serveCommandLine(
     typeof options.gitnexusHome === 'string' && options.gitnexusHome !== ''
       ? quoteFor(flavor, options.gitnexusHome)
       : null;
+  const dist =
+    typeof options.webDist === 'string' && options.webDist !== '' ? quoteFor(flavor, options.webDist) : null;
 
   if (flavor === 'win32') {
     const prefix = memoryOff ? `$env:GITNEXUS_MEMORY='off'; ` : '';
     const homePrefix = home === null ? '' : `$env:GITNEXUS_HOME=${home}; `;
-    return `${prefix}${homePrefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
+    const distPrefix = dist === null ? '' : `$env:GITNEXUS_WEB_DIST=${dist}; `;
+    return `${prefix}${homePrefix}${distPrefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
   }
   const prefix = memoryOff ? `GITNEXUS_MEMORY='off' ` : '';
   const homePrefix = home === null ? '' : `GITNEXUS_HOME=${home} `;
-  return `${prefix}${homePrefix}NODE_OPTIONS=${heap} ${invocation}`;
+  const distPrefix = dist === null ? '' : `GITNEXUS_WEB_DIST=${dist} `;
+  return `${prefix}${homePrefix}${distPrefix}NODE_OPTIONS=${heap} ${invocation}`;
 }
 
 /**
@@ -261,6 +306,10 @@ interface ServerRecord {
   exited: boolean;
   exitCode: number | null;
   output: string;
+  /** What the AI settings injection did when this server was started. */
+  ai: WebViewAiStatus;
+  /** The generated SPA directory, when one was served; removed with the server. */
+  webDist: string | null;
 }
 
 interface FailureRecord {
@@ -269,6 +318,8 @@ interface FailureRecord {
   command: string | null;
   output: string;
   state: 'failed' | 'unavailable';
+  /** The injection outcome, when the failure happened after it was known. */
+  ai?: WebViewAiStatus;
 }
 
 /**
@@ -290,6 +341,35 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
   const startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const shellFlavor: 'win32' | 'posix' = process.platform === 'win32' ? 'win32' : 'posix';
+  const readAi = options.aiSettings ?? ((): AiSettingsRead => readAiSettings(process.env));
+
+  /**
+   * The injection state implied by the environment alone.
+   *
+   * Used for statuses that have no server behind them (stopped, failed before a spawn),
+   * where the honest answer is "this is what a start would inject".
+   */
+  const configuredAi = (read: AiSettingsRead = readAi()): WebViewAiStatus => {
+    if (read.kind === 'absent') {
+      return {
+        injected: false,
+        provider: null,
+        model: null,
+        baseUrl: null,
+        reason: '没有设置 GITNEXUS_PLUS_AI_* 环境变量，AI 设置保持原样。',
+      };
+    }
+    if (read.kind === 'invalid') {
+      return { injected: false, provider: null, model: null, baseUrl: null, reason: read.reason };
+    }
+    return {
+      injected: false,
+      provider: read.settings.provider,
+      model: read.settings.model,
+      baseUrl: read.settings.baseUrl,
+      reason: '服务启动时会自动注入这组 AI 设置。',
+    };
+  };
 
   let current: ServerRecord | null = null;
   let failure: FailureRecord | null = null;
@@ -381,6 +461,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
     startedAt: null,
     message: record.message,
     output: record.output,
+    ai: record.ai ?? configuredAi(),
   });
 
   const stoppedStatus = (repoPath: string): WebViewStatus => ({
@@ -395,6 +476,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
     startedAt: null,
     message: null,
     output: '',
+    ai: configuredAi(),
   });
 
   const runningStatus = async (server: ServerRecord, repoPath: string): Promise<WebViewStatus> => {
@@ -419,6 +501,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
         : `端口 ${server.port} 上的 GitNexus 服务已就绪，但它的注册表里没有当前仓库的索引，` +
           `因此 3D 视图会打开别的仓库。请先刷新本仓库的索引${server.owner === 'adopted' ? '，或停止外部启动的服务后重试' : ''}。`,
       output: server.output,
+      ai: server.ai,
     };
   };
 
@@ -426,7 +509,11 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
   const killCurrent = async (): Promise<void> => {
     const server = current;
     current = null;
-    if (server === null || server.handle === null || server.owner === 'adopted' || server.exited) return;
+    if (server === null || server.owner === 'adopted') return;
+    // The generated page carries the seeded key in a script tag. It is regenerated on the
+    // next start, so removing it here is what keeps the key from outliving the server.
+    if (server.webDist !== null) await removeWebDist(server.webDist);
+    if (server.handle === null || server.exited) return;
     try {
       await server.handle.kill?.();
     } catch {
@@ -468,6 +555,47 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       return failedStatus(failure);
     }
 
+    // Seed the SPA's AI settings, if the operator named them. This is the only way to get
+    // them into the embedded page: a parent frame cannot write the child's sessionStorage.
+    const aiRead = readAi();
+    let ai = configuredAi(aiRead);
+    let webDist: string | null = null;
+    if (aiRead.kind === 'ready') {
+      const outDir = path.join(options.webDistRoot ?? defaultWebDistRoot(), String(port));
+      try {
+        const source =
+          options.webDistSource === undefined
+            ? await locateWebDist({ cliPath: cli.cliPath, packageRoot: cli.packageRoot })
+            : options.webDistSource;
+        if (source === null) {
+          ai = { ...ai, reason: '没找到 GitNexus 的 web 目录，AI 设置不会被注入（服务照常启动）。' };
+        } else {
+          const prepared = await prepareWebDist({
+            sourceDir: source,
+            outDir,
+            seed: llmSettingsSeed(aiRead.settings),
+          });
+          if (prepared === null) {
+            ai = { ...ai, reason: 'GitNexus 的 index.html 结构与预期不同，跳过 AI 设置注入。' };
+          } else {
+            webDist = prepared.dir;
+            ai = {
+              injected: true,
+              provider: aiRead.settings.provider,
+              model: aiRead.settings.model,
+              baseUrl: aiRead.settings.baseUrl,
+              reason: null,
+            };
+          }
+        }
+      } catch (error) {
+        ai = {
+          ...ai,
+          reason: `生成注入页面失败：${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+
     const command = serveCommandLine(cli.cliPath, {
       flavor: shellFlavor,
       port,
@@ -476,6 +604,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       heapMb: options.heapMb,
       viaNode: cli.viaNode,
       gitnexusHome: registryHome,
+      webDist,
     });
     const spec = shell.resolve({
       command,
@@ -497,6 +626,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
         command,
         output: '',
         message: `启动 GitNexus Web 服务失败：${error instanceof Error ? error.message : String(error)}`,
+        ai,
       };
       return failedStatus(failure);
     }
@@ -512,6 +642,8 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       exited: false,
       exitCode: null,
       output: '',
+      ai,
+      webDist,
     };
     current = record;
 
@@ -542,6 +674,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
               ? 'GitNexus Web 服务已退出。'
               : `GitNexus Web 服务启动后立即退出（exit ${record.exitCode}）。` +
                 '端口被占用、索引版本不匹配都会这样，下面的输出里有原因。',
+          ai,
         };
         return failedStatus(failure);
       }
@@ -561,6 +694,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
           message:
             `GitNexus Web 服务已启动（端口 ${port}），但它的注册表 ${registryHome} 里没有这个仓库。` +
             '先刷新索引，让 GitNexus 注册这个目录。',
+          ai,
         };
         return failedStatus(failure);
       }
@@ -574,6 +708,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       command,
       output: record.output,
       message: `等待 GitNexus Web 服务响应超时（${Math.round(startTimeoutMs / 1000)} 秒）。`,
+      ai,
     };
     return failedStatus(failure);
   };
@@ -601,6 +736,14 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
             exited: false,
             exitCode: null,
             output: '',
+            ai: {
+              injected: false,
+              provider: null,
+              model: null,
+              baseUrl: null,
+              reason: '这个服务是外部启动的：插件改不了它的页面，AI 设置需要在弹层里手动填写。',
+            },
+            webDist: null,
           };
           return runningStatus(current, repoPath);
         }
@@ -721,7 +864,9 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
     dispose(): void {
       const server = current;
       current = null;
-      if (server === null || server.owner === 'adopted' || server.handle === null) return;
+      if (server === null || server.owner === 'adopted') return;
+      if (server.webDist !== null) void removeWebDist(server.webDist);
+      if (server.handle === null) return;
       try {
         void server.handle.kill?.();
       } catch {

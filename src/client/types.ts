@@ -494,6 +494,20 @@ export interface ClientWebViewStatus {
   startedAt: number | null;
   message: string | null;
   output: string;
+  /**
+   * What the AI settings injection did.
+   *
+   * `injected` means the page this plugin served already carries the provider, key and
+   * model in its `sessionStorage` seed, so the SPA's 设置 dialog opens pre-filled. The
+   * key itself is never part of the status.
+   */
+  ai: {
+    injected: boolean;
+    provider: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    reason: string | null;
+  };
 }
 
 /**

@@ -54,6 +54,24 @@ interface WebViewBody {
 }
 
 /**
+ * One line about the AI settings the page was seeded with.
+ *
+ * There is nothing to redact: the status carries the provider, model and endpoint, never
+ * the key. When injection did not happen the host's own sentence is shown, because it
+ * already distinguishes "no variables set" from "the variables are wrong" from "an
+ * external server owns this page".
+ */
+export function webViewAiLine(view: ClientWebViewStatus): string {
+  // A host that predates this field sends no `ai` at all — that is a host that cannot
+  // inject anything, so the honest line is the same as "not injected".
+  const ai = view.ai;
+  if (ai === undefined || ai === null) return '未注入 AI 设置。';
+  if (!ai.injected) return ai.reason ?? '未注入 AI 设置。';
+  const endpoint = ai.baseUrl === null ? '' : ` · ${ai.baseUrl}`;
+  return `已注入：${ai.provider ?? '?'} · ${ai.model ?? '?'}${endpoint}`;
+}
+
+/**
  * The card's own status line, in the panel's vocabulary.
  *
  * `adopted` is called out rather than folded into "running": the operator started that
@@ -282,6 +300,15 @@ export function WebViewCard({
             'div',
             { style: { ...MUTED, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } },
             detail,
+          ),
+
+      view === null
+        ? null
+        : h(
+            'div',
+            { style: { display: 'flex', gap: '6px', alignItems: 'flex-start', ...MUTED, fontSize: '12px' } },
+            h('span', { style: { whiteSpace: 'nowrap' } }, 'AI 设置'),
+            h('span', { style: { flex: '1 1 auto', wordBreak: 'break-word' } }, webViewAiLine(view)),
           ),
 
       readyUrl !== null && view !== null

@@ -1,10 +1,10 @@
-/**
- * dsh-gitnexus-plus — browser half.
+﻿/**
+ * dsh-gitnexus-plus 鈥?browser half.
  *
  * Several ESM modules compiled by `tsc` (AMD, `outFile`) into one CommonJS artifact
  * on purpose. The in-tree client preset (`packages/client/tsdown.client.ts`) is
  * unpublished, so an out-of-tree plugin must reproduce its output format with its
- * own toolchain — and the honest minimum here is no bundler at all: `tsc` emits one
+ * own toolchain 鈥?and the honest minimum here is no bundler at all: `tsc` emits one
  * `define(...)` block per source file and `scripts/build-client.mjs` resolves them
  * with a small registry, with no bundler and no node_modules in the loop.
  *
@@ -13,9 +13,8 @@
  * An earlier revision hand-rolled every control with inline styles, on the
  * reasoning that `@deepseek-ai/dsh-client-ui-primitives` ships no JS in the
  * installed runtime and its exports therefore could not be verified. That
- * reasoning was wrong twice over. The package's own README states the rule —
- * "plugins cannot import another plugin's components, so this package is the one
- * place controls can be shared; reuse them" — and the installed plugin
+ * reasoning was wrong twice over. The package's own README states the rule 鈥? * "plugins cannot import another plugin's components, so this package is the one
+ * place controls can be shared; reuse them" 鈥?and the installed plugin
  * `dsh-context` declares it as a peer dependency, which is exactly how a plugin is
  * meant to get a native look.
  *
@@ -28,7 +27,7 @@
  *   Tag           tone: "neutral" | "solid" | "outline" | "info"
  *   PathLabel     path
  *   FileTypeIcon  path | kind (from classifyFileType) , size, className
- *   Tooltip       label, side, delayMs, portal — wraps a single child
+ *   Tooltip       label, side, delayMs, portal 鈥?wraps a single child
  *
  * WHAT THE PANEL SHOWS, AND WHY
  * -----------------------------
@@ -71,7 +70,7 @@ import {
 import { GitActivitySection, activityView } from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
-import { WebViewCard, WebViewSection, webViewSummary } from './sections/webview';
+import { WebViewCard, WebViewSection, webViewAiLine, webViewSummary } from './sections/webview';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
 import { FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
@@ -97,7 +96,7 @@ const TAB_KIND = 'gitnexus';
  * these, and reading anything else off `ctx` throws.
  *
  * `sidebarRightTabs` is deliberately absent and reached through `ctx.inject`
- * instead — it is an optional capability (a headless or TUI profile has no right
+ * instead 鈥?it is an optional capability (a headless or TUI profile has no right
  * sidebar at all), and naming it here would leave this plugin permanently pending
  * on those profiles rather than simply contributing nothing.
  */
@@ -107,7 +106,7 @@ const inject = ['slots'];
  * The client-side context this half is applied with.
  *
  * Narrowed to exactly what is used. The real context is the platform's, whose full
- * surface is much larger and is not published with types — declaring only these
+ * surface is much larger and is not published with types 鈥?declaring only these
  * members keeps the check meaningful instead of `any`.
  */
 interface SlotsContext {
@@ -163,8 +162,8 @@ function apply(ctx: SlotsContext): void {
               {
                 id: `${PLUGIN_ID}:coverage`,
                 order: 40,
-                title: () => 'GitNexus 索引',
-                description: () => '查看索引覆盖：被跳过的超大文件与语言分布',
+                title: () => 'GitNexus 绱㈠紩',
+                description: () => '鏌ョ湅绱㈠紩瑕嗙洊锛氳璺宠繃鐨勮秴澶ф枃浠朵笌璇█鍒嗗竷',
               },
             ],
           }),
@@ -204,7 +203,7 @@ function apply(ctx: SlotsContext): void {
       : React.createElement(
           'div',
           { style: { padding: 12, color: '#fff', background: '#3a1111' } },
-          'GitNexus 缺少组件: ' + missingComponents.join(', '),
+          'GitNexus 缂哄皯缁勪欢: ' + missingComponents.join(', '),
         );
 
   safe('sidebar.right.pane.tab', () => {
@@ -220,10 +219,10 @@ function apply(ctx: SlotsContext): void {
   });
 }
 
-// Named exports rather than `module.exports = {…}`: the browser half is compiled as
+// Named exports rather than `module.exports = {鈥`: the browser half is compiled as
 // AMD (`tsconfig.client.json`), which supplies an `exports` object per module and no
-// `module`. The loader's contract is unchanged — it takes the entry module's exports
-// — so `inject` and `apply` still land at the top level of what it receives.
+// `module`. The loader's contract is unchanged 鈥?it takes the entry module's exports
+// 鈥?so `inject` and `apply` still land at the top level of what it receives.
 export { inject, apply };
 
 /** Named for tests: the loader never reads anything under this key. */
@@ -250,6 +249,7 @@ export const __internals = {
     WebViewSection,
     WebViewCard,
     webViewSummary,
+    webViewAiLine,
     compactNumber,
     useProjectPath,
     contextDiagnostic,

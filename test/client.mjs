@@ -1772,6 +1772,13 @@ check(
     startedAt: 1,
     message: null,
     output: '',
+    ai: {
+      injected: true,
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      baseUrl: 'https://api.example.com/v1',
+      reason: null,
+    },
     ...patch,
   });
 
@@ -1800,7 +1807,21 @@ check(
   const stopped = render(I.WebViewCard, {
     // The real "stopped" status has no owner and no port, so it must not offer to stop
     // a server it does not have.
-    view: view({ state: 'stopped', url: null, owner: null, port: null, startedAt: null, repoResolvable: false }),
+    view: view({
+      state: 'stopped',
+      url: null,
+      owner: null,
+      port: null,
+      startedAt: null,
+      repoResolvable: false,
+      ai: {
+        injected: false,
+        provider: null,
+        model: null,
+        baseUrl: null,
+        reason: '没有设置 GITNEXUS_PLUS_AI_* 环境变量，AI 设置保持原样。',
+      },
+    }),
     route: 'present',
     busy: null,
     error: null,
@@ -1810,6 +1831,11 @@ check(
     'the card offers to start the server before anything is running',
     stopped.text.includes('启动并打开 3D 视图') && !stopped.text.includes('停止服务'),
     stopped.text.slice(0, 400),
+  );
+  check(
+    'a stopped card still says what will happen to the AI settings',
+    stopped.text.includes('GITNEXUS_PLUS_AI_') && !stopped.text.includes('已注入'),
+    stopped.text.slice(0, 500),
   );
 
   const ready = render(I.WebViewCard, {
@@ -1826,6 +1852,20 @@ check(
       ready.text.includes('在新标签页打开') &&
       ready.text.includes('停止服务'),
     ready.text.slice(0, 500),
+  );
+  check(
+    'a ready card reports the seeded provider and model, and the endpoint',
+    ready.text.includes('已注入：openai · gpt-4o-mini') && ready.text.includes('https://api.example.com/v1'),
+    ready.text.slice(0, 500),
+  );
+  check(
+    'the AI line never carries the key, and degrades on an old host',
+    I.webViewAiLine(view({})) === '已注入：openai · gpt-4o-mini · https://api.example.com/v1' &&
+      I.webViewAiLine(view({ ai: undefined })) === '未注入 AI 设置。' &&
+      I.webViewAiLine(
+        view({ ai: { injected: false, provider: null, model: null, baseUrl: null, reason: '外部启动的服务' } }),
+      ) === '外部启动的服务',
+    I.webViewAiLine(view({})),
   );
 
   const adopted = render(I.WebViewCard, {

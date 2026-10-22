@@ -3277,11 +3277,279 @@ async function realRepoSmoke() {
  * The CLI is faked through `GITNEXUS_CLI`, which `findGitnexusCli` treats as the
  * override, so these tests do not need GitNexus installed (CI does not install it).
  */
+async function aiSettingsTests() {
+  section('AI settings: environment variables to the SPA provider shape');
+  const { AI_ENV, AI_PROVIDERS, describeAiSettings, llmSettingsSeed, normalizeAiProvider, readAiSettings } =
+    await import('../lib/gitnexus/ai-settings.js');
+
+  check(
+    'the environment names are the documented ones',
+    AI_ENV.provider === 'GITNEXUS_PLUS_AI_PROVIDER' &&
+      AI_ENV.apiKey === 'GITNEXUS_PLUS_AI_API_KEY' &&
+      AI_ENV.model === 'GITNEXUS_PLUS_AI_MODEL' &&
+      AI_ENV.baseUrl === 'GITNEXUS_PLUS_AI_BASE_URL',
+    JSON.stringify(AI_ENV),
+  );
+  check('the provider list matches the SPA dialog', AI_PROVIDERS.length === 9, AI_PROVIDERS.join(','));
+
+  const absent = readAiSettings({});
+  check('an empty environment is absent, not an error', absent.kind === 'absent', JSON.stringify(absent));
+
+  const noProvider = readAiSettings({
+    GITNEXUS_PLUS_AI_API_KEY: 'sk-test',
+    GITNEXUS_PLUS_AI_MODEL: 'gpt-4o-mini',
+  });
+  check(
+    'a key without a provider is refused, and names the missing variable',
+    noProvider.kind === 'invalid' && noProvider.reason.includes('GITNEXUS_PLUS_AI_PROVIDER'),
+    JSON.stringify(noProvider),
+  );
+
+  const noModel = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'openai',
+    GITNEXUS_PLUS_AI_API_KEY: 'sk-test',
+  });
+  check(
+    'a provider without a model is refused, and names the missing variable',
+    noModel.kind === 'invalid' && noModel.reason.includes('GITNEXUS_PLUS_AI_MODEL'),
+    JSON.stringify(noModel),
+  );
+
+  const unknown = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'not-a-provider',
+    GITNEXUS_PLUS_AI_MODEL: 'x',
+  });
+  check(
+    'an unknown provider lists the choices instead of guessing',
+    unknown.kind === 'invalid' && unknown.reason.includes('deepseek') && unknown.reason.includes('openai'),
+    JSON.stringify(unknown),
+  );
+
+  const noKey = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'openai',
+    GITNEXUS_PLUS_AI_MODEL: 'gpt-4o-mini',
+  });
+  check(
+    'a hosted provider without a key is refused',
+    noKey.kind === 'invalid' && noKey.reason.includes('GITNEXUS_PLUS_AI_API_KEY'),
+    JSON.stringify(noKey),
+  );
+
+  const local = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'ollama',
+    GITNEXUS_PLUS_AI_MODEL: 'llama3.2',
+  });
+  check(
+    'a local model needs no key',
+    local.kind === 'ready' && local.settings.apiKey === '' && local.settings.baseUrl === null,
+    JSON.stringify(local),
+  );
+
+  const azureNoEndpoint = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'azure',
+    GITNEXUS_PLUS_AI_MODEL: 'gpt-4o',
+    GITNEXUS_PLUS_AI_API_KEY: 'k',
+  });
+  const azureReady = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'azure',
+    GITNEXUS_PLUS_AI_MODEL: 'gpt-4o',
+    GITNEXUS_PLUS_AI_API_KEY: 'k',
+    GITNEXUS_PLUS_AI_BASE_URL: 'https://demo.openai.azure.com',
+  });
+  check(
+    'azure needs its endpoint, and accepts one',
+    azureNoEndpoint.kind === 'invalid' &&
+      azureReady.kind === 'ready' &&
+      azureReady.settings.provider === 'azure-openai',
+    `${JSON.stringify(azureNoEndpoint)} / ${JSON.stringify(azureReady)}`,
+  );
+
+  check(
+    'provider aliases are normalised',
+    normalizeAiProvider('Google') === 'gemini' &&
+      normalizeAiProvider(' claude ') === 'anthropic' &&
+      normalizeAiProvider('Z.AI') === 'glm' &&
+      normalizeAiProvider('open_ai') === 'openai' &&
+      normalizeAiProvider('nope') === null,
+    [normalizeAiProvider('Google'), normalizeAiProvider('Z.AI'), normalizeAiProvider('nope')].join(','),
+  );
+
+  const trailing = readAiSettings({
+    GITNEXUS_PLUS_AI_PROVIDER: 'openai',
+    GITNEXUS_PLUS_AI_MODEL: 'gpt-4o-mini',
+    GITNEXUS_PLUS_AI_API_KEY: 'sk-test',
+    GITNEXUS_PLUS_AI_BASE_URL: 'https://api.example.com/v1///',
+  });
+  check(
+    'a base url loses its trailing slashes',
+    trailing.kind === 'ready' && trailing.settings.baseUrl === 'https://api.example.com/v1',
+    JSON.stringify(trailing),
+  );
+
+  const openaiSeed = llmSettingsSeed({
+    provider: 'openai',
+    apiKey: 'sk-test',
+    model: 'gpt-4o-mini',
+    baseUrl: 'https://api.example.com/v1',
+  });
+  check(
+    'only the active provider is seeded, so a hand-entered one survives',
+    openaiSeed.activeProvider === 'openai' &&
+      openaiSeed.openai.model === 'gpt-4o-mini' &&
+      openaiSeed.openai.apiKey === 'sk-test' &&
+      openaiSeed.openai.baseUrl === 'https://api.example.com/v1' &&
+      Object.keys(openaiSeed).length === 2,
+    JSON.stringify(openaiSeed),
+  );
+
+  const azureSeed = llmSettingsSeed({
+    provider: 'azure-openai',
+    apiKey: 'k',
+    model: 'gpt-4o',
+    baseUrl: 'https://demo.openai.azure.com',
+  });
+  check(
+    'azure is stored under the SPA storage key, with endpoint and deployment',
+    azureSeed.activeProvider === 'azure-openai' &&
+      azureSeed.azureOpenAI.endpoint === 'https://demo.openai.azure.com' &&
+      azureSeed.azureOpenAI.deploymentName === 'gpt-4o' &&
+      azureSeed['azure-openai'] === undefined,
+    JSON.stringify(azureSeed),
+  );
+
+  const ollamaSeed = llmSettingsSeed({ provider: 'ollama', apiKey: '', model: 'llama3.2', baseUrl: null });
+  check(
+    'a local model is seeded without a key field',
+    ollamaSeed.activeProvider === 'ollama' && ollamaSeed.ollama.model === 'llama3.2' && ollamaSeed.ollama.apiKey === undefined,
+    JSON.stringify(ollamaSeed),
+  );
+
+  const described = describeAiSettings(trailing);
+  check(
+    'the description names the provider and model, never the key',
+    described.includes('openai') && described.includes('gpt-4o-mini') && !described.includes('sk-test'),
+    described,
+  );
+  check(
+    'absent and invalid configurations describe themselves',
+    describeAiSettings(absent) === '未配置' && describeAiSettings(noModel) === '配置有误',
+    `${describeAiSettings(absent)} / ${describeAiSettings(noModel)}`,
+  );
+}
+
+async function webDistTests() {
+  section('generated web dist (the page that seeds the SPA)');
+  const { defaultWebDistRoot, locateWebDist, prepareWebDist, removeWebDist, rewriteIndexHtml, scriptSafeJson } =
+    await import('../lib/gitnexus/webdist.js');
+
+  const safe = scriptSafeJson({ a: '</script><script>alert(1)</script>' });
+  check('the payload cannot close its own script element', !safe.includes('</script>') && safe.includes('\\u003c'), safe);
+
+  const html =
+    '<!doctype html><html><head><title>GitNexus</title>' +
+    '<script type="module" crossorigin src="/assets/index-x.js"></script>' +
+    '<link rel="stylesheet" href="/assets/index.css">' +
+    '</head><body><div id="root"></div></body></html>';
+  const rewritten = rewriteIndexHtml(html, { activeProvider: 'openai', openai: { model: 'gpt-4o-mini' } });
+  check(
+    'the module script is replaced by a seed that loads it afterwards',
+    typeof rewritten === 'string' &&
+      !rewritten.includes('<script type="module"') &&
+      rewritten.includes('data-gitnexus-plus-ai') &&
+      rewritten.includes('script.src = "/assets/index-x.js"') &&
+      rewritten.includes('sessionStorage.setItem("gitnexus-llm-settings"'),
+    String(rewritten).slice(0, 400),
+  );
+  check(
+    'the rest of the page survives the rewrite',
+    typeof rewritten === 'string' &&
+      rewritten.includes('/assets/index.css') &&
+      rewritten.includes('<div id="root">') &&
+      rewritten.indexOf('data-gitnexus-plus-ai') < rewritten.indexOf('</head>'),
+    String(rewritten),
+  );
+  check('no seed means no rewrite', rewriteIndexHtml(html, null) === null);
+  check(
+    'a page without a module script is not rewritten',
+    rewriteIndexHtml('<!doctype html><html><head></head><body></body></html>', { activeProvider: 'openai' }) === null,
+  );
+
+  // A package-shaped directory, so the locator can be exercised without a real install.
+  const root = fixturePath('webdist');
+  await fs.rm(root, { recursive: true, force: true });
+  const pkg = path.join(root, 'node_modules', 'gitnexus');
+  const packaged = path.join(pkg, 'web');
+  await fs.mkdir(path.join(packaged, 'assets'), { recursive: true });
+  await fs.writeFile(path.join(packaged, 'index.html'), html);
+  await fs.writeFile(path.join(packaged, 'assets', 'index-x.js'), 'console.log("spa")');
+
+  check(
+    'the packaged page is found from a dist/cli path',
+    (await locateWebDist({ cliPath: path.join(pkg, 'dist', 'cli', 'index.js') })) === packaged,
+    String(await locateWebDist({ cliPath: path.join(pkg, 'dist', 'cli', 'index.js') })),
+  );
+  check(
+    'the packaged page is found from a package root',
+    (await locateWebDist({ cliPath: 'gitnexus', packageRoot: pkg })) === packaged,
+  );
+  check(
+    'a package without a page is reported as missing',
+    (await locateWebDist({ cliPath: 'gitnexus', packageRoot: path.join(root, 'nope') })) === null,
+  );
+
+  const outDir = path.join(root, 'out');
+  const prepared = await prepareWebDist({
+    sourceDir: packaged,
+    outDir,
+    seed: { activeProvider: 'openai', openai: { model: 'gpt-4o-mini', apiKey: 'sk-test' } },
+  });
+  check('a prepared dist reports its directory and asset strategy', prepared !== null && prepared.dir === outDir && (prepared.assets === 'link' || prepared.assets === 'copied'), JSON.stringify(prepared));
+  const written = await fs.readFile(path.join(outDir, 'index.html'), 'utf8');
+  check(
+    'the written page carries the seed',
+    written.includes('sk-test') && written.includes('/assets/index-x.js') && !written.includes('<script type="module"'),
+    written.slice(0, 400),
+  );
+  const linkedAsset = await fs.readFile(path.join(outDir, 'assets', 'index-x.js'), 'utf8');
+  check('the packaged assets are reachable from the generated directory', linkedAsset.includes('console.log("spa")'));
+
+  check(
+    'a missing source page is refused rather than half-written',
+    (await prepareWebDist({ sourceDir: path.join(root, 'nope'), outDir: path.join(root, 'out2'), seed: { activeProvider: 'openai' } })) === null,
+  );
+
+  await removeWebDist(outDir);
+  const gone = await fs
+    .access(path.join(outDir, 'index.html'))
+    .then(() => false)
+    .catch(() => true);
+  check('a generated dist can be removed', gone);
+
+  check(
+    'generated pages live under DSH_HOME',
+    defaultWebDistRoot({ DSH_HOME: 'C:\\dsh-home' }) === path.join('C:\\dsh-home', 'gitnexus-plus', 'webview'),
+    defaultWebDistRoot({ DSH_HOME: 'C:\\dsh-home' }),
+  );
+
+  await fs.rm(root, { recursive: true, force: true });
+}
+
 async function webViewTests() {
   section('web view runner (the embedded GitNexus SPA)');
   const http = await import('node:http');
   const { createWebViewRunner, serveCommandLine, webViewUrl } = await import('../lib/gitnexus/webview.js');
   const { mountWebViewRoute } = await import('../lib/routes/webview.js');
+
+  // The default `aiSettings` reads the environment, so a machine that exports these would
+  // otherwise change every command this section builds and write a page into `$DSH_HOME`.
+  const AI_VARS = [
+    'GITNEXUS_PLUS_AI_PROVIDER',
+    'GITNEXUS_PLUS_AI_API_KEY',
+    'GITNEXUS_PLUS_AI_MODEL',
+    'GITNEXUS_PLUS_AI_BASE_URL',
+  ];
+  const savedAiEnv = AI_VARS.map((name) => [name, process.env[name]]);
+  for (const name of AI_VARS) delete process.env[name];
 
   // --- the command line ---------------------------------------------------------
   const winServe = serveCommandLine('C:\\tools\\gitnexus.cmd', { flavor: 'win32' });
@@ -3478,6 +3746,152 @@ async function webViewTests() {
   check('stop kills the process this plugin started', spawned.calls.kills === 2, `kills=${spawned.calls.kills}`);
   check('stop reports stopped', stopped.state === 'stopped' && stopped.url === null, JSON.stringify(stopped));
   check('a stopped server stays stopped', (await runner.status(repoDir)).state === 'stopped');
+  check(
+    'with no AI variables a start reports that the settings are left alone',
+    started.ai.injected === false && String(started.ai.reason).includes('GITNEXUS_PLUS_AI_'),
+    JSON.stringify(started.ai),
+  );
+
+  // --- seeding the SPA's AI settings -------------------------------------------
+  // The SPA is a cross-origin iframe, so this half cannot write its `sessionStorage`.
+  // The injection point is therefore the page the server hands out: `GITNEXUS_WEB_DIST`
+  // points it at a generated copy of `index.html` that seeds the settings first.
+  const webSource = path.join(root, 'web');
+  await fs.mkdir(path.join(webSource, 'assets'), { recursive: true });
+  await fs.writeFile(
+    path.join(webSource, 'index.html'),
+    '<!doctype html><html><head><title>GitNexus</title>' +
+      '<script type="module" crossorigin src="/assets/index-abc.js"></script>' +
+      '<link rel="stylesheet" href="/assets/index.css">' +
+      '</head><body><div id="root"></div></body></html>',
+  );
+  await fs.writeFile(path.join(webSource, 'assets', 'index-abc.js'), 'console.log("spa")');
+  const distRoot = path.join(root, 'dist');
+
+  const seededServers = new Map();
+  const seededShell = makeShell(neverStops, {
+    onStart: () => seededServers.set(4747, { up: true, repos: [repoDir] }),
+    onKill: () => seededServers.delete(4747),
+  });
+  const seeder = createWebViewRunner({
+    shell: seededShell.shell,
+    port: 4747,
+    toolchain,
+    registryHomes: () => [homeDir],
+    fetchLike: makeFetch(seededServers),
+    sleep: async () => {},
+    startTimeoutMs: 500,
+    webDistRoot: distRoot,
+    webDistSource: webSource,
+    aiSettings: () => ({
+      kind: 'ready',
+      settings: {
+        provider: 'openai',
+        apiKey: 'sk-test-key',
+        model: 'gpt-4o-mini',
+        baseUrl: 'https://api.example.com/v1',
+      },
+    }),
+  });
+  const seeded = await seeder.start(repoDir);
+  check(
+    'a configured start reports the injection',
+    seeded.state === 'ready' && seeded.ai.injected === true,
+    JSON.stringify(seeded.ai),
+  );
+  check(
+    'the injection reports provider and model but never the key',
+    seeded.ai.provider === 'openai' &&
+      seeded.ai.model === 'gpt-4o-mini' &&
+      JSON.stringify(seeded.ai).includes('sk-test-key') === false,
+    JSON.stringify(seeded.ai),
+  );
+  const seededSpec = seededShell.calls.resolves[0];
+  const generatedDir = path.join(distRoot, '4747');
+  check(
+    'the server is pointed at the generated page',
+    typeof seededSpec?.command === 'string' &&
+      seededSpec.command.includes('GITNEXUS_WEB_DIST=') &&
+      seededSpec.command.includes(generatedDir),
+    String(seededSpec?.command),
+  );
+  const generatedIndex = await fs.readFile(path.join(generatedDir, 'index.html'), 'utf8');
+  check(
+    'the generated page seeds the settings before the app loads',
+    generatedIndex.includes('gitnexus-llm-settings') &&
+      generatedIndex.includes('sk-test-key') &&
+      generatedIndex.includes('script.src = "/assets/index-abc.js"'),
+    generatedIndex.slice(0, 500),
+  );
+  check(
+    'the original module tag is gone, so the seed cannot be bypassed',
+    !generatedIndex.includes('<script type="module"') && generatedIndex.includes('data-gitnexus-plus-ai'),
+    generatedIndex.slice(0, 500),
+  );
+  const linkedAsset = await fs.readFile(path.join(generatedDir, 'assets', 'index-abc.js'), 'utf8');
+  check('the packaged assets resolve from the generated directory', linkedAsset.includes('console.log("spa")'));
+
+  await seeder.stop();
+  const generatedGone = await fs
+    .access(path.join(generatedDir, 'index.html'))
+    .then(() => false)
+    .catch(() => true);
+  check('the generated page is removed with the server, key and all', generatedGone);
+
+  // An adopted server keeps its own page — it was started before this plugin existed.
+  const adoptAiServers = new Map([[4747, { up: true, repos: [repoDir] }]]);
+  const adoptAiShell = makeShell(neverStops);
+  const aiAdopter = createWebViewRunner({
+    shell: adoptAiShell.shell,
+    port: 4747,
+    toolchain,
+    registryHomes: () => [homeDir],
+    fetchLike: makeFetch(adoptAiServers),
+    sleep: async () => {},
+    startTimeoutMs: 500,
+    webDistRoot: distRoot,
+    webDistSource: webSource,
+    aiSettings: () => ({
+      kind: 'ready',
+      settings: { provider: 'gemini', apiKey: 'k', model: 'gemini-2.0-flash', baseUrl: null },
+    }),
+  });
+  const adoptedAi = await aiAdopter.start(repoDir);
+  check(
+    'an adopted server says it cannot be seeded rather than pretending',
+    adoptedAi.state === 'ready' && adoptedAi.ai.injected === false && String(adoptedAi.ai.reason).includes('外部'),
+    JSON.stringify(adoptedAi.ai),
+  );
+
+  // A typo in a variable name is explained, but must not stop the server.
+  const badServers = new Map();
+  const badShell = makeShell(neverStops, {
+    onStart: () => badServers.set(4749, { up: true, repos: [repoDir] }),
+    onKill: () => badServers.delete(4749),
+  });
+  const badRunner = createWebViewRunner({
+    shell: badShell.shell,
+    port: 4749,
+    toolchain,
+    registryHomes: () => [homeDir],
+    fetchLike: makeFetch(badServers),
+    sleep: async () => {},
+    startTimeoutMs: 500,
+    webDistRoot: distRoot,
+    aiSettings: () => ({ kind: 'invalid', reason: '缺少 GITNEXUS_PLUS_AI_MODEL：供应商 openai 需要模型 id。' }),
+  });
+  const badStart = await badRunner.start(repoDir);
+  check(
+    'a bad AI configuration still starts, and explains itself',
+    badStart.state === 'ready' && badStart.ai.injected === false && String(badStart.ai.reason).includes('缺少'),
+    JSON.stringify(badStart.ai),
+  );
+  check(
+    'a bad AI configuration serves the packaged page unchanged',
+    typeof badShell.calls.resolves[0]?.command === 'string' &&
+      badShell.calls.resolves[0].command.includes('GITNEXUS_WEB_DIST=') === false,
+    String(badShell.calls.resolves[0]?.command),
+  );
 
   // --- adopting a server this plugin did not start ------------------------------
   const adoptServers = new Map([[4747, { up: true, repos: [repoDir] }]]);
@@ -3740,6 +4154,11 @@ async function webViewTests() {
   disposeRoute();
   check('the dispose hook clears the registration', registered.length === 0);
 
+  for (const [name, value] of savedAiEnv) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+
   await fs.rm(root, { recursive: true, force: true });
 }
 
@@ -3763,6 +4182,8 @@ await formatTests();
 await compatibilityTests();
 await deltaTests();
 await graphTests();
+await aiSettingsTests();
+await webDistTests();
 await webViewTests();
 await realRepoSmoke();
 
