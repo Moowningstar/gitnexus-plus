@@ -32,6 +32,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { envPrefix, quoteArg, shellFlavor } from '../shell.js';
 
 /** Heap the CLI is given, matching what `ensureHeap` would have asked for. */
 const HEAP_MB = 8192;
@@ -181,20 +182,15 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
   if (skipGit) common.push('--skip-git');
   if (skipFts) common.push('--skip-fts');
 
-  const quote = (value: string): string =>
-    platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
+  const flavor = shellFlavor(platform);
+  const quote = (value: string): string => quoteArg(flavor, value);
 
-  /** Environment assignments, in the syntax of the operator's shell. */
-  const envPrefix = (): string => {
+  const env = (): string => {
     const pairs: Array<[string, string]> = [];
     if (memoryOff) pairs.push(['GITNEXUS_MEMORY', 'off']);
     pairs.push(['NODE_OPTIONS', `--max-old-space-size=${HEAP_MB}`]);
     if (gitnexusHome !== null && gitnexusHome !== '') pairs.push(['GITNEXUS_HOME', gitnexusHome]);
-
-    if (platform === 'win32') {
-      return `${pairs.map(([k, v]) => `$env:${k}=${quote(v)}`).join('; ')}; `;
-    }
-    return `${pairs.map(([k, v]) => `${k}=${quote(v)}`).join(' ')} `;
+    return envPrefix(flavor, pairs);
   };
 
   const line = (extra: readonly string[]): string => {
@@ -220,7 +216,7 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
       when:
         '该项目还没有 .gitnexus 索引时使用。' + (skipGitNote === null ? '' : skipGitNote),
       argv: line([]),
-      shell: envPrefix() + line([]),
+      shell: env() + line([]),
       destructive: false,
       caveat:
         skipFts
@@ -238,7 +234,7 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
         '增量刷新卡死或结果反常时的逃生舱。重建图与 FTS，耗时数分钟；未变更文件的解析产物仍会复用。' +
         (skipGitNote === null ? '' : skipGitNote),
       argv: line(['--force']),
-      shell: envPrefix() + line(['--force']),
+      shell: env() + line(['--force']),
       destructive: true,
       caveat: '--force 重建图与 FTS，未变更文件的解析产物仍会复用。',
     },
@@ -255,7 +251,7 @@ export function maintenanceCommands(repoPath: string, options: MaintenanceOption
               '面板显示 FTS 不可用、关键词搜索只能按名称匹配时使用。只重建搜索索引，不重跑分析。修复要在子进程里加载 FTS 扩展，因此系统需要具备原生运行时（Windows：VC++ 2015-2022 x64 与 OpenSSL 3）。' +
               (skipGit ? '该目录没有 git，命令同样带 --skip-git。' : ''),
             argv: `gitnexus ${repairArgs.join(' ')}`,
-            shell: envPrefix() + `gitnexus ${repairArgs.join(' ')}`,
+            shell: env() + `gitnexus ${repairArgs.join(' ')}`,
             destructive: false,
             caveat:
               '只修复搜索索引，不改图。两种失败要分清：受限沙箱会拒绝子进程（spawn EPERM，需在普通终端执行）；' +

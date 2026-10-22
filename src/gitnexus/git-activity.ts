@@ -409,7 +409,10 @@ export async function readGitActivity(
   const log = await git(repoPath, [
     'log',
     `--since=${since}`,
-    `--max-count=${maxCommits}`,
+    // One commit past the window: asking for exactly `maxCommits` cannot distinguish
+    // "the window holds exactly that many" from "there were more", and a `>=` guess
+    // flags every busy repository as truncated.
+    `--max-count=${maxCommits + 1}`,
     '--numstat',
     '--no-renames',
     `--format=${RS}%H${US}%an${US}%ae${US}%aI${US}%s`,
@@ -422,6 +425,8 @@ export async function readGitActivity(
   const commits: CommitTally[] = [];
 
   let commitCount = 0;
+  /** True once the loop met the commit past the window: a fact, not an inference. */
+  let capped = false;
   let totalInsertions = 0;
   let totalDeletions = 0;
   let newestCommit = '';
@@ -439,6 +444,10 @@ export async function readGitActivity(
     const [sha, author, email, date, subject]: (string | undefined)[] = header.split(US);
     if (sha === undefined || date === undefined) continue;
 
+    if (commitCount >= maxCommits) {
+      capped = true;
+      break;
+    }
     commitCount += 1;
     const commit: CommitTally = {
       sha,
@@ -753,8 +762,9 @@ export async function readGitActivity(
       maxCommits,
       maxFiles,
       // A capped log that does not say so reads as "this is all the activity there
-      // was" — the one conclusion the caller must not draw.
-      truncated: commitCount >= maxCommits,
+      // was" — the one conclusion the caller must not draw. The flag is exact: the
+      // extra commit asked for above either arrived (capped) or did not.
+      truncated: capped,
       oldestCommit: oldestCommit === '' ? null : oldestCommit,
       newestCommit: newestCommit === '' ? null : newestCommit,
     },

@@ -30,7 +30,16 @@ import { existsSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { ShellLike } from './analyze.js';
+import type { ShellLike } from '../shell.js';
+import {
+  exitDetail,
+  parseHelperOutput,
+  quoteArg,
+  readLineNumber,
+  runHelper,
+  shellFlavor,
+  type ShellFlavor,
+} from '../shell.js';
 import { findGitnexusRoot } from './root.js';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
 import { readCapabilities } from './coverage.js';
@@ -197,12 +206,6 @@ function clampLimit(value: number | undefined): number {
   return Math.max(1, Math.min(50, n));
 }
 
-function toLine(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
-  if (typeof value === 'bigint') return Number(value);
-  return null;
-}
-
 function buildCypher(query: string, limit: number): string {
   // `query` has already been reduced to the safe literal alphabet by
   // sanitizeSearchQuery; the limit is a clamped integer. Neither is user-arbitrary
@@ -234,8 +237,8 @@ function mapRows(rows: unknown[]): SearchHit[] {
       kind: typeof row.kind === 'string' && row.kind !== '' ? row.kind : 'Unknown',
       name,
       filePath,
-      startLine: toLine(row.startLine),
-      endLine: toLine(row.endLine),
+      startLine: readLineNumber(row.startLine),
+      endLine: readLineNumber(row.endLine),
     });
   }
   return results;
@@ -277,7 +280,10 @@ export async function searchSymbols(
 
   const adapter = await loadAdapter(options);
   const limit = clampLimit(options.limit);
-  const cypher = buildCypher(query, limit);
+  // One row past the page. A page that fills exactly `limit` rows cannot otherwise
+  // tell "the index holds exactly this many" from "there are more"; reporting the
+  // former as truncation trains the reader to ignore the flag.
+  const cypher = buildCypher(query, limit + 1);
 
   let rows: unknown[];
   try {
@@ -296,7 +302,9 @@ export async function searchSymbols(
     throw new SearchError('search-failed', 500, `图查询失败：${message}`);
   }
 
-  const results = mapRows(rows);
+  const matched = mapRows(rows);
+  const truncated = matched.length > limit;
+  const results = truncated ? matched.slice(0, limit) : matched;
   const capabilities = readCapabilities(meta.raw ?? null);
   const ftsAvailable = capabilities.fts?.status === 'available';
   return {
@@ -305,7 +313,7 @@ export async function searchSymbols(
     ftsAvailable,
     results,
     total: results.length,
-    truncated: results.length >= limit,
+    truncated,
     warning: ftsAvailable
       ? null
       : 'FTS 内容检索不可用；本次按符号名与文件路径匹配，不搜索正文。',
@@ -336,31 +344,6 @@ export interface HelperSearchOptions {
   sandboxPolicy?: (indexPath: string) => unknown;
 }
 
-function quoteFor(value: string): string {
-  return process.platform === 'win32'
-    ? `'${value.replace(/'/g, "''")}'`
-    : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/**
- * Parse the helper's one-object stdout without assuming it is the very first byte.
- *
- * GitNexus or Node can write a warning to stdout before our payload. Taking the
- * first `{` to the last `}` is deliberately forgiving of that, while a missing
- * object still becomes a typed failure rather than an empty result.
- */
-function parseHelperOutput(text: string): Record<string, unknown> | null {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
 function searchErrorCode(value: unknown): SearchErrorCode {
   switch (value) {
     case 'invalid-query':
@@ -389,8 +372,8 @@ function asReport(value: unknown): SearchReport | null {
       kind: typeof row.kind === 'string' ? row.kind : 'Unknown',
       name: row.name,
       filePath: row.filePath,
-      startLine: toLine(row.startLine),
-      endLine: toLine(row.endLine),
+      startLine: readLineNumber(row.startLine),
+      endLine: readLineNumber(row.endLine),
     });
   }
   return {
@@ -452,52 +435,35 @@ export async function searchViaHelper(
     );
   }
 
+  const flavor: ShellFlavor = shellFlavor();
   const limit = clampLimit(options.limit);
   const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
   const args = [options.helperPath, absRepo, query, String(limit), options.managedPrefix ?? '']
-    .map(quoteFor)
+    .map((value) => quoteArg(flavor, value))
     .join(' ');
   const command = `node ${args}`;
 
-  let result: {
-    exitCode?: number | null;
-    timedOut?: boolean;
-    stdout?: { text?: string } | null;
-    stderr?: { text?: string } | null;
-  };
-  try {
-    const spec = options.shell.resolve({
-      command,
-      workdir: absRepo,
-      timeoutMs: 20_000,
-      onExpiry: 'kill',
-      stdoutMaxBytes: 2 * 1024 * 1024,
-      ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
-    });
-    const execution = await options.shell.execute(spec);
-    result = await execution.result();
-  } catch (cause) {
-    throw new SearchError(
-      'search-unavailable',
-      503,
-      `无法启动搜索子进程：${cause instanceof Error ? cause.message : String(cause)}`,
-    );
+  const run = await runHelper({
+    shell: options.shell,
+    command,
+    workdir: absRepo,
+    timeoutMs: 20_000,
+    stdoutMaxBytes: 2 * 1024 * 1024,
+    ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
+  });
+  if (run.kind === 'spawn-failed') {
+    throw new SearchError('search-unavailable', 503, `无法启动搜索子进程：${run.message}`);
   }
-
-  if (result.timedOut === true) {
+  if (run.kind === 'timed-out') {
     throw new SearchError('search-failed', 504, '搜索子进程超时（20 秒）。');
   }
-  const stdout = typeof result.stdout?.text === 'string' ? result.stdout.text : '';
-  const stderr = typeof result.stderr?.text === 'string' ? result.stderr.text : '';
-  const parsed = parseHelperOutput(stdout);
+
+  const parsed = parseHelperOutput(run.stdout);
   if (parsed === null) {
-    const tail = stderr.trim().slice(-600);
     throw new SearchError(
       'search-failed',
       500,
-      `搜索子进程没有返回可解析结果${
-        result.exitCode === undefined ? '' : ` (exit ${String(result.exitCode)})`
-      }` + (tail === '' ? '' : `：${tail}`),
+      `搜索子进程没有返回可解析结果${exitDetail(run.exitCode, run.stderr)}`,
     );
   }
   if (parsed.ok !== true) {

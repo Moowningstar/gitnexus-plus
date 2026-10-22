@@ -53,7 +53,8 @@ import {
   type AiProvider,
 } from './ai-settings.js';
 import { defaultWebDistRoot, locateWebDist, prepareWebDist, removeWebDist } from './webdist.js';
-import type { ShellLike } from './analyze.js';
+import type { ShellLike } from '../shell.js';
+import { envPrefix, invokeCommand, quoteArg, shellFlavor, tailChars, type ShellFlavor } from '../shell.js';
 
 /** Where a web view got to. `unavailable` is decided before anything is spawned. */
 export type WebViewState =
@@ -212,11 +213,6 @@ const PORT_ATTEMPTS = 10;
 const OUTPUT_TAIL = 4000;
 const HEALTH_TIMEOUT_MS = 700;
 
-/** Quote one argument for the shell the executor will spawn. */
-function quoteFor(shell: 'win32' | 'posix', value: string): string {
-  return shell === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 /**
  * Build the `gitnexus serve` command line, as the shell will read it.
  *
@@ -242,34 +238,27 @@ export function serveCommandLine(
     webDist?: string | null;
   } = {},
 ): string {
-  const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
+  const flavor: ShellFlavor = options.flavor ?? shellFlavor();
   const memoryOff = options.memoryOff !== false;
   const heapMb = options.heapMb ?? DEFAULT_HEAP_MB;
   const port = options.port ?? DEFAULT_PORT;
   const host = options.host ?? DEFAULT_HOST;
   const viaNode = options.viaNode === true;
 
-  const args = `serve --port ${port} --host ${quoteFor(flavor, host)}`;
-  const head = viaNode ? `node ${quoteFor(flavor, cliPath)}` : quoteFor(flavor, cliPath);
-  const invocation = viaNode || flavor !== 'win32' ? `${head} ${args}` : `& ${head} ${args}`;
-  const heap = quoteFor(flavor, `--max-old-space-size=${heapMb}`);
-  const home =
-    typeof options.gitnexusHome === 'string' && options.gitnexusHome !== ''
-      ? quoteFor(flavor, options.gitnexusHome)
-      : null;
-  const dist =
-    typeof options.webDist === 'string' && options.webDist !== '' ? quoteFor(flavor, options.webDist) : null;
+  const args = `serve --port ${port} --host ${quoteArg(flavor, host)}`;
+  const head = viaNode ? `node ${quoteArg(flavor, cliPath)}` : quoteArg(flavor, cliPath);
+  const invocation = invokeCommand(flavor, head, args, { viaNode });
 
-  if (flavor === 'win32') {
-    const prefix = memoryOff ? `$env:GITNEXUS_MEMORY='off'; ` : '';
-    const homePrefix = home === null ? '' : `$env:GITNEXUS_HOME=${home}; `;
-    const distPrefix = dist === null ? '' : `$env:GITNEXUS_WEB_DIST=${dist}; `;
-    return `${prefix}${homePrefix}${distPrefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
+  const pairs: Array<[string, string]> = [];
+  if (memoryOff) pairs.push(['GITNEXUS_MEMORY', 'off']);
+  if (typeof options.gitnexusHome === 'string' && options.gitnexusHome !== '') {
+    pairs.push(['GITNEXUS_HOME', options.gitnexusHome]);
   }
-  const prefix = memoryOff ? `GITNEXUS_MEMORY='off' ` : '';
-  const homePrefix = home === null ? '' : `GITNEXUS_HOME=${home} `;
-  const distPrefix = dist === null ? '' : `GITNEXUS_WEB_DIST=${dist} `;
-  return `${prefix}${homePrefix}${distPrefix}NODE_OPTIONS=${heap} ${invocation}`;
+  if (typeof options.webDist === 'string' && options.webDist !== '') {
+    pairs.push(['GITNEXUS_WEB_DIST', options.webDist]);
+  }
+  pairs.push(['NODE_OPTIONS', `--max-old-space-size=${heapMb}`]);
+  return `${envPrefix(flavor, pairs)}${invocation}`;
 }
 
 /**
@@ -290,7 +279,7 @@ function tailOf(
   limit = OUTPUT_TAIL,
 ): string {
   const combined = `${result.stdout?.text ?? ''}${result.stdout?.text === undefined ? '' : '\n'}${result.stderr?.text ?? ''}`.trim();
-  return combined.length <= limit ? combined : combined.slice(combined.length - limit);
+  return tailChars(combined, limit);
 }
 
 interface ServerRecord {

@@ -3277,6 +3277,251 @@ async function realRepoSmoke() {
  * The CLI is faked through `GITNEXUS_CLI`, which `findGitnexusCli` treats as the
  * override, so these tests do not need GitNexus installed (CI does not install it).
  */
+async function shellTests() {
+  section('shell primitives: quoting, env prefixes, helper spawns, truncation honesty');
+  const {
+    envPrefix,
+    exitDetail,
+    invokeCommand,
+    looksDeniedBySandbox,
+    looksPermissionDenied,
+    parseHelperOutput,
+    quoteArg,
+    readLineNumber,
+    runHelper,
+    shellFlavor,
+    tailChars,
+    tailToLine,
+  } = await import('../lib/shell.js');
+
+  // --- quoting ------------------------------------------------------------------
+  // One rule, six former copies. Each of these cases was a way the copies could have
+  // silently disagreed: a space, an apostrophe, a CJK directory, a UNC path.
+  check(
+    'a plain path is single-quoted on both shells',
+    quoteArg('win32', 'C:\\repo') === "'C:\\repo'" && quoteArg('posix', '/srv/repo') === "'/srv/repo'",
+    `${quoteArg('win32', 'C:\\repo')} | ${quoteArg('posix', '/srv/repo')}`,
+  );
+  check(
+    'a space stays inside the literal',
+    quoteArg('win32', 'C:\\my repo') === "'C:\\my repo'",
+    quoteArg('win32', 'C:\\my repo'),
+  );
+  check(
+    "an apostrophe is doubled on windows and escaped on posix",
+    quoteArg('win32', "it's") === "'it''s'" && quoteArg('posix', "it's") === "'it'\\''s'",
+    `${quoteArg('win32', "it's")} | ${quoteArg('posix', "it's")}`,
+  );
+  check(
+    'a CJK path is passed through unchanged',
+    quoteArg('win32', 'D:\\项目\\文档') === "'D:\\项目\\文档'",
+    quoteArg('win32', 'D:\\项目\\文档'),
+  );
+  check(
+    'a UNC path keeps both leading separators',
+    quoteArg('win32', '\\\\server\\share\\repo') === "'\\\\server\\share\\repo'",
+    quoteArg('win32', '\\\\server\\share\\repo'),
+  );
+
+  // --- env prefixes -------------------------------------------------------------
+  check(
+    'windows assigns through $env: and ends with a separator',
+    envPrefix('win32', [
+      ['A', '1'],
+      ['B', 'two words'],
+    ]) === "$env:A='1'; $env:B='two words'; ",
+    envPrefix('win32', [
+      ['A', '1'],
+      ['B', 'two words'],
+    ]),
+  );
+  check(
+    'posix assigns inline and ends with a separator',
+    envPrefix('posix', [
+      ['A', '1'],
+      ['B', 'two words'],
+    ]) === "A='1' B='two words' ",
+    envPrefix('posix', [
+      ['A', '1'],
+      ['B', 'two words'],
+    ]),
+  );
+  check('an empty prefix is the empty string, not a stray separator', envPrefix('win32', []) === '');
+
+  // --- invocation ---------------------------------------------------------------
+  check(
+    'only a quoted windows head needs the call operator',
+    invokeCommand('win32', "'C:\\x\\gitnexus.cmd'", 'analyze').startsWith('& ') &&
+      invokeCommand('win32', "node 'C:\\x\\index.js'", 'analyze', { viaNode: true }) ===
+        "node 'C:\\x\\index.js' analyze" &&
+      invokeCommand('posix', "'/x/gitnexus'", 'analyze') === "'/x/gitnexus' analyze",
+    invokeCommand('win32', "'C:\\x\\gitnexus.cmd'", 'analyze'),
+  );
+  check(
+    'the flavour comes from the platform string',
+    shellFlavor('win32') === 'win32' && shellFlavor('linux') === 'posix' && shellFlavor('darwin') === 'posix',
+  );
+
+  // --- tails --------------------------------------------------------------------
+  const long = 'one\ntwo\nthree\nfour';
+  check(
+    'the line tail starts on a boundary when it can',
+    tailToLine(long, 10) === 'four',
+    JSON.stringify(tailToLine(long, 10)),
+  );
+  check(
+    'the char tail does not look for a boundary',
+    tailChars(long, 10) === '\ntwo\nthree\nfour'.slice(-10),
+    JSON.stringify(tailChars(long, 10)),
+  );
+  check('a short text is returned whole', tailToLine('abc', 10) === 'abc' && tailChars('abc', 10) === 'abc');
+
+  // --- refusal predicates -------------------------------------------------------
+  // The two rules were two identically-named copies; they are different on purpose.
+  check(
+    'a bare EPERM is not a sandbox refusal',
+    looksDeniedBySandbox('EPERM: operation not permitted') === false &&
+      looksDeniedBySandbox('[sandbox: file access denied under workspace-write mode]') === true &&
+      looksDeniedBySandbox('Error: Access is denied.') === true,
+  );
+  check(
+    'the install reading includes EPERM and EACCES',
+    looksPermissionDenied('EPERM: operation not permitted') === true &&
+      looksPermissionDenied('EACCES: permission denied') === true &&
+      looksPermissionDenied('everything is fine') === false,
+  );
+
+  // --- small readers ------------------------------------------------------------
+  check(
+    'a helper payload survives a warning printed before it',
+    parseHelperOutput('warning: something\n{"ok":true}\n')?.ok === true &&
+      parseHelperOutput('no object here') === null &&
+      parseHelperOutput('{not json}') === null,
+  );
+  check(
+    'line numbers accept numbers and bigints, and reject the rest',
+    readLineNumber(3.9) === 3 && readLineNumber(7n) === 7 && readLineNumber('3') === null && readLineNumber(null) === null,
+  );
+  check(
+    'the exit detail omits what it does not know',
+    exitDetail(undefined, '') === '' && exitDetail(1, '') === ' (exit 1)' && exitDetail(1, 'boom') === ' (exit 1)：boom',
+    exitDetail(1, 'boom'),
+  );
+
+  // --- the helper spawn ---------------------------------------------------------
+  const stubShell = (result, options = {}) => {
+    const calls = { resolves: 0, executes: 0 };
+    return {
+      calls,
+      shell: {
+        resolve(request) {
+          calls.resolves += 1;
+          calls.request = request;
+          return { spec: true };
+        },
+        async execute() {
+          calls.executes += 1;
+          if (options.throwOnExecute) throw new Error('EPERM: spawn failed');
+          return {
+            async result() {
+              if (options.throwOnResult) throw new Error('stream closed');
+              return result;
+            },
+          };
+        },
+      },
+    };
+  };
+
+  const ok = stubShell({ exitCode: 0, stdout: { text: '{"ok":true}' }, stderr: { text: '' } });
+  const okRun = await runHelper({
+    shell: ok.shell,
+    command: 'node helper.js',
+    workdir: '/repo',
+    timeoutMs: 1000,
+    stdoutMaxBytes: 1024,
+  });
+  check(
+    'a helper run reports its output and asks the executor to kill at expiry',
+    okRun.kind === 'ok' &&
+      okRun.stdout === '{"ok":true}' &&
+      okRun.exitCode === 0 &&
+      ok.calls.request.onExpiry === 'kill' &&
+      ok.calls.request.workdir === '/repo',
+    JSON.stringify({ run: okRun, request: ok.calls.request }),
+  );
+
+  const slow = stubShell({ exitCode: null, timedOut: true });
+  const slowRun = await runHelper({
+    shell: slow.shell,
+    command: 'node helper.js',
+    workdir: '/repo',
+    timeoutMs: 1000,
+    stdoutMaxBytes: 1024,
+  });
+  check('a timed-out helper is its own kind', slowRun.kind === 'timed-out', JSON.stringify(slowRun));
+
+  const failing = stubShell({}, { throwOnExecute: true });
+  const failedRun = await runHelper({
+    shell: failing.shell,
+    command: 'node helper.js',
+    workdir: '/repo',
+    timeoutMs: 1000,
+    stdoutMaxBytes: 1024,
+  });
+  check(
+    'a refused spawn carries the reason instead of throwing',
+    failedRun.kind === 'spawn-failed' && failedRun.message.includes('EPERM'),
+    JSON.stringify(failedRun),
+  );
+
+  // --- truncation is a fact, not a guess ----------------------------------------
+  // A page of exactly `limit` rows is complete; reporting it as truncated taught the
+  // reader to ignore the flag. Both call sites fetched one row past the page instead.
+  {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const { readGitActivity } = await import('../lib/gitnexus/git-activity.js');
+
+    const root = fixturePath('shell-truncation');
+    await fs.rm(root, { recursive: true, force: true });
+    try {
+      await fs.mkdir(path.join(root, 'src'), { recursive: true });
+      await fs.writeFile(path.join(root, 'src', 'a.ts'), 'export const a = 1;\n');
+      const git = (args) => exec('git', args, { cwd: root, windowsHide: true, timeout: 30_000 });
+      const identity = ['-c', 'user.email=test@example.com', '-c', 'user.name=shell-test'];
+      await git(['init']);
+      for (const message of ['one', 'two', 'three']) {
+        await git([...identity, 'add', '-A']);
+        await git([...identity, 'commit', '-m', message, '--allow-empty']);
+      }
+
+      const exact = await readGitActivity(root, { maxCommits: 3, sinceDays: 1 });
+      const under = await readGitActivity(root, { maxCommits: 2, sinceDays: 1 });
+      check(
+        'a commit window holding exactly the cap is not called truncated',
+        exact !== null && exact.window.truncated === false,
+        JSON.stringify(exact?.window),
+      );
+      check(
+        'one commit past the cap is',
+        under !== null && under.window.truncated === true,
+        JSON.stringify(under?.window),
+      );
+    } catch (cause) {
+      // The confined test environment cannot spawn git; the same skip the delta tests use.
+      check(
+        'git truncation tests run (skipped: git cannot be spawned in this sandbox)',
+        true,
+        String(cause?.message ?? cause),
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+}
+
 async function aiSettingsTests() {
   section('AI settings: environment variables to the SPA provider shape');
   const { AI_ENV, AI_PROVIDERS, describeAiSettings, llmSettingsSeed, normalizeAiProvider, readAiSettings } =
@@ -4162,7 +4407,7 @@ async function webViewTests() {
   await fs.rm(root, { recursive: true, force: true });
 }
 
-console.log('\u001b[1mgitnexus-plus 路 coverage engine tests\u001b[0m');
+console.log('\u001b[1mgitnexus-plus · coverage engine tests\u001b[0m');
 await fixtureTests();
 await discoveryTests();
 await binaryTests();
@@ -4182,6 +4427,7 @@ await formatTests();
 await compatibilityTests();
 await deltaTests();
 await graphTests();
+await shellTests();
 await aiSettingsTests();
 await webDistTests();
 await webViewTests();

@@ -37,6 +37,18 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import {
+  envPrefix,
+  invokeCommand,
+  looksDeniedBySandbox,
+  quoteArg,
+  shellFlavor,
+  tailToLine,
+  type ShellFlavor,
+  type ShellExecutionLike,
+  type ShellLike,
+  type ShellResultLike,
+} from '../shell.js';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { hasGitMarker } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
@@ -76,47 +88,6 @@ export interface AnalyzeStatus {
   message: string | null;
   /** The tail of combined output, capped. */
   output: string;
-}
-
-/**
- * The slice of `ctx.shell` this module uses.
- *
- * Structural rather than an import: the plugin declares no runtime dependency on the
- * DSH packages, and a test can supply a stub without a shell on the machine.
- */
-export interface ShellRequestLike {
-  command: string;
-  workdir?: string;
-  timeoutMs?: number;
-  onExpiry?: 'kill' | 'none';
-  stdoutMaxBytes?: number;
-  signal?: AbortSignal;
-  /**
-   * A policy the host resolved for this call. The runner forwards it unchanged and
-   * never builds one; see the module comment for why the workspace root has to travel
-   * with the call at all.
-   */
-  sandboxPolicy?: unknown;
-}
-
-export interface ShellResultLike {
-  exitCode?: number | null;
-  signal?: string | null;
-  timedOut?: boolean;
-  aborted?: boolean;
-  stdout?: { text?: string } | null;
-  stderr?: { text?: string } | null;
-}
-
-export interface ShellExecutionLike {
-  result(): Promise<ShellResultLike>;
-  kill?(): boolean | Promise<boolean>;
-}
-
-export interface ShellLike {
-  /** Applies the executor's defaults and caps. `execute` only accepts a resolved spec. */
-  resolve(request: ShellRequestLike): unknown;
-  execute(spec: unknown): Promise<ShellExecutionLike>;
 }
 
 export interface AnalyzeRunnerOptions {
@@ -192,19 +163,6 @@ const DEFAULT_OUTPUT_LIMIT = 256 * 1024;
 const DEFAULT_TAIL_LIMIT = 4 * 1024;
 
 /**
- * Quote one argument for the shell the executor will spawn.
- *
- * Windows and POSIX disagree, and `commands.ts` already carries the same pair — kept
- * separate here because these two modules are allowed to have different lifetimes:
- * one produces text for a human to paste, the other produces argv for a spawn, and
- * collapsing them would make a change to the paste-able text silently alter what
- * actually runs.
- */
-function quoteFor(shell: 'win32' | 'posix', value: string): string {
-  return shell === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/**
  * Build the command line, as the shell will read it.
  *
  * TWO THINGS HERE WERE WRONG ON THE FIRST ATTEMPT, AND TOGETHER THEY MADE THE BUTTON
@@ -247,7 +205,7 @@ export function analyzeCommandLine(
     gitnexusHome?: string | null;
   } = {},
 ): string {
-  const flavor: 'win32' | 'posix' = options.flavor ?? (process.platform === 'win32' ? 'win32' : 'posix');
+  const flavor: ShellFlavor = options.flavor ?? shellFlavor();
   const memoryOff = options.memoryOff !== false;
   const heapMb = options.heapMb ?? 8192;
   // A CLI taken from the declared dependency is the package's `dist/cli/index.js`, so it
@@ -268,36 +226,22 @@ export function analyzeCommandLine(
     `${skipGit ? ' --skip-git' : ''}` +
     `${skipFts ? ' --skip-fts' : ''}` +
     `${force ? ' --force' : ''} ` +
-    quoteFor(flavor, repoPath);
-  const head = viaNode ? `node ${quoteFor(flavor, cliPath)}` : quoteFor(flavor, cliPath);
-  // On Windows a `.cmd` or `.ps1` reached by absolute path needs `&`. POSIX needs none,
-  // because an absolute path in command position is already a command.
-  const invocation = viaNode || flavor !== 'win32' ? `${head} ${args}` : `& ${head} ${args}`;
-  const heap = quoteFor(flavor, `--max-old-space-size=${heapMb}`);
-  const home =
-    typeof options.gitnexusHome === 'string' && options.gitnexusHome !== ''
-      ? quoteFor(flavor, options.gitnexusHome)
-      : null;
-
-  if (flavor === 'win32') {
-    const prefix = memoryOff ? `$env:GITNEXUS_MEMORY='off'; ` : '';
-    const homePrefix = home === null ? '' : `$env:GITNEXUS_HOME=${home}; `;
-    return `${prefix}${homePrefix}$env:NODE_OPTIONS=${heap}; ${invocation}`;
+    quoteArg(flavor, repoPath);
+  const head = viaNode ? `node ${quoteArg(flavor, cliPath)}` : quoteArg(flavor, cliPath);
+  // The call operator (Windows-only, quoted head only) is part of the shared rule:
+  // `'C:\...\gitnexus.cmd' analyze` is a string literal followed by an unexpected token,
+  // not a command.
+  const invocation = invokeCommand(flavor, head, args, { viaNode });
+  const pairs: Array<[string, string]> = [];
+  if (memoryOff) pairs.push(['GITNEXUS_MEMORY', 'off']);
+  if (typeof options.gitnexusHome === 'string' && options.gitnexusHome !== '') {
+    pairs.push(['GITNEXUS_HOME', options.gitnexusHome]);
   }
-  const prefix = memoryOff ? `GITNEXUS_MEMORY='off' ` : '';
-  const homePrefix = home === null ? '' : `GITNEXUS_HOME=${home} `;
-  return `${prefix}${homePrefix}NODE_OPTIONS=${heap} ${invocation}`;
-}
-
-/**
- * A sandbox refusal, recognised from the marker DSH writes into the output.
- *
- * The marker is the only reliable signal. It used to also match a bare `EPERM`, which
- * is how a transient Windows file lock got reported as "the sandbox refused this
- * write" — and the operator was told to stop trying, when retrying was the answer.
- */
-function looksDenied(text: string): boolean {
-  return /\[sandbox:[^\]]*denied/i.test(text) || /access is denied/i.test(text);
+  // The heap has to be in place before the CLI starts, because it is the CLI's own
+  // re-spawn that needs it; that re-spawn is also what `GITNEXUS_MEMORY=off` suppresses
+  // under a confined executor.
+  pairs.push(['NODE_OPTIONS', `--max-old-space-size=${heapMb}`]);
+  return `${envPrefix(flavor, pairs)}${invocation}`;
 }
 
 /** Delay before the single transient-lock retry. Long enough for a scanner to let go. */
@@ -462,14 +406,6 @@ function prepareAnalyzeCacheDirs(repoPath: string): string | null {
   return null;
 }
 
-/** Keep the last `limit` characters, on a line boundary when one is available. */
-function tail(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  const cut = text.slice(text.length - limit);
-  const firstBreak = cut.indexOf('\n');
-  return firstBreak === -1 ? cut : cut.slice(firstBreak + 1);
-}
-
 export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunner {
   const { shell } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -477,7 +413,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
   const tailLimit = options.tailLimit ?? DEFAULT_TAIL_LIMIT;
   const now = options.now ?? (() => Date.now());
   const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
-  const shellFlavor: 'win32' | 'posix' = process.platform === 'win32' ? 'win32' : 'posix';
+  const flavor: ShellFlavor = shellFlavor();
 
   const runs = new Map<string, AnalyzeStatus>();
   const inFlight = new Map<string, AbortController>();
@@ -606,7 +542,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     // CLAUDE.md and the agent skill files inside the repository, which is a much larger
     // change than "refresh the index" and not what the button says it does.
     const command = analyzeCommandLine(cli.cliPath, key, {
-      flavor: shellFlavor,
+      flavor,
       memoryOff: options.memoryOff,
       heapMb: options.heapMb,
       viaNode: cli.viaNode,
@@ -699,7 +635,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
         }
 
         const combined = `${result.stdout?.text ?? ''}${result.stderr?.text ?? ''}`;
-        const body = tail(combined, tailLimit);
+        const body = tailToLine(combined, tailLimit);
         const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
 
         if (
@@ -766,7 +702,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
               '分析器的解析阶段要在 .gitnexus 下创建缓存目录，当前沙箱不允许（可以建文件、不能建目录），' +
               '预建目录也会被 GitNexus 在解析开始时删除。请在普通终端执行下面的命令，再回到面板刷新。',
           });
-        } else if (looksDenied(combined)) {
+        } else if (looksDeniedBySandbox(combined)) {
           finish(key, {
             state: 'denied',
             attempts: attempt,

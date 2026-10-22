@@ -37,7 +37,15 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
-import type { ShellLike } from './analyze.js';
+import type { ShellLike } from '../shell.js';
+import {
+  envPrefix,
+  looksPermissionDenied,
+  quoteArg,
+  shellFlavor,
+  tailToLine,
+  type ShellFlavor,
+} from '../shell.js';
 
 export type InstallState =
   | 'running'
@@ -116,11 +124,6 @@ export function defaultInstallPrefix(env: NodeJS.ProcessEnv = process.env): stri
   return path.join(home, 'gitnexus-plus', 'gitnexus');
 }
 
-/** Quote one argument for the shell the executor spawns. */
-function quote(value: string, platform: NodeJS.Platform): string {
-  return platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
 /**
  * The `npm install` line, as the shell will read it.
  *
@@ -133,28 +136,13 @@ export function installCommandLine(
   spec: string,
   options: { platform?: NodeJS.Platform; cacheDir?: string } = {},
 ): string {
-  const platform = options.platform ?? process.platform;
+  const flavor: ShellFlavor = shellFlavor(options.platform ?? process.platform);
   // npm's ambient cache is under the user profile, outside the install target. A
   // workspace-write sandbox rooted at the prefix would deny those writes, so keep the
   // cache inside the granted tree; it is also easier to remove with the install.
   const cacheDir = options.cacheDir ?? path.join(prefix, '.npm-cache');
-  const args = ['install', '--prefix', quote(prefix, platform), spec, '--no-audit', '--no-fund'];
-  const cache = quote(cacheDir, platform);
-  return platform === 'win32'
-    ? `$env:npm_config_cache=${cache}; npm ${args.join(' ')}`
-    : `npm_config_cache=${cache} npm ${args.join(' ')}`;
-}
-
-/** Keep the last `limit` characters, on a line boundary when one is available. */
-function tail(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  const cut = text.slice(text.length - limit);
-  const firstBreak = cut.indexOf('\n');
-  return firstBreak === -1 ? cut : cut.slice(firstBreak + 1);
-}
-
-function looksDenied(text: string): boolean {
-  return /\[sandbox:[^\]]*denied/i.test(text) || /access is denied|EPERM|EACCES/i.test(text);
+  const args = ['install', '--prefix', quoteArg(flavor, prefix), spec, '--no-audit', '--no-fund'];
+  return `${envPrefix(flavor, [['npm_config_cache', cacheDir]])}npm ${args.join(' ')}`;
 }
 
 export function createInstallRunner(options: InstallRunnerOptions): InstallRunner {
@@ -306,7 +294,7 @@ export function createInstallRunner(options: InstallRunnerOptions): InstallRunne
       }
 
       const combined = `${result.stdout?.text ?? ''}${result.stderr?.text ?? ''}`;
-      const body = tail(combined, tailLimit);
+      const body = tailToLine(combined, tailLimit);
       const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
 
       if (abort.signal.aborted) {
@@ -318,7 +306,7 @@ export function createInstallRunner(options: InstallRunnerOptions): InstallRunne
           output: body,
           message: `超过 ${Math.round(timeoutMs / 60000)} 分钟上限已终止。网络慢或需要本地编译时，可以延长 analyzeTimeoutMs 后重试。`,
         });
-      } else if (looksDenied(combined)) {
+      } else if (looksPermissionDenied(combined)) {
         finish({
           state: 'denied',
           exitCode,

@@ -44,7 +44,8 @@ import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { searchWithFallback } from './gitnexus/search.js';
-import { createAnalyzeRunner, type ShellLike } from './gitnexus/analyze.js';
+import { createAnalyzeRunner } from './gitnexus/analyze.js';
+import type { ShellLike } from './shell.js';
 import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
 import { createWebViewRunner } from './gitnexus/webview.js';
 

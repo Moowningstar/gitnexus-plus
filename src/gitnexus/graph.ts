@@ -29,7 +29,16 @@ import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
 import { loadAdapter } from './search.js';
-import type { ShellLike } from './analyze.js';
+import type { ShellLike } from '../shell.js';
+import {
+  exitDetail,
+  parseHelperOutput,
+  quoteArg,
+  readLineNumber,
+  runHelper,
+  shellFlavor,
+  type ShellFlavor,
+} from '../shell.js';
 
 /** The projections a caller may ask for. Anything else is refused, not guessed. */
 export type GraphView = 'communities' | 'community' | 'symbols';
@@ -149,12 +158,6 @@ export function isGraphView(value: unknown): value is GraphView {
 function clampBudget(value: number | undefined, fallback: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(max, Math.floor(value)));
-}
-
-function toLine(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
-  if (typeof value === 'bigint') return Number(value);
-  return null;
 }
 
 function asString(value: unknown): string {
@@ -339,7 +342,7 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
         kind: asString(kind),
         name: asString(name) === '' ? id : asString(name),
         filePath: typeof filePath === 'string' && filePath !== '' ? filePath : null,
-        startLine: toLine(startLine),
+        startLine: readLineNumber(startLine),
       });
     }
 
@@ -392,7 +395,7 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
         kind: asString(kind),
         name: asString(name) === '' ? id : asString(name),
         filePath: typeof filePath === 'string' && filePath !== '' ? filePath : null,
-        startLine: toLine(startLine),
+        startLine: readLineNumber(startLine),
       });
     }
 
@@ -477,24 +480,6 @@ export interface HelperGraphOptions {
   sandboxPolicy?: (indexPath: string) => unknown;
 }
 
-function quoteFor(value: string): string {
-  return process.platform === 'win32'
-    ? `'${value.replace(/'/g, "''")}'`
-    : `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function parseHelperOutput(text: string): Record<string, unknown> | null {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
 function graphErrorCode(value: unknown): GraphErrorCode {
   switch (value) {
     case 'invalid-view':
@@ -526,7 +511,7 @@ function asProjection(value: unknown): GraphProjection | null {
       kind: typeof row.kind === 'string' ? row.kind : 'Unknown',
       name: typeof row.name === 'string' && row.name !== '' ? row.name : row.id,
       filePath: typeof row.filePath === 'string' && row.filePath !== '' ? row.filePath : null,
-      startLine: toLine(row.startLine),
+      startLine: readLineNumber(row.startLine),
       ...(typeof row.symbolCount === 'number' ? { symbolCount: row.symbolCount } : {}),
     });
   }
@@ -604,6 +589,7 @@ export async function projectViaHelper(
     return cached.value;
   }
 
+  const flavor: ShellFlavor = shellFlavor();
   const args = [
     options.helperPath,
     absRepo,
@@ -613,50 +599,32 @@ export async function projectViaHelper(
     String(budgetNodes),
     String(budgetEdges),
   ]
-    .map(quoteFor)
+    .map((value) => quoteArg(flavor, value))
     .join(' ');
   const command = `node ${args}`;
   const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
 
-  let result: {
-    exitCode?: number | null;
-    timedOut?: boolean;
-    stdout?: { text?: string } | null;
-    stderr?: { text?: string } | null;
-  };
-  try {
-    const spec = options.shell.resolve({
-      command,
-      workdir: absRepo,
-      timeoutMs: 25_000,
-      onExpiry: 'kill',
-      stdoutMaxBytes: 4 * 1024 * 1024,
-      ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
-    });
-    const execution = await options.shell.execute(spec);
-    result = await execution.result();
-  } catch (cause) {
-    throw new GraphError(
-      'graph-unavailable',
-      503,
-      `无法启动图投影子进程：${cause instanceof Error ? cause.message : String(cause)}`,
-    );
+  const run = await runHelper({
+    shell: options.shell,
+    command,
+    workdir: absRepo,
+    timeoutMs: 25_000,
+    stdoutMaxBytes: 4 * 1024 * 1024,
+    ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
+  });
+  if (run.kind === 'spawn-failed') {
+    throw new GraphError('graph-unavailable', 503, `无法启动图投影子进程：${run.message}`);
   }
-
-  if (result.timedOut === true) {
+  if (run.kind === 'timed-out') {
     throw new GraphError('graph-failed', 504, '图投影子进程超时（25 秒）。');
   }
-  const stdout = typeof result.stdout?.text === 'string' ? result.stdout.text : '';
-  const stderr = typeof result.stderr?.text === 'string' ? result.stderr.text : '';
-  const parsed = parseHelperOutput(stdout);
+
+  const parsed = parseHelperOutput(run.stdout);
   if (parsed === null) {
-    const tail = stderr.trim().slice(-600);
     throw new GraphError(
       'graph-failed',
       500,
-      `图投影子进程没有返回可解析结果${
-        result.exitCode === undefined ? '' : ` (exit ${String(result.exitCode)})`
-      }` + (tail === '' ? '' : `：${tail}`),
+      `图投影子进程没有返回可解析结果${exitDetail(run.exitCode, run.stderr)}`,
     );
   }
   if (parsed.ok !== true) {
