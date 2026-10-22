@@ -44,7 +44,10 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   start surfaces the process's own output — a version-mismatched index shows
   `Trying to read a database file with a different version` instead of a blank frame. An
   existing server on the port is adopted (and never killed) when it can see the
-  repository. Port and embedding are configurable; see `webViewPort`.
+  repository. The dialog opens at 86% of the usable viewport, has **紧凑 / 标准 / 铺满**
+  presets, and can be dragged to any size from the bottom-right corner; the size is
+  remembered in `localStorage` and clamped whenever the window shrinks. Port and
+  embedding are configurable; see `webViewPort`.
 - **AI settings, pre-filled** — the SPA keeps its provider settings in `sessionStorage`,
   which a cross-origin iframe cannot be written to. The plugin therefore serves it a
   generated `index.html` (through `GITNEXUS_WEB_DIST`) that seeds `gitnexus-llm-settings`

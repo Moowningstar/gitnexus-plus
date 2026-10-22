@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-gitnexus-plus 鈥?browser half.
  *
  * Several ESM modules compiled by `tsc` (AMD, `outFile`) into one CommonJS artifact
@@ -70,7 +70,17 @@ import {
 import { GitActivitySection, activityView } from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
-import { WebViewCard, WebViewSection, webViewAiLine, webViewSummary } from './sections/webview';
+import {
+    WebViewCard,
+    WebViewOverlay,
+    WebViewSection,
+    clampOverlaySize,
+    overlayPresetSize,
+    overlaySizeLabel,
+    parseOverlaySize,
+    webViewAiLine,
+    webViewSummary,
+} from './sections/webview';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
 import { FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
@@ -248,8 +258,13 @@ export const __internals = {
     communityColors,
     WebViewSection,
     WebViewCard,
+    WebViewOverlay,
     webViewSummary,
     webViewAiLine,
+    clampOverlaySize,
+    overlayPresetSize,
+    overlaySizeLabel,
+    parseOverlaySize,
     compactNumber,
     useProjectPath,
     contextDiagnostic,

@@ -24,6 +24,134 @@ import { ClientWebViewStatus } from '../types';
 
 const POLL_MS = 1200;
 
+/**
+ * How much room the overlay may take, and how the operator changes it.
+ *
+ * THE SIZES ARE IN PIXELS, NOT `vw`/`vh`
+ * --------------------------------------
+ * A graph browser is read at whatever size the operator chose, so the dialog has to be
+ * resizable — and a resizable box cannot be sized in viewport units, because dragging one
+ * edge would change both. Pixels are also what `localStorage` can remember: the next open
+ * comes back at the size it was left at, clamped to whatever the window is now.
+ *
+ * The numbers below are fractions of the *usable* viewport (viewport minus the backdrop's
+ * padding on both sides), so the same preset reads sensibly on a laptop and on a 4K monitor.
+ */
+export interface OverlaySize {
+  width: number;
+  height: number;
+}
+
+export type OverlayPresetId = 'compact' | 'standard' | 'full';
+
+/** Space the backdrop keeps free on each side, so the dialog never touches the edges. */
+const OVERLAY_GUTTER = 24;
+
+/** Below this the graph is unreadable and the header buttons wrap into each other. */
+export const OVERLAY_MIN_SIZE: OverlaySize = { width: 560, height: 400 };
+
+/** What the size buttons do, as fractions of the usable viewport. */
+export const OVERLAY_PRESETS: ReadonlyArray<{
+  id: OverlayPresetId;
+  label: string;
+  width: number;
+  height: number;
+}> = [
+  { id: 'compact', label: '紧凑', width: 0.6, height: 0.66 },
+  { id: 'standard', label: '标准', width: 0.86, height: 0.88 },
+  { id: 'full', label: '铺满', width: 1, height: 1 },
+];
+
+/** `localStorage` key holding the last size the operator settled on. */
+const OVERLAY_SIZE_KEY = 'gitnexus-plus.webview.overlay';
+
+/**
+ * A viewport for sizing decisions.
+ *
+ * In the test harness there is no `window`, and a component that reached for it during
+ * render would throw there; the fallback is also what a pre-mount render would use.
+ */
+function readViewport(): OverlaySize {
+  const win = typeof window === 'undefined' ? undefined : window;
+  const width = win?.innerWidth;
+  const height = win?.innerHeight;
+  return {
+    width: typeof width === 'number' && width > 0 ? width : 1280,
+    height: typeof height === 'number' && height > 0 ? height : 800,
+  };
+}
+
+/** The usable area: the viewport minus a gutter on each side. */
+function usableViewport(viewport: OverlaySize): OverlaySize {
+  return {
+    width: Math.max(OVERLAY_MIN_SIZE.width, viewport.width - OVERLAY_GUTTER * 2),
+    height: Math.max(OVERLAY_MIN_SIZE.height, viewport.height - OVERLAY_GUTTER * 2),
+  };
+}
+
+/** Keep a size inside both the minimum and the current viewport. */
+export function clampOverlaySize(size: OverlaySize, viewport: OverlaySize): OverlaySize {
+  const usable = usableViewport(viewport);
+  const width = Number.isFinite(size.width) ? Math.round(size.width) : OVERLAY_MIN_SIZE.width;
+  const height = Number.isFinite(size.height) ? Math.round(size.height) : OVERLAY_MIN_SIZE.height;
+  return {
+    width: Math.min(Math.max(width, OVERLAY_MIN_SIZE.width), usable.width),
+    height: Math.min(Math.max(height, OVERLAY_MIN_SIZE.height), usable.height),
+  };
+}
+
+/** The size one of the preset buttons asks for, already clamped. */
+export function overlayPresetSize(preset: OverlayPresetId, viewport: OverlaySize): OverlaySize {
+  const entry = OVERLAY_PRESETS.find((candidate) => candidate.id === preset) ?? OVERLAY_PRESETS[1];
+  const usable = usableViewport(viewport);
+  return clampOverlaySize(
+    { width: usable.width * entry.width, height: usable.height * entry.height },
+    viewport,
+  );
+}
+
+/** Parse a remembered size; anything malformed is simply "no preference". */
+export function parseOverlaySize(raw: string | null): OverlaySize | null {
+  if (raw === null || raw === '') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const width = (parsed as { width?: unknown }).width;
+  const height = (parsed as { height?: unknown }).height;
+  if (typeof width !== 'number' || typeof height !== 'number') return null;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+/** The line shown in the header, so the operator can see what they got. */
+export function overlaySizeLabel(size: OverlaySize): string {
+  return `${Math.round(size.width)} × ${Math.round(size.height)}`;
+}
+
+function readStoredSize(): OverlaySize | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return parseOverlaySize(window.localStorage?.getItem(OVERLAY_SIZE_KEY) ?? null);
+  } catch {
+    // Private mode, disabled storage, quota — all mean "no remembered size".
+    return null;
+  }
+}
+
+function storeSize(size: OverlaySize): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage?.setItem(OVERLAY_SIZE_KEY, JSON.stringify(size));
+  } catch {
+    // Losing the preference is not worth an error; the dialog still works this session.
+  }
+}
+
 const OVERLAY_BACKDROP: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
@@ -32,20 +160,49 @@ const OVERLAY_BACKDROP: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  padding: '18px',
+  padding: `${OVERLAY_GUTTER}px`,
 };
 
 const OVERLAY_DIALOG: React.CSSProperties = {
+  position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  width: 'min(96vw, 1280px)',
-  height: '86vh',
   border: HAIRLINE,
   borderRadius: '8px',
   background: 'var(--dsw-alias-bg-base, #11111b)',
   boxShadow: '0 18px 60px rgba(0, 0, 0, 0.45)',
   overflow: 'hidden',
 };
+
+/**
+ * The corner grip.
+ *
+ * `touch-action: none` keeps a touchscreen drag from scrolling instead of resizing, and
+ * the pointer capture in `beginResize` keeps the events coming even while the cursor is
+ * over the cross-origin iframe (which would otherwise swallow them).
+ */
+const OVERLAY_GRIP: React.CSSProperties = {
+  position: 'absolute',
+  right: 0,
+  bottom: 0,
+  width: '18px',
+  height: '18px',
+  zIndex: 2,
+  cursor: 'nwse-resize',
+  touchAction: 'none',
+  borderBottomRightRadius: '8px',
+  background:
+    'linear-gradient(135deg, transparent 45%, var(--dsw-alias-border-l2, #3b3b4f) 45%, var(--dsw-alias-border-l2, #3b3b4f) 52%, transparent 52%, transparent 66%, var(--dsw-alias-border-l2, #3b3b4f) 66%, var(--dsw-alias-border-l2, #3b3b4f) 73%, transparent 73%)',
+};
+
+/** A drag in flight: where the pointer started and the size it started from. */
+interface ResizeDrag {
+  pointerId: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 interface WebViewBody {
   ok?: boolean;
@@ -228,16 +385,6 @@ export function WebViewCard({
   const [open, setOpen] = React.useState(false);
   const [src, setSrc] = React.useState<string | null>(null);
 
-  // Escape closes from anywhere; the listener only exists while the overlay is open.
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open]);
-
   const summary = webViewSummary(view, route);
   // One const rather than a boolean plus casts: everything below either has a URL to
   // open or does not, and `view.url` is the only thing worth narrowing on.
@@ -402,51 +549,183 @@ export function WebViewCard({
         : null,
     ),
 
-    open && src !== null
-      ? h(
-          'div',
-          {
-            style: OVERLAY_BACKDROP,
-            onClick: () => setOpen(false),
+    open && src !== null ? h(WebViewOverlay, { src, onClose: () => setOpen(false) }) : null,
+  );
+}
+
+/**
+ * The dialog around the SPA.
+ *
+ * It is its own component because the size is its own state: the card above only decides
+ * whether the view is open, while this one owns the remembered size, the preset buttons
+ * and the corner drag. That split is also what makes the size policy testable — the
+ * helpers are pure, and this component can be rendered with a plain `src` string.
+ */
+export function WebViewOverlay({ src, onClose }: { src: string; onClose: () => void }) {
+  // The remembered size wins over the default preset; both are clamped to the viewport
+  // that is current at open time, so a dialog remembered on a big monitor still fits a
+  // laptop pane instead of hanging off the edge.
+  const [size, setSize] = React.useState<OverlaySize>(() => {
+    const stored = readStoredSize();
+    return stored === null ? overlayPresetSize('standard', readViewport()) : clampOverlaySize(stored, readViewport());
+  });
+  const [preset, setPreset] = React.useState<OverlayPresetId | null>(null);
+  const [resizing, setResizing] = React.useState(false);
+  const drag = React.useRef<ResizeDrag | null>(null);
+
+  // Escape closes from anywhere; the listener only exists while the overlay is open.
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  // A window that got smaller must not leave the dialog hanging outside it.
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    const onResize = (): void => setSize((current) => clampOverlaySize(current, readViewport()));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const applySize = (next: OverlaySize, nextPreset: OverlayPresetId | null): void => {
+    const clamped = clampOverlaySize(next, readViewport());
+    setSize(clamped);
+    setPreset(nextPreset);
+    storeSize(clamped);
+  };
+
+  const beginResize = (event: React.PointerEvent<HTMLElement>): void => {
+    drag.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      width: size.width,
+      height: size.height,
+    };
+    setPreset(null);
+    setResizing(true);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const moveResize = (event: React.PointerEvent<HTMLElement>): void => {
+    const active = drag.current;
+    if (active === null) return;
+    event.preventDefault();
+    setSize(
+      clampOverlaySize(
+        {
+          width: active.width + (event.clientX - active.x),
+          height: active.height + (event.clientY - active.y),
+        },
+        readViewport(),
+      ),
+    );
+  };
+
+  const endResize = (event: React.PointerEvent<HTMLElement>): void => {
+    if (drag.current === null) return;
+    drag.current = null;
+    setResizing(false);
+    storeSize(clampOverlaySize(size, readViewport()));
+    event.stopPropagation();
+  };
+
+  const shown = clampOverlaySize(size, readViewport());
+
+  return h(
+    'div',
+    {
+      style: OVERLAY_BACKDROP,
+      onClick: onClose,
+    },
+    h(
+      'div',
+      {
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': 'GitNexus Web',
+        onClick: (event: React.MouseEvent) => event.stopPropagation(),
+        style: { ...OVERLAY_DIALOG, width: `${shown.width}px`, height: `${shown.height}px` },
+      },
+      h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '6px 8px 6px 10px',
+            borderBottom: HAIRLINE,
+            flexWrap: 'wrap',
           },
+        },
+        h('span', { style: { fontWeight: 600 } }, 'GitNexus Web'),
+        h(
+          'span',
+          {
+            title: '当前窗口大小；拖右下角可调，双击右下角恢复默认',
+            style: { ...styles.mono, ...MUTED, fontSize: '11px' },
+          },
+          overlaySizeLabel(shown),
+        ),
+        h('span', { style: { flex: '1 1 auto' } }),
+        ...OVERLAY_PRESETS.map((entry) =>
           h(
-            'div',
+            Button,
             {
-              role: 'dialog',
-              'aria-modal': 'true',
-              onClick: (event: React.MouseEvent) => event.stopPropagation(),
-              style: OVERLAY_DIALOG,
+              key: entry.id,
+              variant: preset === entry.id ? 'primary' : 'ghost',
+              title: `窗口大小：${entry.label}`,
+              onClick: () => applySize(overlayPresetSize(entry.id, readViewport()), entry.id),
             },
-            h(
-              'div',
-              {
-                style: {
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '8px 10px',
-                  borderBottom: HAIRLINE,
-                },
-              },
-              h('span', { style: { fontWeight: 600, flex: '1 1 auto' } }, 'GitNexus Web'),
-              h(
-                Button,
-                { variant: 'ghost', onClick: () => window.open(src, '_blank', 'noopener') },
-                '新标签页',
-              ),
-              h(Button, { variant: 'ghost', onClick: () => setOpen(false) }, '关闭'),
-            ),
-            h('iframe', {
-              src,
-              title: 'GitNexus Web',
-              // Same-origin is required: the SPA fetches its own /api endpoints and
-              // stores its session in localStorage. It is a distinct origin from this
-              // panel, so that grant does not reach the panel's own origin.
-              sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads',
-              style: { flex: '1 1 auto', width: '100%', border: 'none', background: '#11111b' },
-            }),
+            entry.label,
           ),
-        )
-      : null,
+        ),
+        h(Button, { variant: 'ghost', onClick: () => window.open(src, '_blank', 'noopener') }, '新标签页'),
+        h(Button, { variant: 'ghost', onClick: onClose }, '关闭'),
+      ),
+      h('iframe', {
+        src,
+        title: 'GitNexus Web',
+        // Same-origin is required: the SPA fetches its own /api endpoints and stores its
+        // session in localStorage. It is a distinct origin from this panel, so that grant
+        // does not reach the panel's own origin.
+        sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads',
+        style: { flex: '1 1 auto', width: '100%', border: 'none', background: '#11111b' },
+      }),
+      h('div', {
+        role: 'separator',
+        'aria-label': '拖动调整窗口大小',
+        title: '拖动调整窗口大小，双击恢复默认',
+        onPointerDown: beginResize,
+        onPointerMove: moveResize,
+        onPointerUp: endResize,
+        onPointerCancel: endResize,
+        onDoubleClick: () => applySize(overlayPresetSize('standard', readViewport()), 'standard'),
+        style: OVERLAY_GRIP,
+      }),
+      // A cross-origin iframe eats pointer events, so a drag that wanders over the SPA
+      // would stop resizing. This shield only exists during a drag and is the element the
+      // move/up handlers are attached to, which keeps the gesture continuous wherever the
+      // cursor goes.
+      resizing
+        ? h('div', {
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 1001,
+              cursor: 'nwse-resize',
+              touchAction: 'none',
+            },
+            onPointerMove: moveResize,
+            onPointerUp: endResize,
+            onPointerCancel: endResize,
+          })
+        : null,
+    ),
   );
 }

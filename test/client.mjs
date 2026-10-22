@@ -1907,6 +1907,77 @@ check(
     missing.text.slice(0, 300),
   );
 
+  // The dialog is its own component so the size policy can be exercised without opening
+  // the card: the helpers are pure, and the render only needs the URL it would show.
+  const laptop = { width: 1280, height: 800 };
+  check(
+    'overlay size: clamped up to the minimum and down to the viewport',
+    JSON.stringify(I.clampOverlaySize({ width: 100, height: 100 }, laptop)) ===
+      JSON.stringify({ width: 560, height: 400 }) &&
+      JSON.stringify(I.clampOverlaySize({ width: 5000, height: 5000 }, laptop)) ===
+        JSON.stringify({ width: 1232, height: 752 }),
+    JSON.stringify(I.clampOverlaySize({ width: 5000, height: 5000 }, laptop)),
+  );
+  check(
+    'overlay size: presets are fractions of the usable viewport, 铺满 fills it',
+    JSON.stringify(I.overlayPresetSize('full', laptop)) === JSON.stringify({ width: 1232, height: 752 }) &&
+      JSON.stringify(I.overlayPresetSize('compact', laptop)) === JSON.stringify({ width: 739, height: 496 }),
+    JSON.stringify(I.overlayPresetSize('compact', laptop)),
+  );
+  check(
+    'overlay size: a remembered size is used only when it parses and is positive',
+    JSON.stringify(I.parseOverlaySize('{"width":900,"height":700}')) ===
+      JSON.stringify({ width: 900, height: 700 }) &&
+      I.parseOverlaySize('not json') === null &&
+      I.parseOverlaySize('{"width":-1,"height":700}') === null &&
+      I.parseOverlaySize('{"width":900}') === null &&
+      I.parseOverlaySize(null) === null,
+    JSON.stringify(I.parseOverlaySize('{"width":-1,"height":700}')),
+  );
+  check(
+    'overlay size: the header label is the pixel size',
+    I.overlaySizeLabel({ width: 1060, height: 662 }) === '1060 × 662',
+    I.overlaySizeLabel({ width: 1060, height: 662 }),
+  );
+
+  const overlay = render(I.WebViewOverlay, { src: 'http://127.0.0.1:4747/?repo=D%3A%2Frepo', onClose: () => {} });
+  check(
+    'the overlay offers all three sizes and shows the current one',
+    overlay.text.includes('紧凑') &&
+      overlay.text.includes('标准') &&
+      overlay.text.includes('铺满') &&
+      overlay.text.includes('1060 × 662') &&
+      overlay.text.includes('关闭'),
+    overlay.text.slice(0, 400),
+  );
+  check(
+    'the overlay embeds the SPA in a frame',
+    overlay.tags.includes('iframe'),
+    overlay.tags.join(','),
+  );
+
+  // The grip carries no text, so it is found by role: a drag handle that assistive tech
+  // can name, and one the browser shows as a diagonal resize cursor.
+  const withRole = (node, role, out = []) => {
+    if (node === null || node === undefined || typeof node === 'boolean') return out;
+    if (Array.isArray(node)) {
+      for (const child of node) withRole(child, role, out);
+      return out;
+    }
+    if (typeof node !== 'object' || node.type === undefined) return out;
+    if (node.props?.role === role) out.push(node);
+    withRole(node.props?.children, role, out);
+    return out;
+  };
+  const grips = withRole(withHookFrame(() => I.WebViewOverlay({ src: 'http://127.0.0.1:4747/', onClose: () => {} })), 'separator');
+  check(
+    'the overlay has one labelled resize grip',
+    grips.length === 1 &&
+      grips[0].props['aria-label'] === '拖动调整窗口大小' &&
+      grips[0].props.style.cursor === 'nwse-resize',
+    JSON.stringify(grips.map((grip) => grip.props.style?.cursor)),
+  );
+
   // The stateful wrapper is only asserted on its first paint: it fetches on mount, and
   // this renderer deliberately does not run effects.
   const section = render(I.WebViewSection, { projectPath: 'D:/repo' });
