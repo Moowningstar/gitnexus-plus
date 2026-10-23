@@ -1033,6 +1033,7 @@ export function CoveragePanel(props: SlotProps) {
   const [searchMode, setSearchMode] = React.useState<'graph' | 'text' | null>(null);
   const [searchTotal, setSearchTotal] = React.useState(0);
   const [searchTruncated, setSearchTruncated] = React.useState(false);
+  const [searchContentSearch, setSearchContentSearch] = React.useState(false);
   const [searchWarning, setSearchWarning] = React.useState<string | null>(null);
   const [searching, setSearching] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
@@ -1206,6 +1207,7 @@ export function CoveragePanel(props: SlotProps) {
       setSearchMode(body.mode === 'text' ? 'text' : body.mode === 'graph' ? 'graph' : null);
       setSearchTotal(typeof body.total === 'number' ? body.total : results.length);
       setSearchTruncated(body.truncated === true);
+      setSearchContentSearch(body.contentSearch === true);
       setSearchWarning(typeof body.warning === 'string' ? body.warning : null);
     } catch (cause) {
       if (seq !== searchSeq.current) return;
@@ -1223,6 +1225,7 @@ export function CoveragePanel(props: SlotProps) {
     setSearchMode(null);
     setSearchTotal(0);
     setSearchTruncated(false);
+    setSearchContentSearch(false);
     setSearchWarning(null);
     setSearchError(null);
     setSearching(false);
@@ -1840,6 +1843,7 @@ export function CoveragePanel(props: SlotProps) {
       results: searchResults,
       total: searchTotal,
       truncated: searchTruncated,
+      contentSearch: searchContentSearch,
       warning: searchWarning,
       copied: searchCopied,
       onOpen: openSearchHit,

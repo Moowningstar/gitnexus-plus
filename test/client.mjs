@@ -599,6 +599,7 @@ const search = {
   ],
   total: 1,
   truncated: false,
+  contentSearch: false,
   warning: null,
   copied: null,
   onOpen: () => {},
@@ -1336,6 +1337,31 @@ const searchEmpty = render(I.CoverageView, {
   search: { ...search, results: [], total: 0 },
 });
 check('an empty search result says so', searchEmpty.text.includes('没有匹配'), searchEmpty.text.slice(0, 400));
+
+// The card must say which surfaces produced the list. "按符号名与文件路径匹配" was true
+// of every search before the FTS pass existed; saying it while FTS ran would understate
+// what was searched, and saying it while FTS failed would overstate it.
+const contentFooter = render(I.CoverageView, { report, ...viewProps, search: { ...search, contentSearch: true } });
+check(
+  'a content-search run names FTS as part of the scope',
+  contentFooter.text.includes('文件正文（FTS）'),
+  contentFooter.text.slice(0, 500),
+);
+const namesOnlyFooter = render(I.CoverageView, {
+  report,
+  ...viewProps,
+  search: { ...search, contentSearch: false, warning: null },
+});
+check(
+  'a names-only run says the body text was not searched',
+  namesOnlyFooter.text.includes('不搜索正文'),
+  namesOnlyFooter.text.slice(0, 500),
+);
+check(
+  'a names-only run does not claim FTS matched',
+  !namesOnlyFooter.text.includes('文件正文（FTS）'),
+  namesOnlyFooter.text.slice(0, 500),
+);
 
 const searchFailed = render(I.CoverageView, {
   report,

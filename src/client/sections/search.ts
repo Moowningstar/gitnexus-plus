@@ -79,7 +79,9 @@ export function SearchSection({ search }: { search: SearchViewState }) {
       search.warning ??
         (search.mode === 'text'
           ? '图查询不可用，已回退到源码关键词搜索。'
-          : '按符号名与文件路径匹配；不搜索正文。'),
+          : search.contentSearch
+            ? '按符号名、文件路径与文件正文（FTS）匹配。'
+            : '按符号名与文件路径匹配；不搜索正文。'),
     ),
     search.results === null
       ? null

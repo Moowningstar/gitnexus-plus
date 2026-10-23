@@ -1,29 +1,37 @@
 /**
  * Keyword search over the graph GitNexus already indexed.
  *
- * WHY THIS DOES NOT USE FTS
- * -------------------------
- * GitNexus's keyword surface is its BM25/FTS extension. On this machine that
- * extension fails to load (`libfts.lbug_extension` is missing), and the existing
- * index was built with `--skip-fts`, so there are no FTS tables to query even if the
- * extension were present. Reporting "search unavailable" would be honest, but it
- * would also be the end of the feature for the state most users are in.
+ * WHY THERE ARE TWO SURFACES, AND WHICH ONE OWNS WHAT
+ * ---------------------------------------------------
+ * GitNexus's keyword surface is its BM25/FTS extension. This module used to refuse it
+ * outright: `skipFts: true` was passed unconditionally, so even an index that shipped
+ * FTS tables was never asked for a content match, and the manifest's
+ * `capabilities.fts` only decided which caveat the panel printed. The warning said
+ * "FTS 不可用" about the index while the code had made it unavailable.
  *
- * The graph itself still contains every symbol's name and file path, and a Cypher
- * `CONTAINS` over those columns answers the question the user is actually asking
- * when they type a symbol name. This module therefore searches **names and paths**,
- * not source text or descriptions. That distinction is deliberate and surfaced to
- * the panel: an FTS repair can add content search later without this module
- * pretending it already has it.
+ * The split is now by what each surface can actually answer:
+ *   - **Names and paths come from the graph.** Every symbol is a node, so a
+ *     `CONTAINS` over `name`/`filePath` is exact about *which symbol* matched and can
+ *     return its line range.
+ *   - **Source text comes from FTS.** Only the index holds file content, and only
+ *     `QUERY_FTS_INDEX` ranks it without reading the tree. A file hit therefore names
+ *     a file, not a symbol — that is what the index knows.
+ *
+ * When the manifest says FTS is unavailable (the common state on this machine: the
+ * extension is missing, and the existing index was built with `--skip-fts`) the load
+ * is not attempted at all and the report says so. When the manifest says it IS
+ * available but the load still fails, the graph query is retried without FTS and the
+ * failure is carried in `warning`: a degraded index is reported, never silently
+ * downgraded to the other surface.
  *
  * READ-ONLY, AND REUSING GITNEXUS'S OWN ADAPTER
  * ---------------------------------------------
- * The database is opened through GitNexus's `withLbugDb(..., { readOnly: true,
- * skipFts: true })`, so it takes no write lock, cannot mutate the index, and does not
- * attempt the FTS load that is known to fail here. The adapter is deep-imported from
- * the installed package, matching the plugin's existing "reuse, don't reimplement"
- * stance; if the package or its native engine is unavailable, search reports that
- * state rather than falling back to a filesystem scan with different semantics.
+ * The database is opened through GitNexus's `withLbugDb(..., { readOnly: true })`, so
+ * it takes no write lock and cannot mutate the index. The adapter is deep-imported
+ * from the installed package, matching the plugin's existing "reuse, don't
+ * reimplement" stance; if the package or its native engine is unavailable, search
+ * reports that state rather than falling back to a filesystem scan with different
+ * semantics.
  */
 
 import { existsSync, statSync } from 'node:fs';
@@ -72,6 +80,16 @@ export interface SearchReport {
   mode: SearchMode;
   /** Whether the manifest says content-level FTS is available (informational). */
   ftsAvailable: boolean;
+  /**
+   * Whether the FTS content pass actually ran for this result set.
+   *
+   * Deliberately separate from `ftsAvailable`: the manifest can promise FTS while
+   * the extension fails to load, and the difference between "the index has no FTS"
+   * and "the index has FTS but it could not be used" is exactly what a reader needs
+   * to decide whether repairing the index would change the answer. When this is
+   * false the results are names and paths only, and `warning` says why.
+   */
+  contentSearch: boolean;
   results: SearchHit[];
   /** Number of rows returned, after the limit. */
   total: number;
@@ -111,14 +129,31 @@ export class SearchError extends Error {
   }
 }
 
-/** The two members of GitNexus's adapter this module uses. */
-interface LbugAdapter {
+/**
+ * The members of GitNexus's adapter this module uses.
+ *
+ * `executeQuery` and `queryFTS` are optional because they arrived in the adapter at
+ * different times: a pre-FTS build has no `queryFTS`, and a stripped adapter may not
+ * export the catalog reader. Their absence is a reported state (no content search),
+ * not a crash — the graph half still answers.
+ */
+export interface LbugAdapter {
   withLbugDb: (
     dbPath: string,
     operation: () => Promise<unknown>,
     options?: { readOnly?: boolean; skipFts?: boolean },
   ) => Promise<unknown>;
   executePrepared: (cypher: string, params: Record<string, unknown>) => Promise<unknown[]>;
+  /** Runs a statement with no parameters (used for `CALL SHOW_INDEXES()`). */
+  executeQuery?: (cypher: string) => Promise<unknown[]>;
+  /** `CALL QUERY_FTS_INDEX(...)`; rows carry `{ node, score }`. */
+  queryFTS?: (
+    tableName: string,
+    indexName: string,
+    query: string,
+    limit?: number,
+    conjunctive?: boolean,
+  ) => Promise<unknown[]>;
 }
 
 const adapters = new Map<string, LbugAdapter>();
@@ -158,6 +193,8 @@ export async function loadAdapter(options: SearchOptions): Promise<LbugAdapter> 
     )) as {
       withLbugDb?: unknown;
       executePrepared?: unknown;
+      executeQuery?: unknown;
+      queryFTS?: unknown;
     };
     if (typeof mod.withLbugDb !== 'function' || typeof mod.executePrepared !== 'function') {
       throw new Error('adapter does not export withLbugDb/executePrepared');
@@ -166,6 +203,14 @@ export async function loadAdapter(options: SearchOptions): Promise<LbugAdapter> 
       withLbugDb: mod.withLbugDb as LbugAdapter['withLbugDb'],
       executePrepared: mod.executePrepared as LbugAdapter['executePrepared'],
     };
+    // Both are load-bearing only for the content pass, so a package that carries
+    // neither still gives a working name/path search instead of a version error.
+    if (typeof mod.executeQuery === 'function') {
+      adapter.executeQuery = mod.executeQuery as NonNullable<LbugAdapter['executeQuery']>;
+    }
+    if (typeof mod.queryFTS === 'function') {
+      adapter.queryFTS = mod.queryFTS as NonNullable<LbugAdapter['queryFTS']>;
+    }
     adapters.set(root, adapter);
     return adapter;
   } catch (cause) {
@@ -244,6 +289,190 @@ function mapRows(rows: unknown[]): SearchHit[] {
   return results;
 }
 
+/** One row of `CALL SHOW_INDEXES()`, whichever shape the engine returns it in. */
+interface CatalogIndex {
+  table: string;
+  index: string;
+  type: string;
+}
+
+function readCatalogRow(value: unknown): CatalogIndex | null {
+  if (value === null || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown> & unknown[];
+  // LadybugDB answers this call positionally on some builds and by column name on
+  // others; GitNexus's own catalog helpers accept both, so this one does too.
+  const table = typeof row.table_name === 'string' ? row.table_name : row[0];
+  const index = typeof row.index_name === 'string' ? row.index_name : row[1];
+  const type = typeof row.index_type === 'string' ? row.index_type : row[2];
+  if (typeof table !== 'string' || typeof index !== 'string' || index === '') return null;
+  return { table, index, type: typeof type === 'string' ? type : '' };
+}
+
+/**
+ * The FTS index to use for one table, from the database's own catalog.
+ *
+ * Reading the catalog instead of hardcoding `file_fts` keeps this correct across
+ * content profiles (a `name`-only profile writes the same index name with fewer
+ * columns) and across schema revisions that rename an index. Returns null when the
+ * table has no FTS index, which is a reported state rather than "no matches".
+ */
+export function pickFtsIndexName(rows: unknown[], table: string): string | null {
+  for (const value of rows) {
+    const row = readCatalogRow(value);
+    if (row === null || row.table !== table) continue;
+    if (/fts|full.?text/i.test(row.type) || /_fts$/i.test(row.index)) return row.index;
+  }
+  return null;
+}
+
+/**
+ * Map `QUERY_FTS_INDEX` rows to hits.
+ *
+ * `queryFTS` flattens the matched node onto the row and keeps `score`; the cypher it
+ * runs returns `{ node, score }`. Both shapes are accepted because a stubbed adapter
+ * (the tests) is not obliged to reproduce the flattening.
+ */
+export function mapFtsRows(rows: unknown[]): SearchHit[] {
+  const hits: SearchHit[] = [];
+  for (const value of rows) {
+    if (value === null || typeof value !== 'object') continue;
+    const row = value as Record<string, unknown>;
+    const node =
+      row.node !== null && typeof row.node === 'object'
+        ? (row.node as Record<string, unknown>)
+        : row;
+    const name = typeof node.name === 'string' ? node.name : '';
+    const filePath = typeof node.filePath === 'string' ? node.filePath : '';
+    if (name === '' || filePath === '') continue;
+    const label =
+      typeof node.label === 'string' && node.label !== ''
+        ? node.label
+        : typeof node.kind === 'string' && node.kind !== ''
+          ? node.kind
+          : 'File';
+    hits.push({
+      kind: label,
+      name,
+      filePath,
+      startLine: readLineNumber(node.startLine),
+      endLine: readLineNumber(node.endLine),
+    });
+  }
+  return hits;
+}
+
+/** Lowercased, slash-normalized path, for "is this file already in the list". */
+function pathKey(filePath: string): string {
+  return filePath.replace(/\\/g, '/').toLowerCase();
+}
+
+/**
+ * Append FTS hits after the graph hits, skipping files the graph already lists.
+ *
+ * A content match in a file whose symbol already matched adds a second row for the
+ * same place without adding information — the symbol row is strictly more specific
+ * (it names the declaration and can open at its line). The graph page wins.
+ */
+export function mergeHits(
+  page: SearchHit[],
+  extra: SearchHit[],
+  limit: number,
+): { results: SearchHit[]; truncated: boolean } {
+  const seen = new Set(page.map((hit) => pathKey(hit.filePath)));
+  const results = [...page];
+  let truncated = false;
+  for (const hit of extra) {
+    if (results.length >= limit) {
+      truncated = true;
+      break;
+    }
+    const key = pathKey(hit.filePath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push(hit);
+  }
+  return { results, truncated };
+}
+
+/**
+ * Whether a failure is the FTS extension failing to load, as opposed to any other
+ * query error.
+ *
+ * These messages are the only ones that mean "retry without FTS": a missing-tables
+ * or missing-index error is handled by `queryFTS` returning no rows, a busy database
+ * has its own `index-busy` report, and a genuine query error must stay an error. The
+ * patterns are anchored loosely on purpose — LadybugDB has shipped at least three
+ * wordings for the "extension is not registered" case.
+ */
+export function isFtsLoadFailure(message: string): boolean {
+  return /FTS[ _]extension|libfts|fts\.lbug_extension|QUERY_FTS_INDEX is not defined|Failed to load library/i.test(
+    message,
+  );
+}
+
+/** The outcome of the content half: hits, whether it really ran, and why not. */
+export interface FtsSearchOutcome {
+  hits: SearchHit[];
+  ran: boolean;
+  failure: string | null;
+}
+
+/**
+ * Run the FTS content pass against the file index of one table.
+ *
+ * Must be called inside `withLbugDb`'s operation: the adapter's `queryFTS` reads the
+ * connection that call opened. Every failure is returned rather than thrown — the
+ * graph half of the same search already succeeded, and losing it because a content
+ * index is broken would trade a working answer for an error card.
+ */
+export async function searchViaFts(
+  adapter: LbugAdapter,
+  query: string,
+  limit: number,
+): Promise<FtsSearchOutcome> {
+  if (adapter.executeQuery === undefined || adapter.queryFTS === undefined) {
+    return {
+      hits: [],
+      ran: false,
+      failure: 'GitNexus 的适配器没有提供 FTS 调用，本次只匹配符号名与文件路径。',
+    };
+  }
+  let indexName: string | null;
+  try {
+    indexName = pickFtsIndexName(await adapter.executeQuery('CALL SHOW_INDEXES() RETURN *'), 'File');
+  } catch (cause) {
+    return {
+      hits: [],
+      ran: false,
+      failure: `读不到数据库的索引目录，本次只匹配符号名与文件路径：${messageOf(cause)}`,
+    };
+  }
+  if (indexName === null) {
+    return {
+      hits: [],
+      ran: false,
+      failure: '索引里没有 File 表的 FTS 索引，本次只匹配符号名与文件路径，不搜索正文。',
+    };
+  }
+  try {
+    return {
+      hits: mapFtsRows(await adapter.queryFTS('File', indexName, query, limit)),
+      ran: true,
+      failure: null,
+    };
+  } catch (cause) {
+    return {
+      hits: [],
+      ran: false,
+      failure: `FTS 正文检索失败，本次只匹配符号名与文件路径：${messageOf(cause)}`,
+    };
+  }
+}
+
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
 function isBusyMessage(message: string): boolean {
   return /busy|locked|lock held|another process|timeout/i.test(message);
 }
@@ -284,40 +513,85 @@ export async function searchSymbols(
   // tell "the index holds exactly this many" from "there are more"; reporting the
   // former as truncation trains the reader to ignore the flag.
   const cypher = buildCypher(query, limit + 1);
+  const capabilities = readCapabilities(meta.raw ?? null);
+  const ftsDeclared = capabilities.fts?.status === 'available';
+  const skipReason = capabilities.fts?.skipReason?.slice(0, 120) ?? null;
 
-  let rows: unknown[];
-  try {
-    // `skipFts` avoids the extension load that is known to fail on this machine;
-    // `readOnly` keeps the search from taking a writer lock or creating anything.
-    rows = (await adapter.withLbugDb(
+  interface Attempt {
+    rows: unknown[];
+    fts: FtsSearchOutcome;
+  }
+  const attempt = async (skipFts: boolean): Promise<Attempt> =>
+    (await adapter.withLbugDb(
       lbugPath,
-      async () => adapter.executePrepared(cypher, {}),
-      { readOnly: true, skipFts: true },
-    )) as unknown[];
+      async (): Promise<Attempt> => {
+        const rows = (await adapter.executePrepared(cypher, {})) as unknown[];
+        // The content pass reuses the connection this call opened, so it has to run
+        // inside the operation rather than after it.
+        const fts: FtsSearchOutcome = skipFts
+          ? { hits: [], ran: false, failure: null }
+          : await searchViaFts(adapter, query, limit);
+        return { rows, fts };
+      },
+      // `skipFts` follows the index's own manifest now, instead of being hardcoded
+      // true: an index built with FTS tables gets asked for a content match, and one
+      // built without them does not pay for a load that cannot help.
+      { readOnly: true, skipFts },
+    )) as Attempt;
+
+  let outcome: Attempt;
+  let degradedBy: string | null = null;
+  try {
+    outcome = await attempt(!ftsDeclared);
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    if (isBusyMessage(message)) {
-      throw new SearchError('index-busy', 503, '索引正被另一个 GitNexus 操作占用，稍后重试。');
+    const message = messageOf(cause);
+    if (ftsDeclared && isFtsLoadFailure(message)) {
+      // The manifest promised FTS and the load failed anyway (missing extension,
+      // ABI drift). Retry without it so the reader still gets names and paths, and
+      // keep the failure so the report says the index is degraded rather than
+      // pretending FTS was never available.
+      degradedBy = message;
+      try {
+        outcome = await attempt(true);
+      } catch (retryCause) {
+        throw graphQueryError(retryCause);
+      }
+    } else {
+      throw graphQueryError(cause);
     }
-    throw new SearchError('search-failed', 500, `图查询失败：${message}`);
   }
 
-  const matched = mapRows(rows);
-  const truncated = matched.length > limit;
-  const results = truncated ? matched.slice(0, limit) : matched;
-  const capabilities = readCapabilities(meta.raw ?? null);
-  const ftsAvailable = capabilities.fts?.status === 'available';
+  const matched = mapRows(outcome.rows);
+  const graphTruncated = matched.length > limit;
+  const page = graphTruncated ? matched.slice(0, limit) : matched;
+  const merged = mergeHits(page, outcome.fts.hits, limit);
+  const warning = outcome.fts.ran
+    ? null
+    : degradedBy !== null
+      ? `FTS 被声明为可用，但扩展加载失败（${degradedBy.slice(0, 160)}）；本次退回按符号名与文件路径匹配。`
+      : (outcome.fts.failure ??
+        (skipReason === null
+          ? 'FTS 内容检索不可用；本次按符号名与文件路径匹配，不搜索正文。'
+          : `FTS 内容检索不可用（${skipReason}）；本次按符号名与文件路径匹配，不搜索正文。`));
   return {
     query,
     mode: 'graph',
-    ftsAvailable,
-    results,
-    total: results.length,
-    truncated,
-    warning: ftsAvailable
-      ? null
-      : 'FTS 内容检索不可用；本次按符号名与文件路径匹配，不搜索正文。',
+    ftsAvailable: ftsDeclared,
+    contentSearch: outcome.fts.ran,
+    results: merged.results,
+    total: merged.results.length,
+    truncated: graphTruncated || merged.truncated,
+    warning,
   };
+}
+
+/** Classify a failed graph query into the report code the route should answer with. */
+function graphQueryError(cause: unknown): SearchError {
+  const message = messageOf(cause);
+  if (isBusyMessage(message)) {
+    return new SearchError('index-busy', 503, '索引正被另一个 GitNexus 操作占用，稍后重试。');
+  }
+  return new SearchError('search-failed', 500, `图查询失败：${message}`);
 }
 
 /** Options for the subprocess search. */
@@ -380,6 +654,7 @@ function asReport(value: unknown): SearchReport | null {
     query: typeof raw.query === 'string' ? raw.query : '',
     mode: raw.mode === 'text' ? 'text' : 'graph',
     ftsAvailable: raw.ftsAvailable === true,
+    contentSearch: raw.contentSearch === true,
     results,
     total: typeof raw.total === 'number' ? raw.total : results.length,
     truncated: raw.truncated === true,
@@ -556,6 +831,7 @@ export async function searchText(
       query,
       mode: 'text',
       ftsAvailable: false,
+      contentSearch: false,
       results: [],
       total: 0,
       truncated: false,
@@ -637,6 +913,7 @@ export async function searchText(
     query,
     mode: 'text',
     ftsAvailable: false,
+    contentSearch: false,
     results,
     total: results.length,
     truncated,

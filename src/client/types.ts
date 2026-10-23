@@ -565,6 +565,13 @@ export interface SearchViewState {
   onOpen: (hit: ClientSearchHit) => void;
   total: number;
   truncated: boolean;
+  /**
+   * Whether the host's FTS content pass ran for this query.
+   *
+   * A `false` here means the results are names and paths only, and the card must say
+   * so instead of implying the absence of content matches is an absence of content.
+   */
+  contentSearch: boolean;
   warning: string | null;
   copied: string | null;
   onCopy: (hit: ClientSearchHit) => void;

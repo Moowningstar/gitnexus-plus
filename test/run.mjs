@@ -940,6 +940,222 @@ async function languageTests() {
   check('a real detector is marked as gitnexus', withDetector.detector === 'gitnexus', withDetector.detector);
 }
 
+async function ftsSearchTests() {
+  section('FTS content search');
+  const {
+    pickFtsIndexName,
+    mapFtsRows,
+    mergeHits,
+    searchViaFts,
+    isFtsLoadFailure,
+    loadAdapter,
+  } = await import('../lib/gitnexus/search.js');
+
+  // The catalog GitNexus keeps: one FTS index per table, plus ordinary indexes that
+  // must not be mistaken for the keyword one.
+  const catalog = [
+    { table_name: 'File', index_name: 'file_fts', index_type: 'FTS' },
+    { table_name: 'Function', index_name: 'function_fts', index_type: 'FTS' },
+    { table_name: 'File', index_name: 'file_pk', index_type: 'ART' },
+  ];
+  check('picks the FTS index from the catalog', pickFtsIndexName(catalog, 'File') === 'file_fts');
+  check(
+    'accepts the positional catalog shape',
+    pickFtsIndexName([['File', 'file_fts', 'FTS']], 'File') === 'file_fts',
+  );
+  check(
+    'does not mistake an ordinary index for the FTS one',
+    pickFtsIndexName([{ table_name: 'File', index_name: 'file_pk', index_type: 'ART' }], 'File') ===
+      null,
+  );
+  check(
+    'does not take another table\u2019s index',
+    pickFtsIndexName(catalog, 'Method') === null,
+  );
+  check(
+    'ignores unusable catalog rows',
+    pickFtsIndexName([null, 3, { table_name: 'File' }], 'File') === null,
+  );
+  check(
+    'accepts a name-only index without a type column',
+    pickFtsIndexName([{ table_name: 'File', index_name: 'legacy_fts' }], 'File') === 'legacy_fts',
+  );
+
+  const flat = mapFtsRows([{ name: 'search.ts', filePath: 'src/gitnexus/search.ts', score: 2.5 }]);
+  check(
+    'flattened FTS rows become file hits',
+    flat.length === 1 && flat[0].filePath === 'src/gitnexus/search.ts' && flat[0].kind === 'File',
+    JSON.stringify(flat),
+  );
+  const nested = mapFtsRows([
+    { node: { label: 'File', name: 'a.ts', filePath: 'src/a.ts' }, score: 1 },
+  ]);
+  check(
+    'a nested { node } row keeps its label',
+    nested.length === 1 && nested[0].kind === 'File' && nested[0].name === 'a.ts',
+    JSON.stringify(nested),
+  );
+  check('rows without a path are dropped', mapFtsRows([{ name: 'x' }, null, 'nope']).length === 0);
+
+  const symbol = {
+    kind: 'Function',
+    name: 'analyzeCoverage',
+    filePath: 'src/gitnexus/coverage.ts',
+    startLine: 593,
+    endLine: 610,
+  };
+  const sameFile = {
+    kind: 'File',
+    name: 'coverage.ts',
+    filePath: 'src\\gitnexus\\coverage.ts',
+    startLine: null,
+    endLine: null,
+  };
+  const otherFile = {
+    kind: 'File',
+    name: 'search.ts',
+    filePath: 'src/gitnexus/search.ts',
+    startLine: null,
+    endLine: null,
+  };
+  const merged = mergeHits([symbol], [sameFile, otherFile], 5);
+  check(
+    'a file the graph already lists is not repeated',
+    merged.results.length === 2 && merged.results[1].filePath === 'src/gitnexus/search.ts',
+    JSON.stringify(merged.results.map((hit) => hit.filePath)),
+  );
+  check('extra hits inside the limit are not called truncated', merged.truncated === false);
+  const capped = mergeHits([symbol], [otherFile, { ...otherFile, filePath: 'src/b.ts' }], 2);
+  check(
+    'a dropped extra hit reports truncation',
+    capped.results.length === 2 && capped.truncated === true,
+    JSON.stringify(capped),
+  );
+  check('merging nothing truncates nothing', mergeHits([], [], 3).truncated === false);
+
+  check(
+    'the extension-load failure is recognised',
+    isFtsLoadFailure(
+      "Failed to load library 'C:\\Users\\x\\.lbdb\\extension\\fts\\libfts.lbug_extension'",
+    ),
+  );
+  check(
+    'the unregistered-function failure is recognised',
+    isFtsLoadFailure('Catalog exception: function QUERY_FTS_INDEX is not defined.'),
+  );
+  check(
+    'a missing index is not an extension failure',
+    !isFtsLoadFailure("Binder exception: Table File doesn't have an index with name file_fts."),
+  );
+  check(
+    'a locked database is not an extension failure',
+    !isFtsLoadFailure('Could not set lock on file: .gitnexus/lbug'),
+  );
+
+  const stub = (over) => ({
+    withLbugDb: async () => [],
+    executePrepared: async () => [],
+    ...over,
+  });
+  const noSurface = await searchViaFts(stub({}), 'q', 5);
+  check(
+    'an adapter without the FTS calls reports it instead of failing',
+    noSurface.ran === false && /FTS 调用/.test(noSurface.failure ?? ''),
+    JSON.stringify(noSurface),
+  );
+  const noFileIndex = await searchViaFts(
+    stub({
+      executeQuery: async () => [
+        { table_name: 'Method', index_name: 'method_fts', index_type: 'FTS' },
+      ],
+      queryFTS: async () => [],
+    }),
+    'q',
+    5,
+  );
+  check(
+    'a missing File index is reported, not read as "no matches"',
+    noFileIndex.ran === false && /File 表的 FTS 索引/.test(noFileIndex.failure ?? ''),
+    JSON.stringify(noFileIndex),
+  );
+  let captured = null;
+  const hitReport = await searchViaFts(
+    stub({
+      executeQuery: async () => catalog,
+      queryFTS: async (table, index, query, limit) => {
+        captured = { table, index, query, limit };
+        return [{ node: { name: 'search.ts', filePath: 'src/gitnexus/search.ts' }, score: 3 }];
+      },
+    }),
+    'needle',
+    7,
+  );
+  check(
+    'a working FTS pass reports it ran and returns file hits',
+    hitReport.ran === true &&
+      hitReport.failure === null &&
+      hitReport.hits.length === 1 &&
+      hitReport.hits[0].filePath === 'src/gitnexus/search.ts',
+    JSON.stringify(hitReport),
+  );
+  check(
+    'the FTS pass queries the discovered index with the sanitized query and limit',
+    captured !== null &&
+      captured.table === 'File' &&
+      captured.index === 'file_fts' &&
+      captured.query === 'needle' &&
+      captured.limit === 7,
+    JSON.stringify(captured),
+  );
+  const ftsThrew = await searchViaFts(
+    stub({
+      executeQuery: async () => catalog,
+      queryFTS: async () => {
+        throw new Error('Catalog exception: function QUERY_FTS_INDEX is not defined');
+      },
+    }),
+    'q',
+    5,
+  );
+  check(
+    'a query failure degrades with the reason attached',
+    ftsThrew.ran === false && /QUERY_FTS_INDEX/.test(ftsThrew.failure ?? ''),
+    JSON.stringify(ftsThrew),
+  );
+  const catalogThrew = await searchViaFts(
+    stub({
+      executeQuery: async () => {
+        throw new Error('SHOW_INDEXES is not supported');
+      },
+      queryFTS: async () => [],
+    }),
+    'q',
+    5,
+  );
+  check(
+    'an unreadable catalog degrades instead of throwing',
+    catalogThrew.ran === false && /索引目录/.test(catalogThrew.failure ?? ''),
+    JSON.stringify(catalogThrew),
+  );
+
+  // The adapter surface only exists when GitNexus is installed; CI installs neither
+  // the package nor its native engine, so the probe reports "not installed" there.
+  try {
+    const adapter = await loadAdapter({});
+    check(
+      'the installed adapter exposes the FTS surface',
+      typeof adapter.queryFTS === 'function' && typeof adapter.executeQuery === 'function',
+      Object.keys(adapter).join(','),
+    );
+  } catch (error) {
+    check(
+      'the adapter FTS probe is skipped without GitNexus',
+      /search-unavailable/.test(String(error?.code ?? '')),
+      `${error?.code ?? ''} ${error?.message ?? error}`,
+    );
+  }
+}
+
 async function searchTests() {
   section('keyword search over the graph');
   const {
@@ -1014,7 +1230,11 @@ async function searchTests() {
         report.results.some((hit) => hit.name === 'analyzeCoverage'),
         JSON.stringify(report.results.map((hit) => hit.name)),
       );
-      check('search reports FTS as degraded', report.ftsAvailable === false && report.warning !== null);
+      check(
+        'search reports FTS as degraded',
+        report.ftsAvailable === false && report.contentSearch === false && report.warning !== null,
+        JSON.stringify({ ftsAvailable: report.ftsAvailable, contentSearch: report.contentSearch }),
+      );
       check(
         'every hit carries a path and a valid line',
         report.results.every(
@@ -4419,6 +4639,7 @@ await stalenessTests();
 await capabilityTests();
 await languageTests();
 await searchTests();
+await ftsSearchTests();
 await searchRouteTests();
 await analyzeTests();
 await installTests();
