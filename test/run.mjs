@@ -981,6 +981,22 @@ async function ftsSearchTests() {
     pickFtsIndexName([{ table_name: 'File', index_name: 'legacy_fts' }], 'File') === 'legacy_fts',
   );
 
+  // Regression guard for the shape that made this whole pass look unavailable: the
+  // capabilities live under `capabilities` in the manifest, and handing the reader the
+  // whole manifest yields no `fts` entry at all — which reads exactly like "the index
+  // cannot do FTS".
+  const { readCapabilities } = await import('../lib/gitnexus/coverage.js');
+  const manifest = { capabilities: { fts: { provider: 'ladybugdb-fts', status: 'available' } } };
+  check(
+    'capabilities are read from the manifest’s capabilities block',
+    readCapabilities(manifest.capabilities).fts?.status === 'available',
+  );
+  check(
+    'a whole manifest is not a capability map',
+    readCapabilities(manifest).fts === undefined,
+    'callers must pass meta.raw.capabilities; meta.raw silently reports "no FTS"',
+  );
+
   const flat = mapFtsRows([{ name: 'search.ts', filePath: 'src/gitnexus/search.ts', score: 2.5 }]);
   check(
     'flattened FTS rows become file hits',
@@ -1230,10 +1246,21 @@ async function searchTests() {
         report.results.some((hit) => hit.name === 'analyzeCoverage'),
         JSON.stringify(report.results.map((hit) => hit.name)),
       );
+      // The manifest's promise and the pass that actually ran are two different facts,
+      // and this assertion is about their consistency — not about which one this
+      // machine happens to be in (an index built with --skip-fts reports the names-only
+      // pair, a healthy one reports FTS and no caveat).
+      const consistent = report.contentSearch
+        ? report.ftsAvailable === true && report.warning === null
+        : report.warning !== null;
       check(
-        'search reports FTS as degraded',
-        report.ftsAvailable === false && report.contentSearch === false && report.warning !== null,
-        JSON.stringify({ ftsAvailable: report.ftsAvailable, contentSearch: report.contentSearch }),
+        'search reports what it searched: FTS ran, or the caveat says why not',
+        consistent,
+        JSON.stringify({
+          ftsAvailable: report.ftsAvailable,
+          contentSearch: report.contentSearch,
+          warning: report.warning,
+        }),
       );
       check(
         'every hit carries a path and a valid line',

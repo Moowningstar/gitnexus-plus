@@ -513,7 +513,11 @@ export async function searchSymbols(
   // tell "the index holds exactly this many" from "there are more"; reporting the
   // former as truncation trains the reader to ignore the flag.
   const cypher = buildCypher(query, limit + 1);
-  const capabilities = readCapabilities(meta.raw ?? null);
+  const capabilities = readCapabilities(
+    typeof meta.raw?.capabilities === 'object' && meta.raw?.capabilities !== null
+      ? (meta.raw.capabilities as Record<string, unknown>)
+      : null,
+  );
   const ftsDeclared = capabilities.fts?.status === 'available';
   const skipReason = capabilities.fts?.skipReason?.slice(0, 120) ?? null;
 
