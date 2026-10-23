@@ -8,8 +8,12 @@
 import { summary } from './harness.mjs';
 import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests } from './suites/coverage.mjs';
 import { searchTests, ftsSearchTests, searchRouteTests } from './suites/search.mjs';
-import { routeTests, fileHistoryRouteTests, analyzeTests, installTests, deltaTests, graphTests } from './suites/routes.mjs';
-import { shellTests, aiSettingsTests, webDistTests, webViewTests } from './suites/webview.mjs';
+import { routeTests, fileHistoryRouteTests } from './suites/routes.mjs';
+import { analyzeTests, installTests } from './suites/runners.mjs';
+import { deltaTests } from './suites/delta.mjs';
+import { graphTests } from './suites/graphs.mjs';
+import { shellTests, aiSettingsTests, webDistTests } from './suites/webview-setup.mjs';
+import { webViewTests } from './suites/webview.mjs';
 import { realRepoSmoke } from './suites/smoke.mjs';
 
 console.log('\u001b[1mgitnexus-plus · coverage engine tests\u001b[0m');
