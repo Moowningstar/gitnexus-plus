@@ -16,7 +16,6 @@
  * far more complete than it is.
  */
 
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   readIndexMeta,
@@ -27,7 +26,6 @@ import {
 } from './index-meta.js';
 import { scanRepository, type CapSource } from './scan.js';
 import {
-  classifyFile,
   aggregateLanguages,
   loadLanguageDetector,
   type ClassifiedLanguage,
@@ -59,31 +57,26 @@ export type {
   HistogramBucket,
 } from './git-activity.js';
 
-/** Bytes sampled from a file's head when judging its shape. */
-const MINIFIED_SAMPLE_BYTES = 64 * 1024;
-
-/** Average characters per line above which a file is treated as minified. */
-const MINIFIED_AVG_LINE_THRESHOLD = 500;
-
-/** Control-byte share above which a sample is treated as binary. */
-const BINARY_CONTROL_RATIO = 0.3;
+import type { FileShape } from './file-shape.js';
+import { formatBytes } from './file-shape.js';
+import {
+  activityWarnings,
+  applyLargeFileShares,
+  capWarnings,
+  collectLargeFiles,
+  indexDriftWarnings,
+  largeFileDominanceWarnings,
+  largeFileSkipWarnings,
+} from './coverage-rules.js';
 
 /**
- * What a byte-level probe concluded about one oversized file.
- *
- * `binary` is decided before `suspect`: a first revision tested only "no newlines ⇒
- * one enormous line", which flagged every binary asset as minified.
+ * Re-exported so a report consumer can reach the byte-level helpers through the
+ * module it already imports. The implementations live in `file-shape.ts`: they only
+ * look at bytes, while everything else in this file reasons about a whole index.
  */
-export interface FileShape {
-  /** Machine data, not text at all. */
-  binary: boolean;
-  /** Minified: text, but written as one enormous line. */
-  suspect: boolean;
-  /** Characters per line (meaningless when binary). */
-  avgLineLength: number;
-  estimatedLines: number | null;
-  sampledBytes: number;
-}
+export { formatBytes, looksGenerated, judgeMinified } from './file-shape.js';
+export type { FileShape };
+
 
 /**
  * The report's shape.
@@ -417,137 +410,9 @@ export interface CoverageReport {
   toolchain: ToolchainStatus | null;
 }
 
-/**
- * Judge what kind of file this is from the head of its bytes.
- *
- * Reads only the head: a bundle megabytes wide on one line is identifiable from
- * any prefix, and reading it whole to decide would cost exactly what the size cap
- * exists to avoid.
- *
- * BINARY IS CHECKED FIRST, AND THAT ORDER IS THE WHOLE POINT
- * ---------------------------------------------------------
- * A first revision tested only "no newlines ⇒ one enormous line", which flagged
- * every binary asset as minified. Measured on a real repository: a 380 MB `.glb`
- * model and a 30 MB `.glb` reported "single-line ≈ 399 230 584 chars" — absurd on
- * its face, and worse than absurd in effect, because it told the reader that 97 %
- * of the repository's skipped bytes were compressed *source*. They were 3D assets
- * that could never have held a symbol.
- *
- * A binary file has few newlines for a reason that has nothing to do with
- * minification, so no line-length statistic over it means anything. The test is
- * git's own: a NUL byte in the head means binary. A control-byte ratio backs it up
- * for machine formats that happen to avoid NUL.
- *
- * The extrapolation is deliberately crude — newline density in the head is assumed
- * to hold for the rest — and only ever produces a *warning*, never an exclusion.
- *
- * @param {string} absolutePath
- * @param {number} size
- * @returns {Promise<FileShape>}
- */
-export async function judgeMinified(absolutePath: string, size: number): Promise<FileShape> {
-  const want = Math.max(1, Math.min(size, MINIFIED_SAMPLE_BYTES));
-  let handle;
-  try {
-    handle = await fs.open(absolutePath, 'r');
-    const buffer = Buffer.allocUnsafe(want);
-    const { bytesRead } = await handle.read(buffer, 0, want, 0);
-    const sample = buffer.subarray(0, bytesRead);
-    const sampled = sample.length;
-    if (sampled === 0) {
-      return { binary: false, suspect: false, avgLineLength: 0, estimatedLines: 0, sampledBytes: 0 };
-    }
-
-    let newlines = 0;
-    let control = 0;
-    for (let i = 0; i < sampled; i += 1) {
-      const byte = sample[i];
-      if (byte === 0x0a) newlines += 1;
-      // NUL is decisive on its own (git's rule); other C0 controls accumulate as
-      // corroboration. Tab, LF and CR are ordinary text bytes and excluded.
-      if (byte === 0x00) {
-        return { binary: true, suspect: false, avgLineLength: 0, estimatedLines: null, sampledBytes: sampled };
-      }
-      if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) control += 1;
-    }
-    if (control / sampled > BINARY_CONTROL_RATIO) {
-      return { binary: true, suspect: false, avgLineLength: 0, estimatedLines: null, sampledBytes: sampled };
-    }
-
-    // Whole file sampled: the line count is exact.
-    if (size <= sampled) {
-      const lines = newlines + 1;
-      const avg = size / lines;
-      return {
-        binary: false,
-        suspect: avg > MINIFIED_AVG_LINE_THRESHOLD,
-        avgLineLength: avg,
-        estimatedLines: lines,
-        sampledBytes: sampled,
-      };
-    }
-    // Extrapolated: newlines/byte in the head is assumed to hold throughout, so
-    // average line length is simply sample length over newlines in the sample.
-    if (newlines === 0) {
-      return { binary: false, suspect: true, avgLineLength: size, estimatedLines: 1, sampledBytes: sampled };
-    }
-    const avg = sampled / newlines;
-    return {
-      binary: false,
-      suspect: avg > MINIFIED_AVG_LINE_THRESHOLD,
-      avgLineLength: avg,
-      estimatedLines: Math.round(size / avg),
-      sampledBytes: sampled,
-    };
-  } catch {
-    return { binary: false, suspect: false, avgLineLength: 0, estimatedLines: null, sampledBytes: 0 };
-  } finally {
-    await handle?.close().catch(() => {});
-  }
-}
-
-/**
- * Path shapes that conventionally hold build output. Applied only to files that
- * already exceeded the size cap, where the combination is high-signal.
- *
- * This exists because the minified heuristic alone is not enough: measured on
- * material-ui, the three skipped files are generated but **multi-line** (75 263 /
- * 10 757 / 32 317 lines, 31/70/44 chars per line) so `judgeMinified` correctly
- * declines to call them minified — yet they are still compiled output sitting in
- * the byte totals. Verified by counting newlines over the whole file after a
- * PowerShell line count wrongly reported "1 line" for a 2.3 MB file.
- */
-const GENERATED_PATH_PATTERNS = Object.freeze([
-  /(^|\/)(dist|build|out|vendor|generated|__generated__|coverage)\//i,
-  /(^|\/)lib\//i,
-  /\.min\./i,
-  /\.generated\./i,
-  /\.g\.(cs|ts|js)$/i,
-  /\.bundle\.(js|mjs|cjs)$/i,
-]);
-
-/**
- * @param {string} filePath repo-relative
- * @returns {boolean} whether the path conventionally denotes build output
- */
-export function looksGenerated(filePath: string): boolean {
-  return GENERATED_PATH_PATTERNS.some((re) => re.test(filePath));
-}
-
-/**
- * A file holding at least this share of its language's bytes is called out when it
- * also looks machine-produced. The share matters because the claim being made is
- * "this distorts the percentage", not merely "this is generated".
- */
-const MINIFIED_DOMINANCE_SHARE = 0.25;
-
-/** @param {number} bytes */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
+// The byte-level probe (binary/minified judgement, generated-path heuristic and the
+// byte formatter) now lives in ile-shape.ts. It is re-exported above, so every
+// existing import of these names keeps working.
 
 /** A real phase of the coverage read, reported while the work is still running. */
 export type CoveragePhase = 'manifest' | 'git' | 'scan' | 'large-files' | 'assemble';
@@ -655,63 +520,15 @@ export async function analyzeCoverage(
     total: scan.scannedCount,
   });
 
-  const largeFiles: LargeFile[] = [];
-  const minifiedBudget = options.minifiedSampleLimit ?? 40;
-  let minifiedProbes = 0;
-
-  emit({
-    phase: 'large-files',
-    percent: 62,
-    label: scan.large.length === 0 ? '没有超大文件' : `检查超大文件 0/${scan.large.length}`,
-    current: 0,
-    total: scan.large.length,
-  });
-  for (let index = 0; index < scan.large.length; index += 1) {
-    const file = scan.large[index];
-    const lang = classifyFile(file.path, detector);
-    let minified: FileShape | null = null;
-    if (minifiedProbes < minifiedBudget) {
-      minifiedProbes += 1;
-      minified = await judgeMinified(path.join(absRepo, file.path), file.size);
-    }
-    largeFiles.push({
-      path: file.path,
-      size: file.size,
-      sizeText: formatBytes(file.size),
-      language: lang,
-      minified,
-      generatedHint: looksGenerated(file.path),
-      // Filled in below, once every file is collected and the denominators (bytes
-      // per language, total scanned bytes) are known. Declared here rather than
-      // omitted so the field cannot silently stay `undefined` — which is exactly
-      // what happened while these were JSDoc types: `shareOfScanned` was part of the
-      // documented contract and no code path ever assigned it.
-      shareOfScanned: 0,
-      shareOfLanguage: 0,
-    });
-    emit({
-      phase: 'large-files',
-      percent: 62 + Math.round(((index + 1) / Math.max(scan.large.length, 1)) * 28),
-      label: `检查超大文件 ${index + 1}/${scan.large.length}`,
-      current: index + 1,
-      total: scan.large.length,
-    });
-  }
-
-  // Share of a language's bytes held by each large file, computed over every
-  // scanned file of that language so the denominator is the honest one.
-  const allFiles = [...scan.selected, ...scan.large];
-  const langsAll = aggregateLanguages(allFiles, detector);
-  const bytesByLanguage = new Map(langsAll.rows.map((r) => [r.key, r.bytes]));
-
-  const largeBytes = scan.large.reduce((sum, f) => sum + f.size, 0);
-  const scannedBytes = allFiles.reduce((sum, f) => sum + f.size, 0);
-
-  for (const entry of largeFiles) {
-    const total = bytesByLanguage.get(entry.language.key) ?? entry.size;
-    entry.shareOfLanguage = total > 0 ? entry.size / total : 0;
-    entry.shareOfScanned = scannedBytes > 0 ? entry.size / scannedBytes : 0;
-  }
+  const largeFiles = await collectLargeFiles(
+    absRepo,
+    scan,
+    detector,
+    options.minifiedSampleLimit ?? 40,
+    emit,
+  );
+  const volume = applyLargeFileShares(scan, largeFiles, detector);
+  const { largeBytes, scannedBytes } = volume;
 
   // Coverage: what a fresh scan would select vs what the index actually holds.
   const indexed = new Set(Object.keys(meta?.fileHashes ?? {}).map((p) => normalizePathKey(p)));
@@ -722,148 +539,7 @@ export async function analyzeCoverage(
     ? Object.keys(meta.fileHashes).filter((p) => !selected.has(normalizePathKey(p)))
     : [];
 
-  /** @type {Array<{level:'warn'|'info',code:string,message:string,evidence:object}>} */
-  const warnings: ReportWarning[] = [];
-
-  const generatedLarge = largeFiles.filter((f) => f.generatedHint);
-  const generatedBytes = generatedLarge.reduce((sum, f) => sum + f.size, 0);
-  const binaryLarge = largeFiles.filter((f) => f.minified?.binary === true);
-  const binaryBytes = binaryLarge.reduce((sum, f) => sum + f.size, 0);
-  const textLargeBytes = largeBytes - binaryBytes;
-
-  if (scan.large.length > 0) {
-    // The binary split is what makes the headline honest. Without it, a repository
-    // of 3D assets reads as "97.9 % of scanned bytes were skipped" and sounds like
-    // lost source; with it, the reader learns that 413 of those 417 MB are models
-    // that could never have contributed a symbol, and the figure to act on is the
-    // much smaller text remainder.
-    const notes = [];
-    if (binaryLarge.length > 0) {
-      notes.push(`其中 ${binaryLarge.length} 个为二进制资源（${formatBytes(binaryBytes)}），本就不含可索引符号`);
-    }
-    if (generatedLarge.length > 0) {
-      notes.push(`${generatedLarge.length} 个疑似构建产物（${formatBytes(generatedBytes)}）`);
-    }
-    const note = notes.length > 0 ? `，${notes.join('，')}` : '';
-    const actionable = binaryLarge.length > 0 ? `，仍可能含源码的为 ${formatBytes(textLargeBytes)}` : '';
-    warnings.push({
-      level: 'warn',
-      code: 'large-files-skipped',
-      message:
-        `${scan.large.length} 个文件超过 ${formatBytes(scan.capBytes)} 上限被跳过，` +
-        `合计 ${formatBytes(largeBytes)}（占已扫描体积 ${scannedBytes > 0 ? ((largeBytes / scannedBytes) * 100).toFixed(1) : '0'}%）` +
-        `——这些文件里的符号完全不在索引中${note}${actionable}`,
-      evidence: {
-        count: scan.large.length,
-        bytes: largeBytes,
-        capBytes: scan.capBytes,
-        capSource: scan.capSource,
-        generatedCount: generatedLarge.length,
-        generatedBytes,
-        binaryCount: binaryLarge.length,
-        binaryBytes,
-        textBytes: textLargeBytes,
-      },
-    });
-  }
-
-  for (const entry of largeFiles) {
-    // Binary short-circuits both claims below. A model file is neither minified nor
-    // build output, and calling it either is how a first revision ended up telling
-    // this repository's owner that 97 % of its skipped bytes were compressed source.
-    if (entry.minified?.binary === true) continue;
-    if (entry.shareOfLanguage < MINIFIED_DOMINANCE_SHARE) continue;
-    if (entry.minified?.suspect) {
-      warnings.push({
-        level: 'warn',
-        code: 'minified-dominates-language',
-        message:
-          `${entry.path}（${entry.sizeText}，平均行长 ${Math.round(entry.minified.avgLineLength)} 字符）` +
-          `占 ${entry.language.label} 的 ${(entry.shareOfLanguage * 100).toFixed(0)}%，` +
-          `疑似压缩产物而非源码——该语言占比被显著放大`,
-        evidence: {
-          path: entry.path,
-          size: entry.size,
-          avgLineLength: entry.minified.avgLineLength,
-          shareOfLanguage: entry.shareOfLanguage,
-          language: entry.language.key,
-        },
-      });
-    } else if (entry.generatedHint) {
-      warnings.push({
-        level: 'warn',
-        code: 'generated-dominates-language',
-        message:
-          `${entry.path}（${entry.sizeText}）占 ${entry.language.label} 的 ` +
-          `${(entry.shareOfLanguage * 100).toFixed(0)}%，路径形似构建产物——` +
-          `该语言占比可能包含编译输出`,
-        evidence: {
-          path: entry.path,
-          size: entry.size,
-          shareOfLanguage: entry.shareOfLanguage,
-          language: entry.language.key,
-        },
-      });
-    }
-  }
-
-  const capsNote = meta?.coverageMaxFileSizeBytes ?? null;
-  if (capsNote === null && meta !== null) {
-    warnings.push({
-      level: 'info',
-      code: 'cap-not-recorded',
-      message: '该索引未记录构建时的大小上限（旧版本写入），本次按当前生效上限判断，可能与建索引时不同',
-      evidence: { effectiveCapBytes: scan.capBytes, capSource: scan.capSource },
-    });
-  }
-
-  if (scan.capSource === 'env') {
-    warnings.push({
-      level: 'info',
-      code: 'cap-from-env',
-      message: `大小上限来自 GITNEXUS_MAX_FILE_SIZE=${env.GITNEXUS_MAX_FILE_SIZE}（${formatBytes(scan.capBytes)}），非默认值`,
-      evidence: { capBytes: scan.capBytes, maxCapBytes: scan.maxCapBytes },
-    });
-  }
-
-  if (meta !== null && !hasGit) {
-    warnings.push({
-      level: 'info',
-      code: 'no-commit-baseline',
-      message:
-        '该索引不是从 git 仓库建立的（--skip-git）：没有提交基线，无法判断索引是否落后，' +
-        '刷新每次都会重新分析，也不会产生 Git 活动',
-      evidence: { path: absRepo },
-    });
-  }
-
-  if (uncovered.length > 0) {
-    warnings.push({
-      level: 'info',
-      code: 'uncovered-files',
-      message: `${uncovered.length} 个文件会被扫描选中但不在索引中——索引可能已过期，或建索引时的排除规则不同`,
-      evidence: { count: uncovered.length, sample: uncovered.slice(0, 10).map((f) => f.path) },
-    });
-  }
-
-  if (staleInIndex.length > 0) {
-    warnings.push({
-      level: 'info',
-      code: 'index-holds-retired-paths',
-      message: `${staleInIndex.length} 个索引中的文件在本次扫描中不存在（已删除或已被排除）`,
-      evidence: { count: staleInIndex.length, sample: staleInIndex.slice(0, 10) },
-    });
-  }
-
   const compatibility = readCompatibility(meta?.runnerIdentity?.cliVersion ?? null, scan.gitnexusVersion);
-  if (compatibility.status === 'mismatch') {
-    warnings.push({
-      level: 'warn',
-      code: 'version-mismatch',
-      message: compatibility.message,
-      evidence: { indexedBy: compatibility.indexedBy, installed: compatibility.installed },
-    });
-  }
 
   const languagesReport =
     options.includeLanguages === false
@@ -889,33 +565,16 @@ export async function analyzeCoverage(
           baselineRef: meta?.lastCommit ?? null,
         });
 
-  if (activity !== null && activity.totals.verdicts.missing > 0) {
-    warnings.push({
-      level: 'warn',
-      code: 'active-files-missing-from-index',
-      message:
-        `近 ${activity.window.sinceDays} 天内被改动过的文件里，有 ${activity.totals.verdicts.missing} 个` +
-        `本应被索引却不在索引中——索引落后于当前工作区`,
-      evidence: {
-        missing: activity.totals.verdicts.missing,
-        indexed: activity.totals.verdicts.indexed,
-        excluded: activity.totals.verdicts.excluded,
-        sample: activity.byChanges
-          .filter((f) => f.verdict === 'missing')
-          .slice(0, 10)
-          .map((f) => f.path),
-      },
-    });
-  }
-
-  if (activity !== null && activity.window.truncated) {
-    warnings.push({
-      level: 'info',
-      code: 'activity-window-truncated',
-      message: `Git 活动窗口达到 ${activity.window.maxCommits} 个提交上限，更早的活动未统计`,
-      evidence: { maxCommits: activity.window.maxCommits, sinceDays: activity.window.sinceDays },
-    });
-  }
+  // Every rule lives in `coverage-rules.ts`; this function only decides the order,
+  // because that is the order the panel shows: what was skipped, what that distortion
+  // means, how the cap was chosen, and whether the index is behind.
+  const warnings: ReportWarning[] = [
+    ...largeFileSkipWarnings(scan, largeFiles, volume),
+    ...largeFileDominanceWarnings(largeFiles),
+    ...capWarnings(scan, meta, env, absRepo, hasGit),
+    ...indexDriftWarnings(uncovered, staleInIndex, compatibility),
+    ...activityWarnings(activity),
+  ];
 
   emit({ phase: 'assemble', percent: 99, label: '报告已汇总' });
   return {

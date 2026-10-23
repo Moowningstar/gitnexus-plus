@@ -798,7 +798,7 @@ check('a settled report shows no progress bar', !view.tags.includes('progress'))
 // the first request is in flight, then renders again with the report. A hook
 // declared after the loading/no-index early returns changes the hook count between
 // those two renders and crashes the whole sidebar.
-const panelSource = readFileSync(path.join(root, 'src/client/views/panel.ts'), 'utf8');
+const panelSource = readFileSync(path.join(root, 'src/client/views/coverage-view.ts'), 'utf8');
 const activityHookAt = panelSource.indexOf('const [activityDays');
 const reportGuardAt = panelSource.indexOf('if (report === null)');
 check(
