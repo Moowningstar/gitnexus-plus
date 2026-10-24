@@ -1,7 +1,7 @@
 {
   "name": "dsh-gitnexus-plus",
   "version": "0.1.7",
-  "description": "DSH plugin: visualize a GitNexus project index and its communities, decide whether a refresh would change anything before running it, search symbols by keyword, report what the index left out, and run incremental or FTS-repair maintenance from a sidebar panel.",
+  "description": "DSH plugin: open a GitNexus project index in GitNexus's own web UI (3D view in a resizable dialog, AI settings pre-filled from environment variables), decide whether a refresh would change anything before running it, search symbols and file bodies, report what the index left out, and run incremental or FTS-repair maintenance from a sidebar panel.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -18,7 +18,8 @@
     "gitnexus",
     "code-index",
     "code-graph",
-    "coverage"
+    "coverage",
+    "3d-graph"
   ],
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
