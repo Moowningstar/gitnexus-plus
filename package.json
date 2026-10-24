@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-gitnexus-coverage": "./lib/bin/gitnexus-coverage.js"
+    "dsh-gitnexus-coverage": "lib/bin/gitnexus-coverage.js"
   },
   "files": [
     "lib",
@@ -62,6 +62,10 @@
     "client": {
       "platform": "web"
     }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
