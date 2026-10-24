@@ -172,8 +172,8 @@ function apply(ctx: SlotsContext): void {
               {
                 id: `${PLUGIN_ID}:coverage`,
                 order: 40,
-                title: () => 'GitNexus 绱㈠紩',
-                description: () => '鏌ョ湅绱㈠紩瑕嗙洊锛氳璺宠繃鐨勮秴澶ф枃浠朵笌璇█鍒嗗竷',
+                title: () => 'GitNexus 索引',
+                description: () => '查看索引覆盖：被跳过的超大文件与语言分布',
               },
             ],
           }),

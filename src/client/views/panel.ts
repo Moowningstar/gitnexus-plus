@@ -3,8 +3,10 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
 import { contextDiagnostic, fileResourceAddress, openResource, openResourceIn, routeUrl, useProjectPath } from '../navigation';
 import { h } from '../primitives';
 import { type MaintenanceStartMode } from '../sections/maintenance';
-import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientInstallRun, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, ClientSearchHit, SlotProps } from '../types';
+import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, SlotProps } from '../types';
 import { CoverageView } from './coverage-view';
+import { useGitnexusInstall } from './panel-install';
+import { useKeywordSearch } from './panel-search';
 import type { LoadingProgress, StreamReportPayload } from './coverage-view';
 
 export { CoverageView, LoadingBar } from './coverage-view';
@@ -90,17 +92,6 @@ function sameRun(a: ClientAnalyzeRun | null, b: ClientAnalyzeRun | null): boolea
   );
 }
 
-function sameInstallRun(a: ClientInstallRun | null, b: ClientInstallRun | null): boolean {
-  if (a === null || b === null) return a === b;
-  return (
-    a.state === b.state &&
-    a.exitCode === b.exitCode &&
-    a.message === b.message &&
-    a.startedAt === b.startedAt &&
-    a.finishedAt === b.finishedAt &&
-    a.output === b.output
-  );
-}
 
 /**
  * Stateful wrapper: resolves the current project, loads its coverage.
@@ -152,20 +143,7 @@ export function CoveragePanel(props: SlotProps) {
   // Only a manual refresh bypasses the host's cache; the initial load does not.
   const wantsFresh = reloadToken > 0;
 
-  // Keyword search. Its own state because it is an on-demand action, not part of
-  // the report the panel loads: an idle panel makes no search requests at all.
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [searchResults, setSearchResults] = React.useState<ClientSearchHit[] | null>(null);
-  const [searchMode, setSearchMode] = React.useState<'graph' | 'text' | null>(null);
-  const [searchTotal, setSearchTotal] = React.useState(0);
-  const [searchTruncated, setSearchTruncated] = React.useState(false);
-  const [searchContentSearch, setSearchContentSearch] = React.useState(false);
-  const [searchWarning, setSearchWarning] = React.useState<string | null>(null);
-  const [searching, setSearching] = React.useState(false);
-  const [searchError, setSearchError] = React.useState<string | null>(null);
-  const [searchCopied, setSearchCopied] = React.useState<string | null>(null);
-  // Monotonic request id: a slower earlier search must not overwrite a newer one.
-  const searchSeq = React.useRef(0);
+  const search = useKeywordSearch({ projectPath, sessionId });
 
   // The refresh run, and the tick that makes its elapsed time advance. `run` is null
   // until something is started in this host's lifetime — a state the card renders as
@@ -279,243 +257,13 @@ export function CoveragePanel(props: SlotProps) {
     }
   }, [projectPath]);
 
-  /**
-   * Run one keyword search.
-   *
-   * No request on mount and no request per keystroke: a graph query is cheap but not
-   * free, and the operator's typing is not a search intent until Enter or the button.
-   * `searchSeq` makes an older in-flight response a no-op, which is the difference
-   * between "the last search wins" and a result list that flickers backwards.
-   */
-  const runSearch = React.useCallback(async (): Promise<void> => {
-    if (projectPath === null) return;
-    const query = searchQuery.trim();
-    if (query === '') {
-      setSearchResults(null);
-      setSearchError(null);
-      return;
-    }
-    const seq = ++searchSeq.current;
-    setSearching(true);
-    setSearchError(null);
-    setSearchCopied(null);
-    try {
-      const res = await fetch(
-        routeUrl(
-          `/api/gitnexus/search?repo=${encodeURIComponent(projectPath)}` +
-            `&q=${encodeURIComponent(query)}&limit=20`,
-        ),
-      );
-      const body = await res.json().catch(() => null);
-      if (seq !== searchSeq.current) return;
-      if (!body?.ok) {
-        // A 404 without the route's own code means the host predates the search
-        // route, not that the project is wrong: the panel's own project path is a
-        // project root by construction.
-        if (res.status === 404 && body?.code !== 'not-a-project') {
-          throw new Error('当前宿主没有搜索路由；重启 DSH 后再试。');
-        }
-        throw new Error(
-          typeof body?.message === 'string' ? body.message : `请求失败 (${res.status})`,
-        );
-      }
-      const results: ClientSearchHit[] = Array.isArray(body.results)
-        ? (body.results as ClientSearchHit[]).filter(
-            (hit): hit is ClientSearchHit =>
-              hit !== null &&
-              typeof hit === 'object' &&
-              typeof hit.kind === 'string' &&
-              typeof hit.name === 'string' &&
-              typeof hit.filePath === 'string',
-          )
-        : [];
-      setSearchResults(results);
-      setSearchMode(body.mode === 'text' ? 'text' : body.mode === 'graph' ? 'graph' : null);
-      setSearchTotal(typeof body.total === 'number' ? body.total : results.length);
-      setSearchTruncated(body.truncated === true);
-      setSearchContentSearch(body.contentSearch === true);
-      setSearchWarning(typeof body.warning === 'string' ? body.warning : null);
-    } catch (cause) {
-      if (seq !== searchSeq.current) return;
-      setSearchResults(null);
-      setSearchError(String((cause as Error)?.message ?? cause));
-    } finally {
-      if (seq === searchSeq.current) setSearching(false);
-    }
-  }, [projectPath, searchQuery]);
 
-  const clearSearch = React.useCallback((): void => {
-    searchSeq.current += 1;
-    setSearchQuery('');
-    setSearchResults(null);
-    setSearchMode(null);
-    setSearchTotal(0);
-    setSearchTruncated(false);
-    setSearchContentSearch(false);
-    setSearchWarning(null);
-    setSearchError(null);
-    setSearching(false);
-    setSearchCopied(null);
-  }, []);
-
-  const copySearchHit = React.useCallback((hit: ClientSearchHit): void => {
-    const text = `${hit.filePath}${hit.startLine !== null ? `:${hit.startLine}` : ''}`;
-    const key = `${hit.kind}:${hit.filePath}:${hit.startLine ?? ''}:${hit.name}`;
-    const write =
-      typeof primitives.writeClipboard === 'function'
-        ? primitives.writeClipboard
-        : (value: string) => navigator.clipboard?.writeText(value);
-    try {
-      const outcome = write(text);
-      if (outcome && typeof outcome.then === 'function') {
-        outcome
-          .then(() => {
-            setSearchCopied(key);
-            setTimeout(() => setSearchCopied(null), 1500);
-          })
-          .catch(() => setSearchCopied(null));
-      } else {
-        setSearchCopied(key);
-        setTimeout(() => setSearchCopied(null), 1500);
-      }
-    } catch {
-      setSearchCopied(null);
-    }
-  }, []);
-
-  /**
-   * Open a hit in the platform's file viewer at its line.
-   *
-   * The resource address is the same `dsh-resource://file/session/...` the built-in
-   * file strip uses; `params.line` is what the chat's file links pass. If the
-   * deployment has no right-sidebar controller (a headless profile, or a host older
-   * than the service), opening is impossible — copy the `path:line` instead of
-   * silently doing nothing, and say why.
-   */
-  const openSearchHit = React.useCallback(
-    (hit: ClientSearchHit): void => {
-      setSearchError(null);
-      if (sessionId === null) {
-        setSearchError('未能定位当前会话，已复制路径。');
-        copySearchHit(hit);
-        return;
-      }
-      const address = fileResourceAddress(sessionId, hit.filePath);
-      const options =
-        hit.startLine === null
-          ? undefined
-          : { params: { line: hit.startLine } };
-      try {
-        if (openResourceIn !== null) {
-          openResourceIn(sessionId, address, options);
-          return;
-        }
-        if (openResource !== null) {
-          openResource(address, options);
-          return;
-        }
-      } catch {
-        /* fall through to the copy path */
-      }
-      setSearchError('当前宿主没有可用的文件打开能力，已复制路径。');
-      copySearchHit(hit);
-    },
-    [sessionId, copySearchHit],
-  );
-
-  // A different project means the previous hits are another repository's symbols.
-  React.useEffect(() => {
-    clearSearch();
-  }, [projectPath, clearSearch]);
-
-  // The GitNexus install. Its own state because it is not tied to a repository: the
-  // install target is one directory per machine, and the operator may have several
-  // projects open across a session.
-  const [installRun, setInstallRun] = React.useState<ClientInstallRun | null>(null);
-  const [installError, setInstallError] = React.useState<string | null>(null);
-  const installing = installRun?.state === 'running';
-  // Only an install the operator authorised *in this panel* may chain into an
-  // analyze. A successful install from an earlier session is still visible in the
-  // host's run state, and starting a write from that would be acting on consent the
-  // operator gave for a different action.
-  const autoInitArmed = React.useRef(false);
-  const autoInitDone = React.useRef<string | null>(null);
-
-  React.useEffect(() => {
-    if (!installing) return undefined;
-    let cancelled = false;
-    const poll = async (): Promise<void> => {
-      try {
-        const res = await fetch(routeUrl('/api/gitnexus/install'));
-        const body = await res.json().catch(() => null);
-        if (cancelled || !body?.ok) return;
-        const next: ClientInstallRun | null = body.run ?? null;
-        setInstallRun((previous) => (sameInstallRun(previous, next) ? previous : next));
-        // A finished install changes what this machine can do, so re-read the report:
-        // the toolchain verdict is computed per read, so this is what clears the notice.
-        if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
-      } catch {
-        /* a dropped poll is not worth surfacing */
-      }
-    };
-    const id = setInterval(() => {
-      void poll();
-    }, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [installing]);
-
-  const startInstall = React.useCallback(async (): Promise<void> => {
-    setInstallError(null);
-    autoInitArmed.current = true;
-    try {
-      const res = await fetch(routeUrl('/api/gitnexus/install'), { method: 'POST' });
-      const body = await res.json().catch(() => null);
-      if (!body?.ok) throw new Error(body?.message ?? `请求失败 (${res.status})`);
-      setInstallRun(body.run ?? null);
-    } catch (cause) {
-      autoInitArmed.current = false;
-      setInstallError(String((cause as Error)?.message ?? cause));
-    }
-  }, []);
-
-  const cancelInstall = React.useCallback(async (): Promise<void> => {
-    try {
-      const res = await fetch(routeUrl('/api/gitnexus/install'), { method: 'DELETE' });
-      const body = await res.json().catch(() => null);
-      if (body?.ok) setInstallRun(body.run ?? null);
-    } catch (cause) {
-      setInstallError(String((cause as Error)?.message ?? cause));
-    }
-  }, []);
-
-  /**
-   * Install → initialize, in one authorised step.
-   *
-   * The install is machine-wide; the index is per-project. Chaining them is the
-   * difference between "you now have a CLI" and "you can see the index", which is
-   * what the operator asked for. Three conditions keep it honest: the install must
-   * have finished successfully, the project must still have no index (otherwise
-   * this would silently refresh an index nobody asked to refresh), and the operator
-   * must have started *this* install from this panel.
-   *
-   * The key includes the install's start time, so a retry after a cancellation is a
-   * new run and may chain again, while the poll ticks of one run cannot start two
-   * analyses.
-   */
-  React.useEffect(() => {
-    if (!autoInitArmed.current) return;
-    if (installRun?.state !== 'done') return;
-    // Wait for a report rather than treating "not loaded" as "not indexed".
-    if (report === null || projectPath === null || report.repo?.indexed === true) return;
-    const key = `${projectPath}:${installRun.startedAt}`;
-    if (autoInitDone.current === key) return;
-    autoInitDone.current = key;
-    autoInitArmed.current = false;
-    void startRun('refresh');
-  }, [installRun, projectPath, report, startRun]);
+  const install = useGitnexusInstall({
+    projectPath,
+    report,
+    startRun,
+    onChanged: () => setReloadToken((n) => n + 1),
+  });
 
   React.useEffect(() => {
     if (workspacePath === null) return undefined;
@@ -943,38 +691,11 @@ export function CoveragePanel(props: SlotProps) {
     onRefresh: () => setReloadToken((n) => n + 1),
     onStartRun: (mode?: MaintenanceStartMode) => void startRun(mode),
     onCancelRun: () => void cancelRun(),
-    installRun,
-    installError,
-    onInstall: () => void startInstall(),
-    onCancelInstall: () => void cancelInstall(),
-    search: {
-      query: searchQuery,
-      onQueryChange: (value: string) => {
-        // Invalidate an in-flight search for the previous text: otherwise its
-        // response can land after the edit and repopulate a list that no longer
-        // matches the box. The sequence bump also makes its `finally` a no-op, so
-        // the spinner is cleared here.
-        searchSeq.current += 1;
-        setSearching(false);
-        setSearchQuery(value);
-        setSearchError(null);
-        setSearchResults(null);
-        setSearchMode(null);
-      },
-      onSubmit: () => void runSearch(),
-      onClear: clearSearch,
-      searching,
-      error: searchError,
-      mode: searchMode,
-      results: searchResults,
-      total: searchTotal,
-      truncated: searchTruncated,
-      contentSearch: searchContentSearch,
-      warning: searchWarning,
-      copied: searchCopied,
-      onOpen: openSearchHit,
-      onCopy: copySearchHit,
-    },
+    installRun: install.run,
+    installError: install.error,
+    onInstall: install.start,
+    onCancelInstall: install.cancel,
+    search,
     graph: {
       projection: graphProjection,
       loading: graphLoading,
