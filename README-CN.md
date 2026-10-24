@@ -9,7 +9,7 @@
 [上游 GitNexus 文档](#上游-gitnexus-文档路径)
 
 一个 DeepSeek Harness 插件：查看 GitNexus 索引**覆盖了什么、漏掉了什么**，判断这次刷新值不值得跑，
-看图，在右侧栏刷新索引，并按关键词搜索图里的符号。
+看图，用 GitNexus 自带的 3D 视图看全貌，在右侧栏刷新索引，并按关键词搜索符号与索引记录过的文件正文。
 
 它不 fork GitNexus、不重写解析器、不打包或再分发 GitNexus。`gitnexus` 是 **peer**，需要你自己提供。
 
@@ -26,7 +26,7 @@
 - **图构成**：节点、边、社区、流程、embedding、边/节点比。
 - **Git 活跃度 × 索引**：最近提交、作者、分支、改动最多的文件，每个文件给出 **已索引 / 设计上排除 / 索引缺失** 三方判断；另有活动 × 索引交叉表、相对索引提交的基线审查（索引未记录提交时用活动窗口起点并明确标注）、7/14/30 天提交时间线，以及点击文件行查看该文件自己的时间线。
 - **语言分布**：按字节拆分“能解析进图的语言 / 只识别格式的语言 / 其他”；GitNexus 不在时用内置扩展名映射，并标为 `builtin`，不冒充已解析。
-- **关键词搜索**：按图节点的 `name` / `filePath` 匹配，返回 kind、path、line；点击结果打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
+- **关键词搜索**：图查询按符号的 `name` / `filePath` 匹配，返回 kind、path、line；同一次查询还会问索引自带的 FTS（`file_fts`）要文件正文，所以「只在文件内容里出现过」的词也能找到那个文件。正文命中只能是文件级、没有行号——只有图知道符号边界；面板底部会写明这次实际用了哪种范围。点符号命中会打开文件并定位到行，右侧“复制”按钮复制 `path:line`。
 - **源码回退**：图查询子进程起不来时（无可用 shell 沙箱、DLL/ABI、索引忙），在索引清单内的文件里做有界源码行匹配，结果标为 `mode: "text"`。
 - **工作区多项目与切换器**：工作区本身可以是容器（例如 `D:\Project` 下放着 `gitnexus-plus/`、`viewer/`，或 `geo/` 下放着 `frontend/`、`backend/`）。面板会从当前工作区**向下**收集工作区自身、已索引项目，以及尚未建索引的 git 仓库；默认选一个，标题栏显示项目数并可切换；选择按工作区记住。未索引的 git 项目也会列出来，选中后可以针对该目录初始化。
 - **无索引也有信息**：git 项目或普通文件夹尚未建索引时，显示扫描概览、语言分布和初始化命令，而不是空白面板。普通文件夹的索引由 `--skip-git` 建立。
@@ -36,7 +36,8 @@
 
 前置：
 
-- DSH `>=0.2.0-rc.2 <0.3.0`
+- DSH `>=0.2.0-rc.2 <0.3.0`（已逐项对照桌面宿主 `0.2.1-rc.3`：本插件用到的 `shell`、
+  `webServer`、`sandboxPolicy`、`tools` 服务，`sidebar.right.pane.tab` 槽位与客户端 primitives 都在）
 - Node `>=22`
 - GitNexus `>=1.6.0 <2.0.0`（peer，不随本插件安装）
 
@@ -106,6 +107,11 @@ npm run check
 npm test
 ```
 
+`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.7 时共 852 项（引擎 562、插件 60、
+客户端 230）。测试不依赖开发机的 `D:` 盘：格式测试会自建一次性仓库，真实仓库冒烟测试默认用本
+checkout（或用 `GITNEXUS_SMOKE_REPO` 指定），没有索引时跳过。`.github/workflows/ci.yml` 在
+Windows 与 Ubuntu、Node 22 与 24 上跑 `npm ci`、`npm run check`、`npm test`。
+
 搜索分为两种模式：
 
 - **graph**：正常情况。宿主不直接加载原生 `lbug`，而是启动 `lib/bin/search-helper.js`（系统 Node）：符号名与文件路径由图查询（`CONTAINS`）给出，能带上精确的符号和行号；正文由索引自己的 FTS（`file_fts`）给出，所以关键词也能命中「只在文件内容里出现过」的文件。正文命中只能是文件级、没有行号——只有图知道符号边界。索引是 `--skip-fts` 建的、或 FTS 扩展加载失败时，仍然返回名称/路径结果，面板会写明这次实际用了哪种范围（`按符号名、文件路径与文件正文（FTS）匹配` 或 `按符号名与文件路径匹配；不搜索正文`）；声明可用却加载失败时，图查询会先不带 FTS 重试一次，再决定是否报错。
@@ -141,7 +147,7 @@ npm test
 | 增量分析卡住，或数据库报 `Maximum database size … has been reached` | 用 **全量重建**（`--force`），或按 clean slate 清理后重建。 | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus)、[`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | 刷新报 `EPERM … open '<repo>\.gitnexus\lbug.init.lock'` 或 `unable to acquire init lock` | 这是瞬时的文件锁，不是权限问题：报出该错误的机器上做过权限体检，`.gitnexus` 的权限是健康的。GitNexus 的第一个写操作就是这把锁，杀毒、索引器或上一次崩溃都可能持有它。插件会清掉残留锁并自动重试一次（运行状态里 `attempts: 2`）。仍失败就等一会儿再刷新，或把复制出的命令放到普通终端执行。 | 本插件的重试 + 分析器自己的锁文件；无上游 GitNexus 路径。 |
 | 搜索报 `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | 图查询在 `lib/bin/search-helper.js` 里跑，不在 Electron 宿主里加载原生模块；升级后重启 DSH，并确保 shell PATH 上有 `node`。helper 起不来时会回退源码。 | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
-| Windows 上搜索命中很少，或面板提示 FTS 不可用 | 索引是 `--skip-fts` 建的，或 FTS 扩展加载不了。关键词搜索仍按名称/路径匹配，源码回退按行匹配。此时面板提供 **修复搜索索引（FTS）**，只跑 `analyze --repair-fts`，不动图。它仍可能失败，面板会区分两种原因：修复需要在**子进程**里安装/加载扩展，受限 shell 会拒绝（`spawn EPERM` → 把命令复制到终端跑）；或扩展文件存在但加载不了，那是 Windows 缺少原生运行时（VC++ 2015-2022 x64 与 OpenSSL 3），不是索引坏了。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| Windows 上搜索命中很少，或面板提示 FTS 不可用 | 先看 `.gitnexus/meta.json` 里的 `capabilities.fts`：`status: "unavailable"` 只是建索引时写下的记录，**可能是陈旧的**——本机实测记录说不可用，而 `gitnexus doctor` 报 `Full-text search: available`，扩展文件也都在。用 **修复搜索索引（FTS）**（`analyze --repair-fts`）重写这份记录与搜索索引，不动图；之后面板报的是「这次实际搜了什么」，不再复述 manifest。其余原因按可能性排：索引是 `--skip-fts` 建的；修复需要在**子进程**里安装/加载扩展而受限 shell 拒绝（`spawn EPERM` → 把命令复制到终端跑）；或扩展真的加载不了，那是 Windows 缺少原生运行时（VC++ 2015-2022 x64 与 OpenSSL 3）——四种里最少见的一种，值得先确认再下结论。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
 | 刷新按钮显示“无需刷新”且不可点 | 这是 Tier 0 的判断，不是故障：索引记录的文件内容哈希全部没变，再跑分析器也不会改变索引。**仍然刷新** 可以强制跑一次（例如 GitNexus 升级或 schema 变化后）。如果索引没有记录提交基线，面板**不会**说“无需刷新”，而是显示“无法确认”并保持按钮可用。 | 本插件的差量引擎；无上游 GitNexus 路径。 |
 | 门禁显示“无法确认”，而不是“无需刷新” | 索引没有记录提交，所以只能比较工作区。受限沙箱里的 analyze 起不了 `git` 子进程，manifest 的 `lastCommit` 因此为空——本机实测：同一条命令在普通终端会写入提交，在沙箱里留空。想要更强的结论，把复制出的命令在沙箱外跑一次；无论哪种状态，刷新按钮都可用。 | 本插件差量引擎 + 分析器的 git 访问；无上游 GitNexus 路径。 |
 | 图视图空白，或报 404 | 404 说明宿主还没有 `/api/gitnexus/graph` 路由，重启 DSH，而不是只刷新页面。空白画布但下面有说明，通常是索引还没有社区（旧索引）或索引忙：刷新索引即可。节点数按预算截断，卡片会写明省略了多少。 | 本插件宿主路由；图数据本身来自 GitNexus 索引。 |

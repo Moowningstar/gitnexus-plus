@@ -10,8 +10,9 @@
 [Upstream GitNexus docs](#upstream-gitnexus-documentation)
 
 A DeepSeek Harness plugin: see what a GitNexus index **covers and what it leaves out**,
-decide whether a refresh is worth running, browse the graph, refresh it from the sidebar,
-and search its symbols by keyword.
+decide whether a refresh is worth running, browse the graph, open GitNexus's own 3D view
+for the full picture, refresh the index from the sidebar, and search its symbols — and the
+source text the index recorded — by keyword.
 
 It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitnexus` is a
 **peer**; you provide it.
@@ -79,9 +80,12 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Language distribution** — bytes split into languages GitNexus can parse, formats it
   only recognizes, and everything else. Without GitNexus, a built-in extension map keeps
   the breakdown useful and marks it `builtin`, never "parsed".
-- **Keyword search** — matches graph node `name` / `filePath`, returns kind, path and line;
-  clicking a hit opens the file at that line, and a separate Copy button copies
-  `path:line`.
+- **Keyword search** — a graph query matches symbol `name` / `filePath` and returns kind,
+  path and line; the same query asks the index's own full-text index (`file_fts`) for
+  source text as well, so a term that only appears inside a file body still finds that
+  file. Body hits are file-level and carry no line range, because only the graph knows
+  symbol boundaries, and the footer says which of the two scopes actually ran. Clicking a
+  symbol hit opens the file at that line, and a separate Copy button copies `path:line`.
 - **Source fallback** — when the graph helper cannot start (no usable shell sandbox,
   DLL/ABI, busy index), a bounded line search over the indexed files returns
   `mode: "text"` instead of pretending to be the graph.
@@ -103,7 +107,9 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 
 Requirements:
 
-- DSH `>=0.2.0-rc.2 <0.3.0`
+- DSH `>=0.2.0-rc.2 <0.3.0` (checked item by item against the desktop host `0.2.1-rc.3`:
+  the `shell`, `webServer`, `sandboxPolicy` and `tools` services, the `sidebar.right.pane.tab`
+  slot and the client primitives this plugin uses are all still there)
 - Node `>=22`
 - GitNexus `>=1.6.0 <2.0.0` (peer; not installed by this plugin)
 
@@ -187,11 +193,12 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites. The suite no longer
-depends on a developer's `D:` drive: the format test builds a disposable repository, and
-the real-repository smoke test defaults to this checkout (or `GITNEXUS_SMOKE_REPO`) and
-skips when it has no index. `.github/workflows/ci.yml` runs `npm ci`, `npm run check` and
-`npm test` on Windows and Ubuntu with Node 22 and 24.
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.7 that is 852
+checks (562 engine, 60 plugin, 230 client). The suite no longer depends on a developer's
+`D:` drive: the format test builds a disposable repository, and the real-repository smoke
+test defaults to this checkout (or `GITNEXUS_SMOKE_REPO`) and skips when it has no index.
+`.github/workflows/ci.yml` runs `npm ci`, `npm run check` and `npm test` on Windows and
+Ubuntu with Node 22 and 24.
 
 Search has two modes:
 
@@ -229,11 +236,13 @@ GitNexus path owns the rest.
 | Incremental analyze hangs, or the database reports `Maximum database size … has been reached` | Use **全量重建** (`--force`), or the clean-slate steps. | [`RUNBOOK.md` — Clean slate](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#clean-slate-corrupt-or-huge-gitnexus), [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Refresh fails with `EPERM … open '<repo>\.gitnexus\lbug.init.lock'` or `unable to acquire init lock` | A transient file lock, not a permissions problem: the ACL for `.gitnexus` was checked on the machine that reported it and came back healthy. GitNexus's first write is that lock, and a scanner, the indexer, or a crashed run can hold it. The plugin clears a stale lock and retries once automatically (the run shows `attempts: 2`). If it still fails, wait a moment and retry, or run the copied command in a normal terminal. | This plugin's retry plus the analyzer's own lock file; no upstream GitNexus path. |
 | Search fails with `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | Graph search runs in `lib/bin/search-helper.js`, never in the Electron host. Restart DSH after upgrading and keep `node` on the shell PATH. If the helper cannot start at all, search falls back to source text. | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
-| Windows search returns very few hits, or the panel warns FTS is unavailable | The index was built with `--skip-fts`, or the FTS extension cannot load. Graph search then matches names and paths only — the panel's footer says 不搜索正文 instead of naming FTS — and the source fallback matches lines. The panel then offers **修复搜索索引（FTS）**, which runs `analyze --repair-fts` and leaves the graph alone. Two ways it still fails, and the panel names which: the repair must install/load the extension **out of process**, which a confined shell refuses (`spawn EPERM` — run the copied command in a terminal), or the extension file exists but cannot load, which is a missing Windows runtime (VC++ 2015-2022 x64 and OpenSSL 3), not an index problem. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
+| Windows search returns very few hits, or the panel warns FTS is unavailable | Read `capabilities.fts` in `.gitnexus/meta.json` first: `status: "unavailable"` is a record written when the index was built, and it can be **stale** — measured here, the record said unavailable while `gitnexus doctor` reported `Full-text search: available` and the extension files were present. **修复搜索索引（FTS）** (`analyze --repair-fts`) rewrites that record and the search indexes without touching the graph; the panel then reports what it actually searched instead of repeating the manifest. Other causes, in order: the index was built with `--skip-fts`; the repair could not run out of process because the sandbox refuses the spawn (`spawn EPERM` — run the copied command in a terminal); or the extension genuinely cannot load, which is a missing Windows runtime (VC++ 2015-2022 x64 and OpenSSL 3) — the rarest of the four, and worth confirming rather than assuming. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
 | The refresh button says 无需刷新 and is disabled | That is the Tier 0 verdict, not a failure: every file the index recorded still hashes the same, so re-running the analyzer would change nothing. **仍然刷新** forces it anyway (useful after a schema or GitNexus upgrade). If the index recorded no commit baseline, the panel does **not** claim 无需刷新 — it says it cannot confirm and leaves the button enabled. | This plugin's delta engine; no upstream GitNexus path. |
 | The gate says 无法确认 instead of 无需刷新 | The index recorded no commit, so the comparison can only see the working tree. A confined analyze cannot start `git`, which is how the manifest ends up with an empty `lastCommit` — measured here: the same command writes it in a normal terminal and leaves it empty under the sandbox. Run the copied command outside the sandbox once if you want the stronger verdict; the refresh button stays usable either way. | This plugin's delta engine plus the analyzer's git access; no upstream GitNexus path. |
 | The graph card is empty, or fails with 404 | A 404 means the host predates `/api/gitnexus/graph` — restart DSH, not just the page. An empty canvas with a message means the index has no communities yet (an old index), or the store is busy: refresh the index. Nodes are capped by design; the card states how much it left out. | This plugin's host route; graph data itself comes from the GitNexus index. |
 | The graph loads for some projects but spins or returns 504 for others | On Windows the ACL sandbox's first workspace grant propagates an inheritable ACE across the whole repository, which can exceed the 25 s helper timeout on a large tree; a project whose grant is already cached is fast. Since 0.1.5 the search/graph helpers root the policy at `<repo>/.gitnexus`, so the grant covers only the index; restart DSH. If it still fails, confirm `.gitnexus/lbug` exists and that no analyze is holding the index. | This plugin's sandbox policy root; graph data itself comes from the GitNexus index. |
+| The 3D view will not open, or its overlay stays blank | Read the card first: `unavailable` means the host has no shell executor or the machine has no `gitnexus` CLI (the card prints the install command); `failed` carries the child process's own output, where a busy port (`EADDRINUSE`) and an index written by another CLI version (`database file version`) are the two common cases. `服务在跑，但索引对不上` means the server on that port does not list this repository in its registry: refresh this repository's index, or stop the server you started yourself. A missing card or a 404 means the host never mounted the route — restart DSH. | This plugin's web-view lifecycle; the SPA is the `web/` directory inside the GitNexus package. |
+| The AI settings inside the 3D view are still empty | The **AI 设置** line on the card names the reason: no `GITNEXUS_PLUS_AI_*` variables set (export them and restart DSH or press **重新启动**), a partial set (`缺少 GITNEXUS_PLUS_AI_MODEL` / `缺少 GITNEXUS_PLUS_AI_API_KEY`), or `外部启动的服务` — that server was not started by the plugin, so its page cannot be seeded and the dialog has to be filled once by hand. The variables are read from the DSH process environment, so a restart is required after changing them. | This plugin's generated page (`GITNEXUS_WEB_DIST`); the SPA keeps its own settings in `sessionStorage`. |
 | Clicking a search hit does not open a file | The click uses `ctx.sidebarRight.openResourceIn`; a profile without that service falls back to copying `path:line`. Restart DSH; if it persists, use the Copy button. | This panel/DSH boundary; no upstream GitNexus path. |
 | The file timeline fails with 404/401 | The client hot-reloaded before the host did, so `/api/gitnexus/file-history` is not mounted yet. Restart DSH (not just refresh the page). | This plugin's host route; no upstream GitNexus path. |
 | Analyze runs out of memory | Keep the panel's `NODE_OPTIONS` / `GITNEXUS_MEMORY` settings, or raise the heap manually; the index may need a full rebuild. | [`gitnexus/README.md` — Analysis runs out of memory](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analysis-runs-out-of-memory), [`RUNBOOK.md` — Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
@@ -351,8 +360,9 @@ the related features puts that use under it.**
   deleted when the server stops.
 - The plugin reports facts about a GitNexus index; it does not rewrite the parser or
   reimplement the graph database.
-- Graph search matches names/paths, not bodies; the text fallback matches lines and is
-  capped.
+- Graph search answers with two scopes: symbol names and file paths from the graph, and
+  source text from the index's own FTS. Body hits are file-level and carry no line range,
+  and the footer states which scope ran. The text fallback matches lines and is capped.
 - The source fallback only covers files in the index manifest; refresh the index for new
   files.
 - An index built with `--skip-git` has no commit baseline: the gate can only say it cannot
