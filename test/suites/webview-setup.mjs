@@ -517,3 +517,69 @@ export async function webDistTests() {
 
   await fs.rm(root, { recursive: true, force: true });
 }
+
+/**
+ * The probe half of the web view: which registry a repository would be served from,
+ * and what a running server says about it. Stub fetch, no sockets.
+ */
+export async function webViewProbeTests() {
+  section('web view probe: registry order, path identity, server answers');
+  const { createWebViewProbe, registryHomesFor, repoPathMatches } = await import(
+    '../../lib/gitnexus/webview-probe.js'
+  );
+
+  check(
+    'paths compare across separators and case',
+    repoPathMatches('D:/Repo/Project', 'D:\\repo\\project\\'),
+    String(repoPathMatches('D:/Repo/Project', 'D:\\repo\\project\\')),
+  );
+  check(
+    'different repositories do not match',
+    !repoPathMatches('D:/repo/a', 'D:/repo/b'),
+  );
+
+  const homes = registryHomesFor('D:/repo', 'D:/custom');
+  check(
+    'the configured home is looked at first',
+    homes[0] === path.resolve('D:/custom') && homes.length >= 2,
+    JSON.stringify(homes),
+  );
+  check(
+    'a configured home duplicating the plugin home is listed once',
+    new Set(homes.map((home) => normalizePathKey(home))).size === homes.length,
+    JSON.stringify(homes),
+  );
+
+  const answers = new Map();
+  answers.set(4747, { health: false, repos: [] });
+  answers.set(4748, { health: true, repos: [{ path: 'D:\\other' }] });
+  answers.set(4749, { health: true, repos: [{ path: 'D:\\repo' }, { path: 12 }] });
+  const probe = createWebViewProbe({
+    host: '127.0.0.1',
+    fetchLike: async (url) => {
+      const port = Number(new URL(url).port);
+      const answer = answers.get(port);
+      if (answer === undefined) throw new Error('no server');
+      if (url.endsWith('/api/health')) {
+        return { ok: true, status: 200, json: async () => ({ status: answer.health ? 'ok' : 'down' }) };
+      }
+      return { ok: true, status: 200, json: async () => answer.repos };
+    },
+  });
+
+  check('a silent port is not healthy', (await probe.probeHealth(4747)) === false);
+  check('a healthy port answers', (await probe.probeHealth(4748)) === true);
+  check(
+    'a server with another registry does not have this repository',
+    (await probe.serverHasRepo(4748, 'D:/repo')) === false,
+  );
+  check(
+    'the server that lists this repository does',
+    (await probe.serverHasRepo(4749, 'D:/repo')) === true,
+  );
+  check(
+    'entries that are not paths are ignored rather than crashing',
+    (await probe.listRepos(4749)).length === 1,
+  );
+  check('a port nothing answers on is not healthy', (await probe.probeHealth(4751)) === false);
+}

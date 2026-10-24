@@ -11,8 +11,9 @@ import { searchTests, ftsSearchTests, searchRouteTests } from './suites/search.m
 import { routeTests, fileHistoryRouteTests } from './suites/routes.mjs';
 import { analyzeTests, installTests } from './suites/runners.mjs';
 import { deltaTests } from './suites/delta.mjs';
+import { gitLogTests } from './suites/git-log.mjs';
 import { graphTests } from './suites/graphs.mjs';
-import { shellTests, aiSettingsTests, webDistTests } from './suites/webview-setup.mjs';
+import { shellTests, aiSettingsTests, webDistTests, webViewProbeTests } from './suites/webview-setup.mjs';
 import { webViewTests } from './suites/webview.mjs';
 import { realRepoSmoke } from './suites/smoke.mjs';
 
@@ -38,10 +39,12 @@ await installTests();
 // `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the
 // git-less skip path and the normal path, so awaiting it again would double-count.
 await deltaTests();
+await gitLogTests();
 await graphTests();
 await shellTests();
 await aiSettingsTests();
 await webDistTests();
+await webViewProbeTests();
 await webViewTests();
 await realRepoSmoke();
 

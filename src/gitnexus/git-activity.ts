@@ -26,6 +26,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { CommitDiff, FileHistory, FileHistoryCommit } from 'dsh-gitnexus-wire';
 import { normalizePathKey } from './index-meta.js';
+import {
+  LOG_FIELD_SEPARATOR,
+  LOG_RECORD_SEPARATOR,
+  parseLogWindow,
+  parseNumstatLines,
+} from './git-log.js';
+import type { FileTally } from './git-log.js';
 
 const run = promisify(execFile);
 
@@ -33,8 +40,8 @@ const run = promisify(execFile);
 const TIMEOUT_MS = 20_000;
 
 /** Record separator (RS) opens each commit; unit separator (US) separates its fields. */
-const RS = '\u001e';
-const US = '\u001f';
+const RS = LOG_RECORD_SEPARATOR;
+const US = LOG_FIELD_SEPARATOR;
 
 const DEFAULTS = Object.freeze({
   sinceDays: 90,
@@ -270,18 +277,6 @@ export interface ReadGitActivityOptions {
   baselineRef?: string | null;
 }
 
-/** A file row before it is crossed with the index, so no verdict exists yet. */
-type FileTally = Omit<ActivityFile, 'indexed' | 'verdict'>;
-
-/** A commit before its aggregate index verdict is known. */
-type CommitTally = Omit<ActivityCommit, 'files' | 'shortSha' | 'verdict'> & {
-  sha: string;
-  fileSet: Set<string>;
-};
-
-/** An author row before it is emitted: `bot` is decided at emit time. */
-type AuthorEntry = Omit<ActivityAuthor, 'bot'> & { fileSet: Set<string> };
-
 /**
  * Whether an author is a machine account.
  *
@@ -419,108 +414,10 @@ export async function readGitActivity(
   ]);
   if (log === null) return null;
 
+  const tally = parseLogWindow(log, maxCommits);
+  const { commits, files, authorMap, stamps, commitCount, capped } = tally;
+  const { newestCommit, oldestCommit, totalInsertions, totalDeletions } = tally;
   const authors: ActivityAuthor[] = [];
-  const files = new Map<string, FileTally>();
-  const authorMap = new Map<string, AuthorEntry>();
-  const commits: CommitTally[] = [];
-
-  let commitCount = 0;
-  /** True once the loop met the commit past the window: a fact, not an inference. */
-  let capped = false;
-  let totalInsertions = 0;
-  let totalDeletions = 0;
-  let newestCommit = '';
-  let oldestCommit = '';
-  /** Per-commit stamps, for the time histogram. Bounded by `maxCommits`. */
-  const stamps: ActivityStamp[] = [];
-
-  for (const chunk of log.split(RS)) {
-    if (chunk.trim() === '') continue;
-    const newline = chunk.indexOf('\n');
-    const header = newline === -1 ? chunk : chunk.slice(0, newline);
-    const body = newline === -1 ? '' : chunk.slice(newline + 1);
-    // `split` yields a plain array, so a short header really can leave these
-    // undefined even though the declared element type says otherwise.
-    const [sha, author, email, date, subject]: (string | undefined)[] = header.split(US);
-    if (sha === undefined || date === undefined) continue;
-
-    if (commitCount >= maxCommits) {
-      capped = true;
-      break;
-    }
-    commitCount += 1;
-    const commit: CommitTally = {
-      sha,
-      date,
-      author: author ?? '?',
-      subject: subject ?? '',
-      insertions: 0,
-      deletions: 0,
-      fileSet: new Set(),
-    };
-    if (newestCommit === '' || date > newestCommit) newestCommit = date;
-    if (oldestCommit === '' || date < oldestCommit) oldestCommit = date;
-
-    const key = `${author ?? '?'} <${email ?? '?'}>`;
-    let entry = authorMap.get(key);
-    if (entry === undefined) {
-      entry = {
-        name: author ?? '?',
-        email: email ?? '?',
-        commits: 0,
-        insertions: 0,
-        deletions: 0,
-        files: 0,
-        lastCommit: date,
-        fileSet: new Set(),
-      };
-      authorMap.set(key, entry);
-    }
-    entry.commits += 1;
-    if (date > entry.lastCommit) entry.lastCommit = date;
-
-    let commitInsertions = 0;
-    let commitDeletions = 0;
-
-    for (const line of body.split('\n')) {
-      if (line.trim() === '') continue;
-      const parts = line.split('\t');
-      if (parts.length < 3) continue;
-      const [addedRaw, deletedRaw, ...pathParts] = parts;
-      const filePath = pathParts.join('\t');
-      if (filePath === '') continue;
-      // `-` marks a binary file in --numstat; it counts as a change with no
-      // line delta, which is the truthful reading.
-      const added = Number.parseInt(addedRaw, 10);
-      const deleted = Number.parseInt(deletedRaw, 10);
-      const ins = Number.isFinite(added) ? added : 0;
-      const del = Number.isFinite(deleted) ? deleted : 0;
-
-      totalInsertions += ins;
-      totalDeletions += del;
-      commitInsertions += ins;
-      commitDeletions += del;
-      entry.insertions += ins;
-      entry.deletions += del;
-      entry.fileSet.add(filePath);
-      commit.insertions += ins;
-      commit.deletions += del;
-      commit.fileSet.add(filePath);
-
-      let file = files.get(filePath);
-      if (file === undefined) {
-        file = { path: filePath, changes: 0, insertions: 0, deletions: 0, lastChange: date };
-        files.set(filePath, file);
-      }
-      file.changes += 1;
-      file.insertions += ins;
-      file.deletions += del;
-      if (date > file.lastChange) file.lastChange = date;
-    }
-
-    stamps.push({ date, insertions: commitInsertions, deletions: commitDeletions });
-    commits.push(commit);
-  }
 
   const toActivityFile = (file: FileTally): ActivityFile => {
     const verdict: FileVerdict = classified ? classify(file.path) : 'excluded';
@@ -590,20 +487,10 @@ export async function readGitActivity(
     const changed = new Map<string, { insertions: number; deletions: number }>();
     let insertions = 0;
     let deletions = 0;
-    for (const line of diff.split('\n')) {
-      if (line.trim() === '') continue;
-      const parts = line.split('\t');
-      if (parts.length < 3) continue;
-      const [addedRaw, deletedRaw, ...pathParts] = parts;
-      const filePath = pathParts.join('\t');
-      if (filePath === '') continue;
-      const added = Number.parseInt(addedRaw, 10);
-      const deleted = Number.parseInt(deletedRaw, 10);
-      const ins = Number.isFinite(added) ? added : 0;
-      const del = Number.isFinite(deleted) ? deleted : 0;
-      insertions += ins;
-      deletions += del;
-      changed.set(filePath, { insertions: ins, deletions: del });
+    for (const row of parseNumstatLines(diff)) {
+      insertions += row.insertions;
+      deletions += row.deletions;
+      changed.set(row.path, { insertions: row.insertions, deletions: row.deletions });
     }
 
     const commitCount = countRaw === null ? 0 : Number.parseInt(countRaw.trim(), 10);

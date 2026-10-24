@@ -43,16 +43,17 @@
  */
 
 import path from 'node:path';
-import { defaultGitnexusHome } from './commands.js';
-import { globalDir, normalizePathKey, readRegistry } from './index-meta.js';
+import { normalizePathKey } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
+import { prepareInjection } from './webview-inject.js';
 import {
-  llmSettingsSeed,
-  readAiSettings,
-  type AiSettingsRead,
-  type AiProvider,
-} from './ai-settings.js';
-import { defaultWebDistRoot, locateWebDist, prepareWebDist, removeWebDist } from './webdist.js';
+  createWebViewProbe,
+  registryHasRepo,
+  registryHomesFor,
+} from './webview-probe.js';
+import type { ProbeFetch } from './webview-probe.js';
+import { readAiSettings, type AiSettingsRead, type AiProvider } from './ai-settings.js';
+import { removeWebDist } from './webdist.js';
 import type { ShellLike } from '../shell.js';
 import { envPrefix, invokeCommand, quoteArg, shellFlavor, tailChars, type ShellFlavor } from '../shell.js';
 
@@ -153,11 +154,7 @@ export interface WebViewRunnerOptions {
   /** Probe interval while waiting for health. */
   pollIntervalMs?: number;
   /** Injectable for tests: the global fetch, narrowed to what is used here. */
-  fetchLike?: (url: string, init?: { signal?: AbortSignal }) => Promise<{
-    ok: boolean;
-    status: number;
-    json(): Promise<unknown>;
-  }>;
+  fetchLike?: ProbeFetch;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -211,7 +208,6 @@ const DEFAULT_POLL_INTERVAL_MS = 300;
 const PORT_ATTEMPTS = 10;
 /** Characters of server output kept for the panel. */
 const OUTPUT_TAIL = 4000;
-const HEALTH_TIMEOUT_MS = 700;
 
 /**
  * Build the `gitnexus serve` command line, as the shell will read it.
@@ -366,77 +362,12 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
   let pending: string | null = null;
   let pendingStart: Promise<WebViewStatus> | null = null;
 
-  const registryHomes = options.registryHomes ?? ((repoPath: string): string[] => {
-    const homes: string[] = [];
-    const configured = options.gitnexusHome;
-    if (typeof configured === 'string' && configured.trim() !== '') homes.push(path.resolve(configured));
-    homes.push(defaultGitnexusHome(repoPath));
-    homes.push(globalDir());
-    // De-duplicate while keeping the order: the first hit is the one that counts.
-    const seen = new Set<string>();
-    return homes.filter((home) => {
-      const key = normalizePathKey(home);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  });
+  const registryHomes =
+    options.registryHomes ??
+    ((repoPath: string): string[] => registryHomesFor(repoPath, options.gitnexusHome));
 
-  /** Whether a registry directory holds an entry for this repository. */
-  const registryHasRepo = async (home: string, repoPath: string): Promise<boolean> => {
-    const entries = await readRegistry({ env: { ...process.env, GITNEXUS_HOME: home } });
-    const wanted = normalizePathKey(repoPath);
-    return entries.some((entry) => {
-      try {
-        return normalizePathKey(entry.path) === wanted;
-      } catch {
-        return false;
-      }
-    });
-  };
-
-  const probeHealth = async (port: number): Promise<boolean> => {
-    try {
-      const response = await doFetch(`http://${host}:${port}/api/health`, {
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      if (!response.ok) return false;
-      const body = (await response.json()) as { status?: unknown } | null;
-      return body !== null && body.status === 'ok';
-    } catch {
-      return false;
-    }
-  };
-
-  /** The repository paths a server on this port reports, or null when it will not say. */
-  const listRepos = async (port: number): Promise<string[] | null> => {
-    try {
-      const response = await doFetch(`http://${host}:${port}/api/repos`, {
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      if (!response.ok) return null;
-      const body = (await response.json()) as unknown;
-      if (!Array.isArray(body)) return null;
-      return body
-        .map((entry) => (entry as { path?: unknown }).path)
-        .filter((value): value is string => typeof value === 'string');
-    } catch {
-      return null;
-    }
-  };
-
-  const serverHasRepo = async (port: number, repoPath: string): Promise<boolean> => {
-    const paths = await listRepos(port);
-    if (paths === null) return false;
-    const wanted = normalizePathKey(repoPath);
-    return paths.some((value) => {
-      try {
-        return normalizePathKey(value) === wanted;
-      } catch {
-        return false;
-      }
-    });
-  };
+  const probe = createWebViewProbe({ host, fetchLike: doFetch });
+  const { probeHealth, serverHasRepo } = probe;
 
   const failedStatus = (record: FailureRecord): WebViewStatus => ({
     state: record.state,
@@ -544,46 +475,20 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       return failedStatus(failure);
     }
 
-    // Seed the SPA's AI settings, if the operator named them. This is the only way to get
-    // them into the embedded page: a parent frame cannot write the child's sessionStorage.
+    // Seed the SPA's AI settings, if the operator named them: the page is the only
+    // place a parent frame cannot reach.
     const aiRead = readAi();
-    let ai = configuredAi(aiRead);
-    let webDist: string | null = null;
-    if (aiRead.kind === 'ready') {
-      const outDir = path.join(options.webDistRoot ?? defaultWebDistRoot(), String(port));
-      try {
-        const source =
-          options.webDistSource === undefined
-            ? await locateWebDist({ cliPath: cli.cliPath, packageRoot: cli.packageRoot })
-            : options.webDistSource;
-        if (source === null) {
-          ai = { ...ai, reason: '没找到 GitNexus 的 web 目录，AI 设置不会被注入（服务照常启动）。' };
-        } else {
-          const prepared = await prepareWebDist({
-            sourceDir: source,
-            outDir,
-            seed: llmSettingsSeed(aiRead.settings),
-          });
-          if (prepared === null) {
-            ai = { ...ai, reason: 'GitNexus 的 index.html 结构与预期不同，跳过 AI 设置注入。' };
-          } else {
-            webDist = prepared.dir;
-            ai = {
-              injected: true,
-              provider: aiRead.settings.provider,
-              model: aiRead.settings.model,
-              baseUrl: aiRead.settings.baseUrl,
-              reason: null,
-            };
-          }
-        }
-      } catch (error) {
-        ai = {
-          ...ai,
-          reason: `生成注入页面失败：${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    }
+    const injected = await prepareInjection({
+      read: aiRead,
+      base: configuredAi(aiRead),
+      cliPath: cli.cliPath,
+      packageRoot: cli.packageRoot,
+      port,
+      webDistRoot: options.webDistRoot,
+      webDistSource: options.webDistSource,
+    });
+    const ai = injected.ai;
+    const webDist = injected.webDist;
 
     const command = serveCommandLine(cli.cliPath, {
       flavor: shellFlavor,
