@@ -38,7 +38,7 @@ tmp-commit-msg.txt
 msg.txt
 msg2.txt
 msg3.txt
-test/.fixtures/
+test/
 msg4.txt
 msg5.txt
 msg6.txt
