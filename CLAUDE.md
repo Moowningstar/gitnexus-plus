@@ -1,9 +1,9 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **gitnexus-plus** (1687 symbols, 2806 relationships, 35 execution flows).
+This project is indexed by GitNexus as **gitnexus-plus** (4622 symbols, 10596 relationships, 322 execution flows).
 
-> Freshness comes from `staleness.status` on query/context/impact results — act on `behind` or `diverged`; this line is documentation, not a verdict on the index. Refresh with `node .gitnexus/run.cjs analyze --index-only` (steady-state incremental is seconds; `--force` is a last resort). No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
+> Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 
 ## Always Do
 

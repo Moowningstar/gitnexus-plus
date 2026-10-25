@@ -57,6 +57,23 @@ declare module '@deepseek-ai/dsh-tools' {
     [key: string]: unknown;
   }
 
+  /**
+   * The slice of the host's `ToolRunContext` a tool body may rely on.
+   *
+   * The host passes call identity, the calling agent, nesting tokens and a cancellation
+   * signal. Only one of those is a *contract* on the body: `ctx.tools.execute` requires
+   * a body to "observe or forward `exec.signal` and settle only after its owned work
+   * reaches quiescence", and declaring `timeoutMs` on a definition asserts that the
+   * body does so. Typed as a structural slice, like `ShellLike`, because the rest of
+   * the runtime context is host-owned detail this plugin never reads.
+   *
+   * Optional, not required: 0.2.0 hosts in the declared peer range may call a body with
+   * arguments only. A body therefore reads `exec?.signal` rather than assuming it.
+   */
+  export interface ToolExecContext {
+    signal: AbortSignal;
+  }
+
   export interface ToolDefinition<Args, Result> {
     name: string;
     description: string;
@@ -66,7 +83,7 @@ declare module '@deepseek-ai/dsh-tools' {
       render: (args: Args, value: Result) => RenderedPart[];
       presentationMeta?: (args: Args, value: Result) => unknown;
     };
-    execute: (args: Args) => Promise<Result> | Result;
+    execute: (args: Args, exec?: ToolExecContext) => Promise<Result> | Result;
     presentCall?: (args: Args) => unknown;
     presentResult?: (args: Args, value: Result) => unknown;
     isConcurrencySafe?: boolean | ((args: Args) => boolean);

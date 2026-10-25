@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.7](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.7)** ·
+**Current release: [0.1.8](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.8)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -169,6 +169,14 @@ Inside DSH:
 
 - tool `gitnexus_coverage`: `{ repo, includeLanguages? }`
 - tool `gitnexus_delta`: `{ repo }` — would a refresh change anything?
+- tool `gitnexus_impact`: `{ repo, target, direction?, maxDepth?, summaryOnly?, limit?, minConfidence? }`
+  — who breaks if this symbol changes; ask it *before* editing
+- tool `gitnexus_context`: `{ repo, name?, uid?, file_path?, kind?, include_content? }` — one symbol's
+  definition, callers, callees, and the processes it takes part in; name it by `uid` when the name
+  is ambiguous
+- tool `gitnexus_query`: `{ repo, search_query, goal?, task_context?, limit?, max_symbols? }` — ask
+  the graph where a concept lives; returns processes, the symbols inside them, and
+  name-matching definitions
 - route `GET /api/gitnexus/projects?root=<workspace>` — the workspace's projects (indexed and unindexed git)
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
@@ -180,6 +188,18 @@ Inside DSH:
 - route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index;
   `force=1` for a full rebuild, `mode=repair-fts` for the search indexes only)
 - right-sidebar tab `gitnexus`
+
+**Name mapping.** GitNexus writes an `AGENTS.md` into every repository it analyses (and
+rewrites it on each run) that names tools by their upstream MCP spelling. This plugin
+registers them under a `gitnexus_` prefix, so following that file literally finds
+nothing. Translate:
+
+| `AGENTS.md` says | This plugin offers | Notes |
+| --- | --- | --- |
+| `impact({target, direction})` | `gitnexus_impact` | same argument names, plus `maxDepth`/`summaryOnly`/`limit`/`minConfidence` |
+| `context({name})` | `gitnexus_context` | `uid`/`file_path`/`kind` when a bare name is ambiguous |
+| `query({search_query})` | `gitnexus_query` | same argument name, plus `goal`/`task_context`/`limit`/`max_symbols` |
+| `detect_changes({scope})` | `gitnexus_delta` | answers "does the index need a refresh"; staged/compare scoping is 0.1.9 work |
 
 CLI:
 
@@ -193,12 +213,65 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.7 that is 852
-checks (562 engine, 60 plugin, 230 client). The suite no longer depends on a developer's
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.8 that is 1026
+checks (708 engine, 80 plugin, 238 client). Seven of those are an encoding guard: it maps every
+GBK-encodable character back to its bytes and fails when a run of them decodes as UTF-8 again,
+which is what a double-decoded string looks like and what a character blocklist keeps missing.
+Four more are publish hygiene: `.npmrc` and `package-lock.json` must point only at
+`registry.npmjs.org` (0.1.7's lockfile pointed entirely at a mirror, and one `npm install` on a
+mirror-configured machine writes it back — only an assertion notices).
+The suite no longer depends on a developer's
 `D:` drive: the format test builds a disposable repository, and the real-repository smoke
 test defaults to this checkout (or `GITNEXUS_SMOKE_REPO`) and skips when it has no index.
 `.github/workflows/ci.yml` runs `npm ci`, `npm run check` and `npm test` on Windows and
 Ubuntu with Node 22 and 24.
+
+### How the three graph tools work
+
+`gitnexus_impact`, `gitnexus_context` and `gitnexus_query` do not re-implement any
+traversal: the request goes to `lib/bin/graph-query-helper.js`, which loads GitNexus's own
+MCP backend under the system Node. The native `lbug` addon cannot load into this host
+(Electron's Node, different ABI) — the same boundary the graph projection already uses.
+
+One short-lived child per call, ~400–600 ms cold (node, registry, native store,
+traversal) — the same order as a grep. The request body travels in a temporary file rather
+than in argv, because a symbol name is caller-supplied text that may contain spaces, quotes
+or a newline.
+
+**The child process goes through the host's execution seam, not a bare `spawn`**
+(`src/subprocess.ts`): when the profile mounts `ctx.subprocess` the argv is handed to the
+system as-is (no shell parses it), and any sandbox policy is applied through
+`ctx.sandbox.confine` — without `confine` the plugin **refuses** to start the process
+unconfined instead of quietly bypassing isolation. Only when `ctx.subprocess` is absent does
+it fall back to `ctx.shell` and a command string. Both paths forward the tool's
+`exec.signal`, so cancelling a call stops the child and answers "this graph query was
+cancelled" rather than burning the full timeout. The same seam is what lets the panel read
+the graph in a deployment that has no shell at all.
+
+Two things are **never** truncated, because they say how much the answer can be trusted:
+
+- `risk`: `LOW`/`MEDIUM`/`HIGH`/`CRITICAL`/`UNKNOWN`. **`UNKNOWN` is not "safe"** — it means
+  the upstream walk resolved no callers at all, which can also happen because the call
+  sites are not resolvable (dynamic dispatch, other languages, unindexed packages).
+- `epistemic`: `exact` or `lower-bound`. On `lower-bound` the list is a lower bound.
+
+Upstream also emits `boundaries` (its own prose for *why* something is a lower bound),
+`causes` (per-kind gap counters) and `riskNote` (the walk's own justification) on some
+paths. They are printed **when present and not invented when absent** — measured on 1.6.12,
+`impact`/`context` usually carry none of the three, so the plugin does not fabricate them
+and does not drop the two lines above when they are missing.
+
+**A symbol that is not in the index now says so.** Upstream answers a missing target with
+`{"error":"Target 'x' not found", …}` plus `risk: UNKNOWN`; printing only the UNKNOWN reads
+as "nothing calls it". The renderer prints the error verbatim and adds "this symbol is not
+in the index — refresh it and ask again".
+
+The lists themselves are bounded (12 callers, 6 processes, 12 definitions) but the counts
+are always real, and a cut list says how many entries it left out.
+
+`graphTools: false` withdraws the three tools entirely and keeps `gitnexus_coverage` and
+`gitnexus_delta`, which spawn nothing.
+
 
 Search has two modes:
 
@@ -238,7 +311,8 @@ GitNexus path owns the rest.
 | Search fails with `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | Graph search runs in `lib/bin/search-helper.js`, never in the Electron host. Restart DSH after upgrading and keep `node` on the shell PATH. If the helper cannot start at all, search falls back to source text. | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Windows search returns very few hits, or the panel warns FTS is unavailable | Read `capabilities.fts` in `.gitnexus/meta.json` first: `status: "unavailable"` is a record written when the index was built, and it can be **stale** — measured here, the record said unavailable while `gitnexus doctor` reported `Full-text search: available` and the extension files were present. **修复搜索索引（FTS）** (`analyze --repair-fts`) rewrites that record and the search indexes without touching the graph; the panel then reports what it actually searched instead of repeating the manifest. Other causes, in order: the index was built with `--skip-fts`; the repair could not run out of process because the sandbox refuses the spawn (`spawn EPERM` — run the copied command in a terminal); or the extension genuinely cannot load, which is a missing Windows runtime (VC++ 2015-2022 x64 and OpenSSL 3) — the rarest of the four, and worth confirming rather than assuming. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
 | The refresh button says 无需刷新 and is disabled | That is the Tier 0 verdict, not a failure: every file the index recorded still hashes the same, so re-running the analyzer would change nothing. **仍然刷新** forces it anyway (useful after a schema or GitNexus upgrade). If the index recorded no commit baseline, the panel does **not** claim 无需刷新 — it says it cannot confirm and leaves the button enabled. | This plugin's delta engine; no upstream GitNexus path. |
-| The gate says 无法确认 instead of 无需刷新 | The index recorded no commit, so the comparison can only see the working tree. A confined analyze cannot start `git`, which is how the manifest ends up with an empty `lastCommit` — measured here: the same command writes it in a normal terminal and leaves it empty under the sandbox. Run the copied command outside the sandbox once if you want the stronger verdict; the refresh button stays usable either way. | This plugin's delta engine plus the analyzer's git access; no upstream GitNexus path. |
+| The gate says 无法确认 instead of 无需刷新 | The index recorded no commit. Since 0.1.8 the plugin writes the current commit back into the manifest's `lastCommit` (and the registry entry that run used) **after a refresh it started itself succeeds**, so a refresh under the sandbox ends up saying 已是最新 too. It does **not** write when the working tree is dirty — recording a commit that excludes those edits would make the gate claim 已是最新 falsely; the panel then says there are N uncommitted changes and to refresh after committing. Three cases still need a terminal: the index was built elsewhere, the directory is not a git repository, or the repository has no commits yet. The write-back only fills an empty field and never overwrites an existing baseline. | This plugin's delta engine plus the analyzer's git access; no upstream GitNexus path. |
+| The panel says git is unavailable, and the activity/file-history cards are empty | Up to 0.1.7 every git call captured output through a **pipe**, which a confined host (the DSH sandbox, a Windows service whose children run under a restricted token) refuses with `spawn EPERM` — read as "git is not installed". Since 0.1.8 every git call writes the child's output to a file and reads it back (`src/gitnexus/git-capture.ts`); stdout and stderr are captured separately so git's `LF will be replaced by CRLF` warning cannot leak into a list of file names. The capture tries the host's own spawner first and falls back to the file descriptor when that cannot reach git — and the scratch files live inside the workspace (`<repo>/.gitnexus/plugin-home/tmp`), because a host process is often the one component that may not write to the system temp directory. When all of it fails, the verdict now names the reason (`git rev-parse HEAD → EPERM`, `… → exit 128`): no git, no repository and a refused spawn are three different problems. | This plugin's subprocess capture; no upstream GitNexus path. |
 | The graph card is empty, or fails with 404 | A 404 means the host predates `/api/gitnexus/graph` — restart DSH, not just the page. An empty canvas with a message means the index has no communities yet (an old index), or the store is busy: refresh the index. Nodes are capped by design; the card states how much it left out. | This plugin's host route; graph data itself comes from the GitNexus index. |
 | The graph loads for some projects but spins or returns 504 for others | On Windows the ACL sandbox's first workspace grant propagates an inheritable ACE across the whole repository, which can exceed the 25 s helper timeout on a large tree; a project whose grant is already cached is fast. Since 0.1.5 the search/graph helpers root the policy at `<repo>/.gitnexus`, so the grant covers only the index; restart DSH. If it still fails, confirm `.gitnexus/lbug` exists and that no analyze is holding the index. | This plugin's sandbox policy root; graph data itself comes from the GitNexus index. |
 | The 3D view will not open, or its overlay stays blank | Read the card first: `unavailable` means the host has no shell executor or the machine has no `gitnexus` CLI (the card prints the install command); `failed` carries the child process's own output, where a busy port (`EADDRINUSE`) and an index written by another CLI version (`database file version`) are the two common cases. `服务在跑，但索引对不上` means the server on that port does not list this repository in its registry: refresh this repository's index, or stop the server you started yourself. A missing card or a 404 means the host never mounted the route — restart DSH. | This plugin's web-view lifecycle; the SPA is the `web/` directory inside the GitNexus package. |

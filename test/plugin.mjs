@@ -15,6 +15,8 @@
  */
 
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 let passed = 0;
@@ -47,6 +49,7 @@ function makeStubContext(options = {}) {
   const disposers = [];
   const effects = [];
   const injected = [];
+  const requested = [];
 
   const webServer = {
     register(route) {
@@ -86,6 +89,7 @@ function makeStubContext(options = {}) {
      * headless deployment, which is the composition the nullable runner exists for.
      */
     get(name) {
+      requested.push(name);
       return services[name];
     },
     effect(fn, label) {
@@ -96,7 +100,7 @@ function makeStubContext(options = {}) {
     },
   };
 
-  return { ctx, registered, routes, disposers, effects, injected };
+  return { ctx, registered, routes, disposers, effects, injected, requested };
 }
 
 console.log('\u001b[1mgitnexus-plus · plugin contract tests\u001b[0m');
@@ -138,15 +142,24 @@ check(
 // real panel showed the flag still being offered.
 check('--skip-fts is not enabled by default', defaults.skipFts === false, JSON.stringify(defaults));
 check('gitnexusHome defaults to empty (no redirect)', defaults.gitnexusHome === '', JSON.stringify(defaults));
+// The graph tools are the agent-facing half of this plugin: on by default, because an
+// index nobody can ask questions of is just a report. The switch exists for deployments
+// where spawning a helper per question is unwelcome, not because the default is in doubt.
+check(
+  'graph tools default to on with a 20 s ceiling',
+  defaults.graphTools === true && defaults.graphToolTimeoutMs === 20000,
+  JSON.stringify(defaults),
+);
 
 section('apply() registers the tools');
 const stub = makeStubContext();
 plugin.apply(stub.ctx, defaults);
 
-// Two tools now: the coverage scan (walks the working tree) and the delta check
-// (hashes only what git says differs). They are separate because their costs differ
-// by orders of magnitude, and the caller should be able to ask the cheap one first.
-check('exactly two tools registered', stub.registered.length === 2, `got ${stub.registered.length}`);
+// Five tools: coverage (walks the working tree), delta (hashes only what git says
+// differs), and the three graph tools over one out-of-process helper — impact,
+// context, query. The first two describe the index; the last three answer about the
+// code, which is what a coding session actually acts on.
+check('exactly five tools registered', stub.registered.length === 5, `got ${stub.registered.length}`);
 const tool = stub.registered.find((entry) => entry.name === 'gitnexus_coverage');
 const deltaTool = stub.registered.find((entry) => entry.name === 'gitnexus_delta');
 check('tool name is gitnexus_coverage', tool !== undefined, JSON.stringify(stub.registered.map((t) => t.name)));
@@ -180,6 +193,209 @@ check('output.render returns content blocks', (() => {
   const blocks = tool.output.render({}, { text: 'hello' });
   return Array.isArray(blocks) && blocks[0]?.type === 'text' && blocks[0]?.text === 'hello';
 })());
+
+section('the graph tools are registered');
+const impactTool = stub.registered.find((entry) => entry.name === 'gitnexus_impact');
+const contextTool = stub.registered.find((entry) => entry.name === 'gitnexus_context');
+const queryTool = stub.registered.find((entry) => entry.name === 'gitnexus_query');
+check(
+  'all three graph tools exist',
+  impactTool !== undefined && contextTool !== undefined && queryTool !== undefined,
+  JSON.stringify(stub.registered.map((t) => t.name)),
+);
+check(
+  'impact requires repo and target',
+  impactTool?.parameters?.required?.includes('repo') === true &&
+    impactTool?.parameters?.required?.includes('target') === true,
+  JSON.stringify(impactTool?.parameters?.required),
+);
+check(
+  'context requires repo, and names the symbol three ways',
+  // A symbol can be named by name, by the uid an earlier query printed, or by file path.
+  // The schema cannot express "at least one of", so only `repo` is required and the body
+  // refuses a call that identifies nothing.
+  contextTool?.parameters?.required?.includes('repo') === true &&
+    !contextTool?.parameters?.required?.includes('name') &&
+    ['name', 'uid', 'file_path', 'kind'].every(
+      (key) => contextTool?.parameters?.properties?.[key] !== undefined,
+    ) &&
+    contextTool?.parameters?.properties?.maxTokens === undefined,
+  JSON.stringify(contextTool?.parameters?.required),
+);
+check(
+  'query requires repo and search_query',
+  queryTool?.parameters?.required?.includes('repo') === true &&
+    queryTool?.parameters?.required?.includes('search_query') === true,
+  JSON.stringify(queryTool?.parameters?.required),
+);
+
+// `kind` and `include_content` describe *how* to answer, not *what* is being asked. A call
+// carrying only those must be refused with the way out, before any subprocess is started.
+{
+  const refused = await contextTool?.execute(
+    { repo: 'D:\\definitely-not-a-repo', kind: 'Function' },
+    { signal: new AbortController().signal },
+  );
+  check(
+    'context refuses a call that names no symbol, and says how to fix it',
+    refused?.ok === false &&
+      String(refused?.text ?? '').includes('需要 name、uid 或 file_path') &&
+      String(refused?.text ?? '').includes('gitnexus_query'),
+    String(refused?.text ?? ''),
+  );
+}
+check(
+  'impact offers an enum direction',
+  JSON.stringify(impactTool?.parameters?.properties?.direction?.enum ?? []) === '["upstream","downstream"]',
+  JSON.stringify(impactTool?.parameters?.properties?.direction),
+);
+check(
+  'impact can drop low-confidence edges and query can take task context',
+  impactTool?.parameters?.properties?.minConfidence !== undefined &&
+    queryTool?.parameters?.properties?.task_context !== undefined,
+  JSON.stringify([
+    impactTool?.parameters?.properties?.minConfidence,
+    queryTool?.parameters?.properties?.task_context,
+  ]),
+);
+// The envelope fields are the contract: a model that cannot see `risk` cannot act on
+// the answer, and a tool description that omits UNKNOWN invites treating it as safe.
+check(
+  'impact description names UNKNOWN and the lower-bound caveat',
+  typeof impactTool?.description === 'string' &&
+    impactTool.description.includes('UNKNOWN') &&
+    impactTool.description.toLowerCase().includes('lower bound'),
+  String(impactTool?.description).slice(0, 160),
+);
+check(
+  'graph tools share the ok/result output schema',
+  impactTool?.output?.schema?.properties?.ok !== undefined &&
+    impactTool?.output?.schema?.properties?.result !== undefined &&
+    contextTool?.output?.schema?.properties?.ok !== undefined &&
+    queryTool?.output?.schema?.properties?.ok !== undefined,
+  JSON.stringify(impactTool?.output?.schema?.properties),
+);
+check(
+  'graph tool presentCall is a read card',
+  impactTool?.presentCall?.({ repo: 'r', target: 'sendJson' })?.kind === 'read' &&
+    queryTool?.presentCall?.({ repo: 'r', search_query: 'q' })?.kind === 'read',
+  JSON.stringify(impactTool?.presentCall?.({ repo: 'r', target: 'sendJson' })),
+);
+// The host calls a body as `execute(args, exec?)`, and declaring `timeoutMs` asserts
+// that the body forwards `exec.signal` — so the two are checked together. A timeout
+// with no cancellation path is a promise the plugin cannot keep.
+check(
+  'graph tools set a host-side timeout above the helper deadline',
+  // `query` walks processes rather than one symbol's callers, so it gets half again the
+  // budget; the other two keep the per-symbol default plus the host backstop.
+  impactTool?.timeoutMs === 25_000 &&
+    contextTool?.timeoutMs === 25_000 &&
+    queryTool?.timeoutMs === 35_000,
+  JSON.stringify([impactTool?.timeoutMs, contextTool?.timeoutMs, queryTool?.timeoutMs]),
+);
+check(
+  'graph tools declare themselves concurrency-safe',
+  impactTool?.isConcurrencySafe?.({ repo: 'r', target: 't' }) === true &&
+    queryTool?.isConcurrencySafe?.({ repo: 'r', search_query: 'q' }) === true,
+  JSON.stringify([impactTool?.isConcurrencySafe, queryTool?.isConcurrencySafe]),
+);
+
+// A headless deployment without a shell still gets the two read-only tools that never
+// spawn anything. `graphTools: false` is the other half of the same switch.
+section('graphTools: false withdraws the three graph tools');
+const plainStub = makeStubContext();
+plugin.apply(plainStub.ctx, { ...defaults, graphTools: false });
+check(
+  'only the two index tools remain',
+  plainStub.registered.length === 2 &&
+    plainStub.registered.every((entry) => entry.name !== 'gitnexus_impact' && entry.name !== 'gitnexus_query'),
+  JSON.stringify(plainStub.registered.map((t) => t.name)),
+);
+
+section('the host process seams are used when a profile mounts them');
+{
+  // A repository that looks indexed: a manifest and a graph store. Nothing is executed,
+  // because the fake spawner answers with the payload a real helper would print.
+  const seamRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-plus-seam-'));
+  await fs.mkdir(path.join(seamRepo, '.gitnexus', 'lbug'), { recursive: true });
+  await fs.writeFile(
+    path.join(seamRepo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ repoPath: seamRepo, lastCommit: '', fileHashes: {}, stats: {} }),
+    'utf8',
+  );
+
+  const seen = [];
+  const requestBodies = [];
+  const helperPayload = {
+    ok: true,
+    tool: 'impact',
+    result: {
+      target: { name: 'x', filePath: 'src/x.ts', kind: 'Function' },
+      direction: 'upstream',
+      impactedCount: 1,
+      risk: 'LOW',
+      epistemic: 'exact',
+      byDepthCounts: { 1: 1 },
+    },
+  };
+  const fakeSubprocess = {
+    resolveExecutable: (command) => command,
+    spawn(spec) {
+      seen.push(spec);
+      // The request travels as a file; reading it here is the only way to prove the
+      // tool name reached the helper, because the runner removes the directory after.
+      try {
+        requestBodies.push(JSON.parse(readFileSync(spec.argv[2], 'utf8')));
+      } catch {
+        requestBodies.push(null);
+      }
+      return {
+        collected: {
+          stdout: { readFrom: () => ({ text: JSON.stringify(helperPayload) }) },
+          stderr: { readFrom: () => ({ text: '' }) },
+        },
+        async result() {
+          return { exitCode: 0 };
+        },
+        kill() {
+          return true;
+        },
+      };
+    },
+  };
+
+  // No shell at all: the deployment that motivated the seam.
+  const seamStub = makeStubContext({ services: { subprocess: fakeSubprocess } });
+  plugin.apply(seamStub.ctx, { ...defaults, serveRoutes: false });
+  check(
+    'apply releases the git seams on dispose',
+    seamStub.effects.includes('gitnexus-plus: git process seams'),
+    JSON.stringify(seamStub.effects),
+  );
+
+  const seamImpact = seamStub.registered.find((entry) => entry.name === 'gitnexus_impact');
+  const seamOutcome = await seamImpact.execute(
+    { repo: seamRepo, target: 'x' },
+    { signal: new AbortController().signal },
+  );
+  // Resolved per call, not at boot: a profile may mount `subprocess` after this plugin
+  // applies, so the lookup has to happen when a tool is actually used.
+  check(
+    'the subprocess seam is looked up per call',
+    seamStub.requested.includes('subprocess'),
+    JSON.stringify(seamStub.requested),
+  );
+  check('a deployment with subprocess and no shell still answers', seamOutcome.ok === true, JSON.stringify(seamOutcome).slice(0, 200));
+  check('the helper went out as argv, not as a command string', (
+    seen.length === 1 && Array.isArray(seen[0]?.argv) && !('command' in (seen[0] ?? {}))
+  ), JSON.stringify(seen[0]?.argv));
+  check('the request file named the tool and the repository', (
+    requestBodies[0]?.tool === 'impact' && requestBodies[0]?.repo === seamRepo
+  ), JSON.stringify(requestBodies[0]));
+  check('the rendered answer still reports the risk', seamOutcome.text.includes('LOW'));
+
+  await fs.rm(seamRepo, { recursive: true, force: true });
+}
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
@@ -457,7 +673,7 @@ section('serveRoutes=false suppresses the routes');
 const off = makeStubContext();
 plugin.apply(off.ctx, { ...defaults, serveRoutes: false });
 check('no routes when disabled', off.routes.length === 0, `got ${off.routes.length}`);
-check('tool still registered when disabled', off.registered.length === 2, `got ${off.registered.length}`);
+check('tool still registered when disabled', off.registered.length === 5, `got ${off.registered.length}`);
 
 section('tool execution against a real repository');
 const repo = 'D:\\project\\data-screen';

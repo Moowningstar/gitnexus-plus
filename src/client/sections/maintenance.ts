@@ -117,7 +117,7 @@ export function MaintenanceSection({
   // exactly what happened the first time this component was rendered by a caller that
   // predated the prop. `run === null` alone crashed on it.
   const activeRun = run ?? null;
-  const running = activeRun?.state === 'running';
+  const running = activeRun?.state === 'running' || activeRun?.anchoring === true;
   // The clock lives here, next to the number it moves, instead of one level up: a tick
   // in the panel re-rendered the whole report (activity lists, graph card, search) once
   // a second just to advance this one line.
@@ -182,9 +182,15 @@ export function MaintenanceSection({
             h('span', { style: { fontWeight: 600 } }, runStateLabel(activeRun.state)),
             activeRun.force === true ? h(Tag, { tone: 'outline' }, '全量') : null,
             activeRun.repairFts === true ? h(Tag, { tone: 'outline' }, '修复 FTS') : null,
-            h('span', { style: MUTED }, activeRun.state === 'running' ? `已运行 ${elapsed}s` : `${elapsed}s`),
+            h('span', { style: MUTED }, activeRun.anchoring === true
+              ? '正在记录提交基线…'
+              : activeRun.state === 'running'
+                ? `已运行 ${elapsed}s`
+                : `${elapsed}s`),
             h('span', { style: { flex: 1 } }),
-            running
+            // Cancel is only meaningful while the command is live; the baseline write has
+            // nothing to abort and already reports itself.
+            activeRun.state === 'running'
               ? h(Button, { variant: 'ghost', onClick: onCancelRun }, '取消')
               // Wrapped, not passed directly: once `onStartRun` takes a mode argument,
               // React's click event would arrive as that argument and every "run again"

@@ -1,7 +1,7 @@
 {
   "name": "dsh-gitnexus-plus",
-  "version": "0.1.7",
-  "description": "DSH plugin: open a GitNexus project index in GitNexus's own web UI (3D view in a resizable dialog, AI settings pre-filled from environment variables), decide whether a refresh would change anything before running it, search symbols and file bodies, report what the index left out, and run incremental or FTS-repair maintenance from a sidebar panel.",
+  "version": "0.1.8",
+  "description": "DSH plugin: hand the agent a GitNexus code graph (impact, context and query as model tools), anchor the index to the commit it describes after every refresh, and put GitNexus's own web UI (resizable 3D view, AI settings pre-filled from the environment) beside a sidebar panel for coverage, refresh gating, symbol and full-text search, file history and maintenance.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -18,6 +18,7 @@
     "gitnexus",
     "code-index",
     "code-graph",
+    "impact-analysis",
     "coverage",
     "3d-graph"
   ],

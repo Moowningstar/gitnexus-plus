@@ -768,7 +768,18 @@ export function CoverageView({
       : null,
 
     report.activity === undefined || report.activity === null
-      ? null
+      ? // The card is dropped when there is no activity, but "no activity" has three
+        // causes and the reader deserves the one that is true here. Same sentence as the
+        // staleness line, deliberately — one fact, one wording.
+        report.staleness !== undefined && report.staleness.gitAvailable === false
+        ? h(
+            'div',
+            { style: { ...MUTED, fontSize: '11px' } },
+            typeof report.staleness.reason === 'string' && report.staleness.reason !== ''
+              ? `Git 活动不可用：${report.staleness.reason}`
+              : 'Git 活动不可用：读不到 git',
+          )
+        : null
       : h(
           Section,
           {

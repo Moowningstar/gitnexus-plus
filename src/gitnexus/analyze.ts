@@ -35,7 +35,7 @@
  * prompt states, for the same reason.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
   envPrefix,
@@ -49,6 +49,7 @@ import {
   type ShellLike,
   type ShellResultLike,
 } from '../shell.js';
+import { anchorIndex, type AnchorReport } from './anchor.js';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
 import { hasGitMarker } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
@@ -88,6 +89,30 @@ export interface AnalyzeStatus {
   message: string | null;
   /** The tail of combined output, capped. */
   output: string;
+  /**
+   * The commit baseline this run managed to record, filled in after {@link AnalyzeState}
+   * reached `done`.
+   *
+   * A confined shell cannot start `git`, so the analyzer writes `lastCommit: ""` and the
+   * refresh gate can only answer "无法确认". The runner writes the commit itself once the
+   * run is over — see `anchor.ts` — and this field carries both the outcome and what the
+   * operator should read instead of the old "go run it in a terminal" advice.
+   *
+   * `null` means "not attempted yet": the run is still going, or it ended in a state that
+   * cannot have a baseline. The panel polls, so a run reports `done` first and `done` with
+   * an anchor a second later; that ordering is deliberate — anchoring must not delay the
+   * status the route already returned.
+   */
+  anchor?: AnchorReport | null;
+  /**
+   * Whether the baseline write is still in flight.
+   *
+   * The panel stops polling as soon as a run leaves `running`, so a run that is `done` but
+   * still asking git about the baseline has to say so — otherwise the anchored status is
+   * written after the last poll and never shown. Absent on older hosts, where the panel
+   * must not wait for a field that will never arrive.
+   */
+  anchoring?: boolean;
 }
 
 export interface AnalyzeRunnerOptions {
@@ -330,26 +355,6 @@ function clearStaleLock(repoPath: string): void {
 }
 
 /**
- * Whether the manifest on disk records no commit.
- *
- * In a confined shell the analyzer cannot start `git`, so it writes an empty
- * `lastCommit` even on a successful run. The index itself is fine — the baseline is not
- * — and that is what makes the refresh gate answer "无法确认" instead of "已是最新".
- * Reported to the operator rather than repaired here: the manifest belongs to GitNexus,
- * and writing a commit into it is the analyzer's decision, not this plugin's.
- */
-function lacksCommitBaseline(repoPath: string): boolean {
-  try {
-    const raw = JSON.parse(
-      readFileSync(path.join(repoPath, '.gitnexus', 'gitnexus.json'), 'utf8'),
-    ) as { lastCommit?: unknown };
-    return typeof raw.lastCommit !== 'string' || raw.lastCommit === '';
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The **durable** caches, created from the host before the shell starts.
  *
  * A worker running under a restricted host token can be denied `mkdir` on the project's
@@ -446,6 +451,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     exitCode: null,
     message: null,
     output: '',
+    anchor: null,
   };
 
   const finish = (repoPath: string, patch: Partial<AnalyzeStatus>): AnalyzeStatus => {
@@ -711,18 +717,41 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
             message: '沙箱拒绝了这次写入。本插件不会申请扩权 —— 需要在终端里手动执行这条命令。',
           });
         } else if (exitCode === 0) {
-          finish(key, {
+          const done = finish(key, {
             state: 'done',
             attempts: attempt,
             exitCode,
             output: body,
-            // A confined shell cannot start `git`, so GitNexus cannot record the commit
-            // it indexed. The index is still correct; only the baseline is missing, and
-            // the gate will honestly say "无法确认" until a terminal run fills it in.
-            message: lacksCommitBaseline(key)
-              ? '刷新完成。但沙箱里分析器读不到 git，索引没有记录提交基线 —— 想让门禁给出"已是最新"，在普通终端再跑一次下面的命令。'
-              : null,
+            // No message yet: whether the index can carry a commit baseline depends on
+            // git, which is asked below. The old wording told the operator to re-run in a
+            // terminal, which was true only because nothing here was writing the field.
+            message: null,
+            anchoring: true,
           });
+          // Deliberately not awaited: `start()` is synchronous and its caller has already
+          // received a status. The panel polls every second, so it picks the anchored
+          // status up on the next tick instead of waiting for two git calls.
+          void (async () => {
+            // `finish` already cleared `inFlight`, so a second refresh can start while
+            // these two git calls are in flight. If one did, its status is the truth and
+            // this run's finish must not overwrite it with a stale `done`.
+            const stillCurrent = (): boolean => runs.get(key)?.startedAt === done.startedAt;
+            try {
+              const anchor = await anchorIndex(key, { gitnexusHome, skipGit });
+              if (!stillCurrent()) return;
+              rememberRun(key, { ...done, anchor, anchoring: false, message: anchor.message });
+            } catch (error) {
+              if (!stillCurrent()) return;
+              // The index is correct; only the baseline is unknown. Say that rather than
+              // losing the completed run to an exception.
+              rememberRun(key, {
+                ...done,
+                anchor: null,
+                anchoring: false,
+                message: `刷新完成，但记录提交基线时出错：${String((error as Error)?.message ?? error)}。索引本身可用。`,
+              });
+            }
+          })();
         } else {
           finish(key, {
             state: 'failed',

@@ -256,7 +256,14 @@ export function healthState(report: ClientReport | null): DotState {
  */
 export function stalenessView(staleness: ClientStaleness | undefined): { state: DotState; text: string } {
   if (!staleness || staleness.gitAvailable !== true) {
-    return { state: 'idle', text: 'git 不可用，无法判断新鲜度' };
+    // The reason separates "no git", "no repository" and "the host refused to start a
+    // process" — three problems with three different fixes that used to read alike.
+    const raw = typeof staleness?.reason === 'string' ? staleness.reason.trim() : '';
+    const reason = raw === '' ? null : raw;
+    const text = reason === null
+      ? 'git 不可用，无法判断新鲜度'
+      : `git 不可用，无法判断新鲜度（${reason}）`;
+    return { state: 'idle', text };
   }
   const short = (sha: string | null | undefined): string => (typeof sha === 'string' && sha !== '' ? sha.slice(0, 8) : '?');
   const head = short(staleness.headCommit);

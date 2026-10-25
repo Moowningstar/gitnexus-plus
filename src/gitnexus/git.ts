@@ -1,5 +1,5 @@
 /**
- * The two git facts the panel needs, read without a shell.
+ * The git facts the panel needs, read without a shell.
  *
  * Deliberately not `exec`: a repository path is caller-supplied, and the only way
  * to keep it from becoming an argument is to pass it as `cwd` and never as part of
@@ -11,47 +11,19 @@
  * has a valid manifest — the panel should say "unknown", not refuse to render.
  */
 
-import { execFile, type ExecFileOptions } from 'node:child_process';
-import { promisify } from 'node:util';
-
-/** What the promisified `execFile` resolves to once stdout is decoded as text. */
-interface ExecFileTextResult {
-  stdout: string;
-  stderr: string;
-}
-
-/**
- * `execFile`, promisified.
- *
- * The assertion picks out the text-encoding result: no `encoding` is passed, so
- * Node decodes stdout as UTF-8, and the `Buffer` arm the generic overload admits
- * is one this call never takes.
- */
-const run = promisify(execFile) as (
-  file: string,
-  args: readonly string[],
-  options: ExecFileOptions,
-) => Promise<ExecFileTextResult>;
+import { gitText, lastGitFailure } from './git-capture.js';
 
 /** Short cap: `rev-parse` and `status` on a large repo are fast, and a hang here
  *  would block the whole panel for a value that is merely informative. */
 const TIMEOUT_MS = 8000;
 
 /**
- * @returns trimmed stdout, or null on any failure
+ * @returns stdout, or null on any failure
  */
 async function git(repoPath: string, args: string[]): Promise<string | null> {
-  try {
-    const { stdout } = await run('git', args, {
-      cwd: repoPath,
-      timeout: TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    return stdout;
-  } catch {
-    return null;
-  }
+  // Through the file-descriptor capture: a confined host denies the pipe `execFile`
+  // needs, and "no git" would then be reported on a machine where git works.
+  return gitText(repoPath, args, TIMEOUT_MS);
 }
 
 /**
@@ -76,6 +48,15 @@ export interface GitState {
   dirtyCount: number | null;
   /** commits ahead/behind the indexed commit */
   aheadBehind: AheadBehind | null;
+  /**
+   * Why git could not be read, when `available` is false: `git rev-parse HEAD → EPERM`,
+   * `… → exit 128`. Null when git answered.
+   *
+   * Without this the panel could only say "git unavailable", which is the same sentence
+   * for a machine without git, a directory without a repository, and a host that
+   * refuses to start processes — three problems with three different fixes.
+   */
+  reason: string | null;
 }
 
 /**
@@ -89,12 +70,14 @@ export async function readGitState(
 ): Promise<GitState> {
   const head = await git(repoPath, ['rev-parse', 'HEAD']);
   if (head === null) {
+    const failed = lastGitFailure();
     return {
       available: false,
       headCommit: null,
       branch: null,
       dirtyCount: null,
       aheadBehind: null,
+      reason: failed === null ? 'git rev-parse HEAD 返回失败' : `${failed.command} → ${failed.failure}`,
     };
   }
 
@@ -127,6 +110,7 @@ export async function readGitState(
     branch: branchRaw === null ? null : branchRaw.trim() === 'HEAD' ? null : branchRaw.trim(),
     dirtyCount,
     aheadBehind,
+    reason: null,
   };
 }
 

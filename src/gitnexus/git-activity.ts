@@ -22,9 +22,8 @@
  * the one thing it must not mean.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { CommitDiff, FileHistory, FileHistoryCommit } from 'dsh-gitnexus-wire';
+import { captureGit } from './git-capture.js';
 import { normalizePathKey } from './index-meta.js';
 import {
   LOG_FIELD_SEPARATOR,
@@ -33,8 +32,6 @@ import {
   parseNumstatLines,
 } from './git-log.js';
 import type { FileTally } from './git-log.js';
-
-const run = promisify(execFile);
 
 /** Generous but finite: the log is informational, and it must not outlast the scan. */
 const TIMEOUT_MS = 20_000;
@@ -52,19 +49,11 @@ const DEFAULTS = Object.freeze({
 });
 
 async function git(repoPath: string, args: string[], maxBuffer = 32 * 1024 * 1024): Promise<string | null> {
-  try {
-    const { stdout } = await run('git', args, {
-      cwd: repoPath,
-      timeout: TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer,
-    });
-    return stdout;
-  } catch (error) {
-    // `maxBuffer` overflow still leaves usable prefix output on some platforms, but
-    // treating it as failure is honest: a partial parse would understate activity.
-    return null;
-  }
+  // A confined host denies the pipe `execFile` needs, so the log is read through the
+  // file-descriptor capture; without it this whole panel is empty in the host it ships for.
+  const result = await captureGit(repoPath, args, { timeoutMs: TIMEOUT_MS, maxBytes: maxBuffer });
+  // The size cap is a hard failure on purpose: a partial parse would understate activity.
+  return result.ok ? result.text : null;
 }
 
 /**

@@ -218,9 +218,7 @@ export async function shellTests() {
   // A page of exactly `limit` rows is complete; reporting it as truncated taught the
   // reader to ignore the flag. Both call sites fetched one row past the page instead.
   {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const exec = promisify(execFile);
+    const { captureGit } = await import('../../lib/gitnexus/git-capture.js');
     const { readGitActivity } = await import('../../lib/gitnexus/git-activity.js');
 
     const root = fixturePath('shell-truncation');
@@ -228,7 +226,11 @@ export async function shellTests() {
     try {
       await fs.mkdir(path.join(root, 'src'), { recursive: true });
       await fs.writeFile(path.join(root, 'src', 'a.ts'), 'export const a = 1;\n');
-      const git = (args) => exec('git', args, { cwd: root, windowsHide: true, timeout: 30_000 });
+      const git = async (args) => {
+        const result = await captureGit(root, args, { timeoutMs: 30_000 });
+        if (!result.ok) throw new Error(`git ${args.join(' ')} failed: ${result.failure}`);
+        return result.text;
+      };
       const identity = ['-c', 'user.email=test@example.com', '-c', 'user.name=shell-test'];
       await git(['init']);
       for (const message of ['one', 'two', 'three']) {

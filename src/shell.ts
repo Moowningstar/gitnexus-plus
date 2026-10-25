@@ -206,6 +206,8 @@ export interface ShellLike {
 export type HelperRun =
   | { kind: 'ok'; stdout: string; stderr: string; exitCode: number | null | undefined }
   | { kind: 'timed-out' }
+  /** The caller's signal fired: the executor stopped the process and nothing was read. */
+  | { kind: 'cancelled' }
   /** The executor refused or could not start the process at all. */
   | { kind: 'spawn-failed'; message: string };
 
@@ -216,6 +218,15 @@ export interface HelperRunOptions {
   timeoutMs: number;
   stdoutMaxBytes: number;
   sandboxPolicy?: unknown;
+  /**
+   * The caller's cancellation, forwarded verbatim.
+   *
+   * `tools.execute` requires a tool body to observe or forward `exec.signal` and to
+   * settle only once its own work is quiet. The executor already knows how to stop a
+   * process for a signal (`ShellRequestLike.signal`), so the only work here is passing
+   * it along and telling the caller the run was cancelled rather than failed.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -228,6 +239,13 @@ export interface HelperRunOptions {
  * lifetimes are per-caller, not per-helper.
  */
 export async function runHelper(options: HelperRunOptions): Promise<HelperRun> {
+  // Read through a function so the two checks below cannot be narrowed away from each
+  // other: the signal may fire at any point, including after `resolve`.
+  const cancelled = (): boolean => options.signal?.aborted === true;
+
+  // An already-cancelled call must not start a process it will immediately abandon.
+  if (cancelled()) return { kind: 'cancelled' };
+
   let execution: ShellExecutionLike;
   try {
     const spec = options.shell.resolve({
@@ -237,6 +255,7 @@ export async function runHelper(options: HelperRunOptions): Promise<HelperRun> {
       onExpiry: 'kill',
       stdoutMaxBytes: options.stdoutMaxBytes,
       ...(options.sandboxPolicy === undefined ? {} : { sandboxPolicy: options.sandboxPolicy }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     execution = await options.shell.execute(spec);
   } catch (cause) {
@@ -250,6 +269,7 @@ export async function runHelper(options: HelperRunOptions): Promise<HelperRun> {
     return { kind: 'spawn-failed', message: cause instanceof Error ? cause.message : String(cause) };
   }
 
+  if (result.aborted === true || cancelled()) return { kind: 'cancelled' };
   if (result.timedOut === true) return { kind: 'timed-out' };
   return {
     kind: 'ok',

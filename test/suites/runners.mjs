@@ -411,8 +411,9 @@ export async function analyzeTests() {
     ftsRun.dispose();
 
     // A confined shell cannot start git, so a successful run writes an empty
-    // `lastCommit`. The index is fine; the baseline is not, and the operator should know
-    // why the gate says 无法确认 afterwards.
+    // `lastCommit`. The runner now records the commit itself after the run; this fixture
+    // has no `.git`, so the honest answer is that there is nothing to record — and the
+    // operator is told that instead of being sent to a terminal.
     await fs.writeFile(
       path.join(lockRepo, '.gitnexus', 'gitnexus.json'),
       JSON.stringify({ lastCommit: '', stats: { files: 1 } }),
@@ -423,9 +424,15 @@ export async function analyzeTests() {
     await new Promise((r) => setTimeout(r, 80));
     check('a successful run without a baseline still completes', baselineRun.status(lockRepo)?.state === 'done');
     check(
-      'it explains the missing commit baseline',
+      'it explains why there is no commit baseline',
       baselineRun.status(lockRepo)?.message?.includes('提交基线') === true,
       baselineRun.status(lockRepo)?.message,
+    );
+    check(
+      'the anchor verdict rides along on the status',
+      baselineRun.status(lockRepo)?.anchor?.verdict === 'no-git' &&
+        baselineRun.status(lockRepo)?.anchoring === false,
+      JSON.stringify(baselineRun.status(lockRepo)?.anchor),
     );
     baselineRun.dispose();
 

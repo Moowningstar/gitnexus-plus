@@ -30,15 +30,8 @@ import path from 'node:path';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
 import { loadAdapter } from './search.js';
 import type { ShellLike } from '../shell.js';
-import {
-  exitDetail,
-  parseHelperOutput,
-  quoteArg,
-  readLineNumber,
-  runHelper,
-  shellFlavor,
-  type ShellFlavor,
-} from '../shell.js';
+import { exitDetail, parseHelperOutput, readLineNumber } from '../shell.js';
+import { shellRunner, type Runner } from '../subprocess.js';
 
 /** The projections a caller may ask for. Anything else is refused, not guessed. */
 export type GraphView = 'communities' | 'community' | 'symbols';
@@ -114,6 +107,7 @@ export type GraphErrorCode =
   | 'no-index-store'
   | 'graph-unavailable'
   | 'index-busy'
+  | 'graph-cancelled'
   | 'graph-failed';
 
 export class GraphError extends Error {
@@ -464,6 +458,13 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
 export interface HelperGraphOptions {
   /** The host's shell executor; `null` when the deployment has none. */
   shell: ShellLike | null;
+  /**
+   * The plugin's process runner, when one was built from the host's seams.
+   *
+   * Optional so existing callers keep the `ctx.shell` behaviour; when present the helper
+   * goes out as `argv` through `ctx.subprocess` if the host exposes that seam.
+   */
+  runner?: Runner | null;
   /** Absolute path to `lib/bin/graph-helper.js`. */
   helperPath: string;
   managedPrefix?: string;
@@ -489,6 +490,7 @@ function graphErrorCode(value: unknown): GraphErrorCode {
     case 'no-index-store':
     case 'graph-unavailable':
     case 'index-busy':
+    case 'graph-cancelled':
     case 'graph-failed':
       return value;
     default:
@@ -568,7 +570,8 @@ export async function projectViaHelper(
   if (!existsSync(path.join(absRepo, '.gitnexus', 'lbug'))) {
     throw new GraphError('no-index-store', 409, '索引缺少 .gitnexus/lbug 图存储，无法读图。');
   }
-  if (options.shell === null) {
+  const runner = options.runner ?? (options.shell === null ? null : shellRunner(options.shell));
+  if (runner === null) {
     throw new GraphError(
       'graph-unavailable',
       503,
@@ -589,27 +592,22 @@ export async function projectViaHelper(
     return cached.value;
   }
 
-  const flavor: ShellFlavor = shellFlavor();
-  const args = [
-    options.helperPath,
-    absRepo,
-    view,
-    id ?? '',
-    options.managedPrefix ?? '',
-    String(budgetNodes),
-    String(budgetEdges),
-  ]
-    .map((value) => quoteArg(flavor, value))
-    .join(' ');
-  const command = `node ${args}`;
   const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
 
-  const run = await runHelper({
-    shell: options.shell,
-    command,
-    workdir: absRepo,
+  const run = await runner.run({
+    argv: [
+      'node',
+      options.helperPath,
+      absRepo,
+      view,
+      id ?? '',
+      options.managedPrefix ?? '',
+      String(budgetNodes),
+      String(budgetEdges),
+    ],
+    cwd: absRepo,
     timeoutMs: 25_000,
-    stdoutMaxBytes: 4 * 1024 * 1024,
+    maxBytes: 4 * 1024 * 1024,
     ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
   });
   if (run.kind === 'spawn-failed') {
@@ -617,6 +615,12 @@ export async function projectViaHelper(
   }
   if (run.kind === 'timed-out') {
     throw new GraphError('graph-failed', 504, '图投影子进程超时（25 秒）。');
+  }
+  if (run.kind === 'cancelled') {
+    // The caller aborted (the tab closed, or a newer request replaced this one).
+    // Nothing was learned, and the executor already stopped the process, so this is
+    // not a failure to report as one.
+    throw new GraphError('graph-cancelled', 499, '图投影已取消。');
   }
 
   const parsed = parseHelperOutput(run.stdout);

@@ -463,6 +463,12 @@ const behind = I.stalenessView({
 });
 check('behind names the count', behind.text.includes('7') && behind.text.includes('未提交改动'), behind.text);
 check('no git means unknown, not a guess', I.stalenessView({ gitAvailable: false }).state === 'idle');
+check('no git still says why, when the report carries a reason', (
+  I.stalenessView({ gitAvailable: false, reason: 'git rev-parse HEAD → EPERM' }).text.includes('EPERM')
+), I.stalenessView({ gitAvailable: false, reason: 'git rev-parse HEAD → EPERM' }).text);
+check('a blank reason does not leave empty parentheses behind', (
+  I.stalenessView({ gitAvailable: false, reason: '   ' }).text === 'git 不可用，无法判断新鲜度'
+), I.stalenessView({ gitAvailable: false, reason: '   ' }).text);
 
 const caps = I.capabilityRows({
   graph: { provider: 'ladybugdb', status: 'available' },
@@ -641,7 +647,79 @@ check(
 
 const diag = I.contextDiagnostic({ sessionId: 'a', useSessions: () => null });
 check('diagnostic lists what is present', diag.present.includes('sessionId') && diag.present.includes('useSessions'), JSON.stringify(diag));
-check('diagnostic lists what is missing', diag.absent.includes('useWorkspaces'), JSON.stringify(diag));
+check('diagnostic lists what is missing', diag.absent.includes('useWorkspaces') && !diag.absent.includes('sessionId'), JSON.stringify(diag));
+
+section('maintenance: the run card');
+
+// The card, not the panel: the panel's job is polling, and polling is a host behaviour.
+// What the anchoring phase changed lives here — whether the buttons stay disabled while
+// the baseline is being written, and whether the host's sentence is shown verbatim.
+const runProps = {
+  maintenance,
+  projectPath: 'D:\\demo',
+  indexed: true,
+  runError: null,
+  onStartRun: () => undefined,
+  onCancelRun: () => undefined,
+};
+const anchorSentence =
+  '已把提交 678c6e6 写入索引基线 —— 刷新门禁现在可以回答"已是最新"，不必再去终端跑一次 analyze。';
+const anchoringView = render(I.MaintenanceSection, {
+  ...runProps,
+  run: {
+    state: 'done',
+    command: 'node .gitnexus/run.cjs analyze --repo .',
+    startedAt: Date.now() - 12_000,
+    finishedAt: Date.now(),
+    exitCode: 0,
+    message: anchorSentence,
+    output: '',
+    anchoring: true,
+  },
+});
+check(
+  'the anchoring phase names itself instead of showing a stopwatch',
+  anchoringView.text.includes('正在记录提交基线…'),
+  anchoringView.text.slice(0, 160),
+);
+check(
+  'the sentence the host wrote for the anchor is shown verbatim',
+  anchoringView.text.includes(anchorSentence),
+  anchoringView.text.slice(0, 240),
+);
+check(
+  'the run buttons stay disabled while the baseline is written',
+  anchoringView.text.includes('运行中'),
+  anchoringView.text.slice(0, 240),
+);
+check(
+  'nothing is offered to cancel during the anchoring phase',
+  !anchoringView.text.includes('取消'),
+  anchoringView.text.slice(0, 240),
+);
+
+const liveView = render(I.MaintenanceSection, {
+  ...runProps,
+  run: {
+    state: 'running',
+    command: 'node .gitnexus/run.cjs analyze --repo .',
+    startedAt: Date.now() - 5_000,
+    finishedAt: null,
+    exitCode: null,
+    message: null,
+    output: '',
+  },
+});
+check(
+  'a live run keeps the stopwatch',
+  /已运行 \d+s/.test(liveView.text),
+  liveView.text.slice(0, 200),
+);
+check(
+  'a live run can still be cancelled',
+  liveView.text.includes('取消'),
+  liveView.text.slice(0, 240),
+);
 
 const renderOut = renderSuite({
   I,

@@ -77,6 +77,8 @@ export interface ClientStaleness {
   dirtyCount?: number | null;
   aheadBehind?: { behind?: number; ahead?: number } | null;
   gitAvailable?: boolean;
+  /** Why git could not be read, when `gitAvailable` is false. */
+  reason?: string | null;
 }
 
 /** Resolver confidence: untyped receiver sites, by member name. */
@@ -468,6 +470,21 @@ export interface ClientAnalyzeRun {
   exitCode: number | null;
   message: string | null;
   output: string;
+  /**
+   * Whether the host is still writing the index's commit baseline.
+   *
+   * A confined shell cannot start `git`, so the analyzer leaves `lastCommit` empty and the
+   * refresh gate can only answer "无法确认". The host fills that field in after the run
+   * finishes; this flag is what keeps the poll alive until the answer arrives. Absent on
+   * older hosts — and then nothing is pending either.
+   */
+  anchoring?: boolean;
+  // The host also reports a structured `anchor: {verdict, commit, dirtyPaths, dirtyCount,
+  // message}` on the same payload. Deliberately not declared here: the panel shows the
+  // host's sentence as-is, so a second copy of the verdict shape would be a type nobody
+  // reads (the audit called that out). The verdict exists for the host and for anything
+  // else reading the route; a client that wants a badge should read it from the wire and
+  // declare it then.
 }
 
 /**

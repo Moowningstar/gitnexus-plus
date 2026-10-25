@@ -50,24 +50,10 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile, type ExecFileOptions } from 'node:child_process';
-import { promisify } from 'node:util';
 import { formatBytes } from './coverage.js';
 import { readIndexMeta, hasGitMarker, type IndexMeta } from './index-meta.js';
-
-/**
- * `execFile`, promisified, resolved as decoded text.
- *
- * No shell: the repository path is caller-supplied and only ever travels as `cwd`.
- * `-z` output is NUL-separated rather than newline-separated precisely because a path
- * may contain a newline, and `git status` would otherwise quote it into an unparseable
- * form.
- */
-const run = promisify(execFile) as (
-  file: string,
-  args: readonly string[],
-  options: ExecFileOptions,
-) => Promise<{ stdout: string; stderr: string }>;
+import { gitText } from './git-capture.js';
+import { isGitNexusManagedPath } from './managed-paths.js';
 
 /**
  * How much a changed file is, for the panel's purposes.
@@ -187,22 +173,15 @@ const DEFAULT_MAX_FILES = 4000;
 const DEFAULT_HASH_CONCURRENCY = 8;
 const DEFAULT_GIT_TIMEOUT_MS = 15_000;
 
-/** Run one git command, or report that git could not answer. */
+/**
+ * Run one git command, or report that git could not answer.
+ *
+ * The capture goes through `git-capture` rather than `execFile` because a confined host
+ * refuses to create the pipe `execFile` needs, and a `-z` name list is exactly the output
+ * this comparison is built on.
+ */
 async function git(repoPath: string, args: string[], timeoutMs: number): Promise<string | null> {
-  try {
-    const { stdout } = await run('git', args, {
-      cwd: repoPath,
-      timeout: timeoutMs,
-      windowsHide: true,
-      // Name lists on a very large repository can exceed the default 1 MB cap. The
-      // cap exists so a runaway command cannot exhaust memory; 32 MB of paths is
-      // already an unreasonable candidate set, and `maxFiles` truncates it anyway.
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    return stdout;
-  } catch {
-    return null;
-  }
+  return gitText(repoPath, args, timeoutMs);
 }
 
 /** Split `-z` output on NUL and drop the trailing empty record. */
@@ -442,6 +421,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
 
   const seen = new Set<string>();
   const unique: string[] = [];
+  const managed: string[] = [];
   for (const candidate of candidates) {
     const key = toKey(candidate);
     if (key === '' || seen.has(key)) continue;
@@ -450,6 +430,15 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     // where it does not — but in exactly that case every read would report the index
     // manifest itself as a new file and ask for a refresh forever.
     if (key.startsWith('.gitnexus/') || key.startsWith('.git/')) continue;
+    // Files GitNexus regenerates (`AGENTS.md`, `CLAUDE.md`, the `.claude`/`.cursor`/
+    // `.agents` skill trees) are analyze **output**, not pending edits. Reporting them
+    // made every refresh look stale again the moment it finished — the same loop the
+    // index storage itself caused, for the same reason.
+    if (isGitNexusManagedPath(key)) {
+      seen.add(key);
+      managed.push(key);
+      continue;
+    }
     seen.add(key);
     unique.push(key);
   }
@@ -526,6 +515,12 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
   }
   if (truncated) {
     notes.push(`候选文件超过 ${maxFiles} 个，只检查了前 ${maxFiles} 个 —— 建议直接刷新`);
+  }
+  if (managed.length > 0) {
+    notes.push(
+      `另有 ${managed.length} 个文件是 GitNexus 自己生成的（AGENTS.md、CLAUDE.md、.claude 等），` +
+        '属于 analyze 的输出，不算待索引的改动',
+    );
   }
   if (actionable === 0) {
     // A clean worktree is not the same claim as a clean index. Saying "一致" on the

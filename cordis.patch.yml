@@ -16,3 +16,7 @@
         # hundreds of skipped bundles and this is a heuristic, not a verdict.
         minifiedSampleLimit: 40
         serveRoutes: true
+        # Register the three read-only graph tools (impact/context/query). They run
+        # the index through a short-lived helper process, so this is the switch to
+        # turn off where spawning is not allowed at all.
+        graphTools: true

@@ -1,16 +1,17 @@
 /**
- * dsh-gitnexus-plus —host half.
+ * dsh-gitnexus-plus — host half.
  *
- * Registers one read-only tool and one loopback HTTP route over the coverage
- * engine in `./gitnexus/`. Both answer the same question —"what did this index
- * leave out?" —for the two callers that need it: the model, and a browser half
- * that will render it.
+ * Registers five read-only tools and ten loopback HTTP routes over the index in
+ * `./gitnexus/`. The tools answer what a model would otherwise grep for — "what did
+ * this index leave out?", "what breaks if I change this symbol?", "which flow
+ * implements this concept?" — and the routes render the same answers for the
+ * browser half, plus the handful of operations the panel performs itself.
  *
  * The read path is still never allowed to change anything: a status check must not
- * start a 30-second rebuild. The two mutating capabilities are separate routes with
- * their own guards, and both go through the host's shell executor rather than
- * spawning from the read path. Keyword search is a third read-only route over the
- * graph itself; the tool above stays read-only.
+ * start a 30-second rebuild. The mutating capabilities (refresh, repair-fts,
+ * install, the web view's lifecycle) are separate routes with their own guards,
+ * and they reach the operating system through the host's process seams rather
+ * than spawning from the read path.
  */
 
 import { realpathSync } from 'node:fs';
@@ -42,10 +43,14 @@ import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
 import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
+import { provideGitSeams } from './gitnexus/git-capture.js';
 import { projectViaHelper } from './gitnexus/graph.js';
+import { runGraphTool, type GraphToolName } from './gitnexus/graph-query.js';
+import { renderTool } from './gitnexus/graph-query-render.js';
 import { searchWithFallback } from './gitnexus/search.js';
 import { createAnalyzeRunner } from './gitnexus/analyze.js';
 import type { ShellLike } from './shell.js';
+import { createRunner, isSandboxLike, isSubprocessLike, type Runner } from './subprocess.js';
 import { createInstallRunner, defaultInstallPrefix } from './gitnexus/install.js';
 import { createWebViewRunner } from './gitnexus/webview.js';
 
@@ -124,6 +129,26 @@ export interface PluginConfig {
    * dies on the registry write leaves the index incomplete.
    */
   gitnexusHome: string;
+  /**
+   * Whether the three graph tools are registered: `gitnexus_impact`,
+   * `gitnexus_context`, `gitnexus_query`.
+   *
+   * On by default, because the whole point of an index is that an agent can ask it
+   * instead of grepping. It is a switch rather than an always-on registration so a
+   * deployment where spawning a helper for every question is unwelcome can turn the
+   * surface off completely and keep the coverage/delta tools, which need no child
+   * process.
+   */
+  graphTools: boolean;
+  /**
+   * Wall-clock ceiling for one graph tool call.
+   *
+   * A cold helper start — node, the registry, the native store, then the traversal —
+   * measured ~600 ms on this machine, and a query over a large repository is the slow
+   * case rather than the common one. Twenty seconds is a ceiling for a graph that
+   * stopped answering, not a budget the normal path spends.
+   */
+  graphToolTimeoutMs: number;
 }
 
 export const Config = Schema.object({
@@ -138,6 +163,8 @@ export const Config = Schema.object({
   installTimeoutMs: Schema.natural().default(1200000),
   webViewPort: Schema.natural().default(4747),
   gitnexusHome: Schema.string().default(''),
+  graphTools: Schema.boolean().default(true),
+  graphToolTimeoutMs: Schema.natural().default(20000),
 });
 
 /**
@@ -221,6 +248,76 @@ interface DeltaToolResult {
   excluded: number;
 }
 
+/** Arguments the model supplies to `gitnexus_impact`. */
+interface ImpactToolArgs {
+  repo: string;
+  target: string;
+  direction?: 'upstream' | 'downstream';
+  maxDepth?: number;
+  summaryOnly?: boolean;
+  limit?: number;
+  minConfidence?: number;
+}
+
+/**
+ * Arguments the model supplies to `gitnexus_context`.
+ *
+ * `name` is not required because a symbol can be identified three ways: a name (the
+ * usual case), a `uid` printed by an earlier `gitnexus_query`, or a file path. The
+ * schema language cannot say "at least one of", so the body checks it.
+ */
+interface ContextToolArgs {
+  repo: string;
+  name?: string;
+  uid?: string;
+  file_path?: string;
+  kind?: string;
+  include_content?: boolean;
+}
+
+/** Arguments the model supplies to `gitnexus_query`. */
+interface QueryToolArgs {
+  repo: string;
+  search_query: string;
+  goal?: string;
+  task_context?: string;
+  limit?: number;
+  max_symbols?: number;
+}
+
+/**
+ * What all three graph tools return.
+ *
+ * `ok` is spare but load-bearing: a model that only reads `text` should still be able
+ * to tell a refusal ("there is no index") from an answer that happens to be short.
+ */
+interface GraphToolResult {
+  text: string;
+  ok: boolean;
+  result: unknown;
+}
+
+/**
+ * The output schema shared by the three graph tools.
+ *
+ * `result` is passed through unmodified — it is the upstream payload, including the
+ * `epistemic`/`boundaries` envelope — so a host that wants structured access does not
+ * have to parse the rendered text. `render` sends only `text`, because that is what a
+ * model reads and the payload can be tens of kilobytes.
+ */
+const graphToolOutput = {
+  schema: {
+    type: 'object',
+    additionalProperties: true,
+    properties: {
+      text: { type: 'string', required: true },
+      ok: { type: 'boolean', required: true },
+      result: { type: 'json' },
+    },
+  },
+  render: (_args: unknown, value: GraphToolResult) => [{ type: 'text', text: value.text }],
+} as const;
+
 export function apply(ctx: Context, config: PluginConfig): void {
   const cache = new Map<string, { at: number; report: CoverageReport }>();
   const CACHE_TTL_MS = 15_000;
@@ -264,6 +361,105 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Same execution boundary for the graph projection: the native store cannot load in
   // this process, so the query runs in the helper and only JSON comes back.
   const graphHelperPath = fileURLToPath(new URL('./bin/graph-helper.js', import.meta.url));
+
+  // The query helper shares that boundary but answers the three model-facing
+  // questions (`impact`, `context`, `query`) through GitNexus's own MCP backend
+  // instead of a projection. See `./gitnexus/graph-query.ts` for why.
+  const graphQueryHelperPath = fileURLToPath(new URL('./bin/graph-query-helper.js', import.meta.url));
+
+  /**
+   * The shell executor, resolved per call rather than at boot.
+   *
+   * `shell` is mounted per profile and is not part of `inject`: a headless deployment
+   * without one must still get the two read-only tools that never spawn anything. The
+   * graph tools therefore resolve it at call time and answer `no-shell` instead of
+   * failing to register.
+   */
+  const shellFor = (): ShellLike | null => {
+    const raw: unknown = ctx.get('shell');
+    return isShellLike(raw) ? raw : null;
+  };
+
+  /**
+   * The process runner for one call, built from whichever seams this profile mounts.
+   *
+   * Resolved per call for the same reason `shellFor` is: `subprocess` and `sandbox` are
+   * optional services, and a deployment without them must keep working unchanged. The
+   * runner decides which path a spawn takes — `argv` through `ctx.subprocess` when the
+   * host exposes it (confined through `ctx.sandbox` when a policy is present), otherwise
+   * the `ctx.shell` command this plugin has shipped since 0.1.2. See
+   * `src/subprocess.ts` for why "degrade, never fail" is the rule there.
+   */
+  const runnerFor = (shell: ShellLike | null): Runner => {
+    const subprocessRaw: unknown = ctx.get('subprocess');
+    const sandboxRaw: unknown = ctx.get('sandbox');
+    return createRunner({
+      subprocess: isSubprocessLike(subprocessRaw) ? subprocessRaw : null,
+      sandbox: isSandboxLike(sandboxRaw) ? sandboxRaw : null,
+      shell,
+    });
+  };
+
+  // `git` is read by four modules that hold no host context of their own (anchoring, the
+  // delta gate, the git state card, the activity list), so the seams reach them as a
+  // provider read at call time rather than a value captured here: a profile may mount
+  // `subprocess` after this plugin applies. Clearing it on dispose keeps a reloaded
+  // plugin from keeping a stale host object alive. See `gitnexus/git-capture.ts`.
+  provideGitSeams(() => ({ subprocess: ctx.get('subprocess'), sandbox: ctx.get('sandbox') }));
+  ctx.effect(
+    () => () => {
+      provideGitSeams(null);
+    },
+    'gitnexus-plus: git process seams',
+  );
+
+  /**
+   * The sandbox policy for one repository, with the workspace root this route knows
+   * and the deployment's own mode.
+   *
+   * WHY THIS IS NOT ESCALATION
+   * --------------------------
+   * A panel route has no session, so `sandboxPolicy.resolve()` falls back to
+   * `config.workspaceRoot ?? process.cwd()` — the DSH application directory. The
+   * sandbox derives its write-capability SID from that path, so the repository's
+   * grant never applies and every write inside `.gitnexus` is refused. Measured on a
+   * Windows deployment: the ACE on the repository is exactly the one the sandbox
+   * derives from that path (`workspaceWriteSid(<repository path>)`).
+   *
+   * This function therefore forwards the deployment's resolved policy and replaces
+   * only the root with the repository the caller named. The **mode** is never
+   * touched: read-only stays read-only, and a deployment without a policy service
+   * keeps the executor's own default. What it adds is the one input the agentless
+   * route cannot otherwise supply. It is used by every spawn this plugin starts for
+   * a repository: analyze, the search helper, the graph helper and the query helper.
+   * Without it the helpers inherit the application directory, and on Windows the ACL
+   * runner fails before the helper starts (`SetNamedSecurityInfoW … grantWrite(<app
+   * dir>)`).
+   */
+  const sandboxPolicyForRoot = (repoPath: string): unknown => {
+    const raw: unknown = ctx.get('sandboxPolicy');
+    if (raw === null || typeof raw !== 'object') return undefined;
+    const service = raw as { resolve?: () => unknown };
+    if (typeof service.resolve !== 'function') return undefined;
+    let base: unknown;
+    try {
+      base = service.resolve();
+    } catch {
+      return undefined;
+    }
+    if (base === null || typeof base !== 'object') return undefined;
+    const policy = base as { mode?: unknown; workspaceRoot?: unknown };
+    if (typeof policy.mode !== 'string') return undefined;
+    // The capability SID is derived from this exact string, so it has to be the
+    // canonical path — the same one a session call would carry.
+    let root = path.resolve(repoPath);
+    try {
+      root = realpathSync.native(root);
+    } catch {
+      /* the resolved path is the best available canonical form */
+    }
+    return { ...(base as Record<string, unknown>), workspaceRoot: root };
+  };
 
   /**
    * Resolve a coverage report, from cache when it is recent enough.
@@ -380,7 +576,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       },
       presentCall: (args) => ({
         card: 'generic',
-        title: `GitNexus coverage 路 ${String(args.repo).split(/[\\/]/).pop()}`,
+        title: `GitNexus coverage · ${String(args.repo).split(/[\\/]/).pop()}`,
         kind: 'read',
       }),
     }),
@@ -451,6 +647,281 @@ export function apply(ctx: Context, config: PluginConfig): void {
     }),
   );
 
+  /**
+   * The three graph tools, over one helper.
+   *
+   * They are the reason this plugin exists for an agent: `gitnexus_coverage` and
+   * `gitnexus_delta` describe the *index*, these answer about the *code*. GitNexus is
+   * also an MCP server with seventeen tools; these three are the ones whose answers a
+   * coding session actually acts on, and the rest are deliberately left out (see
+   * `.docs/plan-0.1.8.md` §2 for the per-tool reasoning).
+   *
+   * Two behaviours are load-bearing and must survive any edit here:
+   *
+   * - A failed call is a normal answer, not an exception. `no-index` is the common
+   *   case on a fresh repository, and the sentence has to tell the model what to do
+   *   next rather than presenting a stack trace.
+   * - `renderTool` prints `risk`, `epistemic` and `boundaries` outside the truncated
+   *   lists, so a small answer never reads as a complete one.
+   */
+  if (config.graphTools) {
+    const answer = async (
+      tool: GraphToolName,
+      repo: string,
+      params: Record<string, unknown>,
+      subject: string,
+      signal: AbortSignal | undefined,
+      timeoutMs: number = config.graphToolTimeoutMs,
+    ): Promise<GraphToolResult> => {
+      const shell = shellFor();
+      const outcome = await runGraphTool(repo, tool, params, {
+        shell,
+        runner: runnerFor(shell),
+        helperPath: graphQueryHelperPath,
+        gitnexusHome: config.gitnexusHome,
+        timeoutMs,
+        sandboxPolicy: sandboxPolicyForRoot,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (!outcome.ok) {
+        return {
+          text: `GitNexus ${tool} 未能回答（${outcome.code}）· ${subject}\n${outcome.message}`,
+          ok: false,
+          result: null,
+        };
+      }
+      const rendered = renderTool(
+        tool,
+        outcome.result,
+        tool === 'query' ? String(params.search_query ?? '') : '',
+      );
+      return { text: rendered.text, ok: true, result: rendered.result };
+    };
+
+    ctx.tools.register(
+      defineTool<ImpactToolArgs, GraphToolResult>({
+        name: 'gitnexus_impact',
+        description:
+          'What breaks if this symbol changes: the transitive callers of a symbol, grouped by depth, ' +
+          'with the execution processes that cross it. Run this BEFORE editing a function, class or ' +
+          'method — a HIGH or CRITICAL risk means the change reaches many callers. Read `risk` ' +
+          'literally: LOW means few upstream dependencies, UNKNOWN means the upstream walk resolved ' +
+          'no callers at all, which is NOT the same as safe — confirm with a text search when you see ' +
+          'UNKNOWN. When `epistemic` is lower-bound the list is a lower bound, not the whole truth. ' +
+          'After the change, ask gitnexus_delta whether the index needs a refresh.',
+        parameters: {
+          repo: {
+            type: 'string',
+            required: true,
+            description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+          },
+          target: {
+            type: 'string',
+            required: true,
+            description:
+              'Symbol name to analyse. A bare name is fine; ambiguity is resolved by the index.',
+          },
+          direction: {
+            type: 'string',
+            enum: ['upstream', 'downstream'],
+            description: '`upstream` (default) = who calls this. `downstream` = what this calls.',
+          },
+          maxDepth: {
+            type: 'integer',
+            description:
+              'How many call-graph hops to walk. Default and ceiling are the index’s own (32).',
+          },
+          summaryOnly: {
+            type: 'boolean',
+            description:
+              'Skip the per-depth caller list and return counts, processes and modules only. ' +
+              'Cheaper; use it when you only need the verdict.',
+          },
+          limit: {
+            type: 'integer',
+            description: 'Maximum entries per depth level (not a total cap).',
+          },
+          minConfidence: {
+            type: 'number',
+            description:
+              'Drop edges whose resolution confidence is below this (0–1). Raise it to cut the noise from ' +
+              'dynamic dispatch; lower it to widen a walk that looks suspiciously short.',
+          },
+        },
+        output: graphToolOutput,
+        // The helper owns the real 20 s deadline and says so in words; this budget is
+        // the host-side backstop that only fires if the helper never settles. Declaring
+        // it asserts what the body does: it forwards `exec.signal` to the process.
+        // Read-only, and each call owns its own temp directory and helper process, so
+        // two questions may be in flight at once — the host only parallelizes on `true`.
+        isConcurrencySafe: () => true,
+        timeoutMs: config.graphToolTimeoutMs + 5_000,
+        async execute(args, exec) {
+          const params: Record<string, unknown> = { target: args.target };
+          if (args.direction !== undefined) params.direction = args.direction;
+          if (args.maxDepth !== undefined) params.maxDepth = args.maxDepth;
+          if (args.summaryOnly !== undefined) params.summaryOnly = args.summaryOnly;
+          if (args.limit !== undefined) params.limit = args.limit;
+          if (args.minConfidence !== undefined) params.minConfidence = args.minConfidence;
+          return answer('impact', args.repo, params, args.target, exec?.signal);
+        },
+        presentCall: (args) => ({
+          card: 'generic',
+          title: `GitNexus impact · ${args.target}`,
+          kind: 'read',
+        }),
+      }),
+    );
+
+    ctx.tools.register(
+      defineTool<ContextToolArgs, GraphToolResult>({
+        name: 'gitnexus_context',
+        description:
+          'The named symbol and its immediate neighbourhood: where it is defined, what calls it, what ' +
+          'it calls, and the execution processes it takes part in. Cheaper and more focused than ' +
+          'gitnexus_impact — start here to understand a symbol, then ask for impact before changing ' +
+          'it. `include_content` adds the source of the symbol and its immediate neighbours; leave it ' +
+          'off unless you need to read the body, because it spends context.',
+        parameters: {
+          repo: {
+            type: 'string',
+            required: true,
+            description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+          },
+          name: {
+            type: 'string',
+            description:
+              'Symbol name (function, class, method, property, type). Most calls use this; give `uid` or ' +
+              '`file_path` instead (or as well) when the name is ambiguous.',
+          },
+          uid: {
+            type: 'string',
+            description:
+              'A symbol id from an earlier answer — `gitnexus_query` prints them as `uid <id>` ' +
+            'on each definition line. ' +
+              'The unambiguous way to name a symbol.',
+          },
+          file_path: {
+            type: 'string',
+            description:
+              'Repository-relative file path, to resolve a name inside one file or to look up a file’s ' +
+              'symbols.',
+          },
+          kind: {
+            type: 'string',
+            description: 'Symbol kind, e.g. Function, Class, Method, Property, Interface.',
+          },
+          include_content: {
+            type: 'boolean',
+            description:
+              'Include source text for the symbol and immediate neighbours. Defaults to false.',
+          },
+        },
+        output: graphToolOutput,
+        // Read-only, and each call owns its own temp directory and helper process, so
+        // two questions may be in flight at once — the host only parallelizes on `true`.
+        isConcurrencySafe: () => true,
+        timeoutMs: config.graphToolTimeoutMs + 5_000,
+        async execute(args, exec) {
+          const params: Record<string, unknown> = {};
+          if (args.name !== undefined) params.name = args.name;
+          if (args.uid !== undefined) params.uid = args.uid;
+          if (args.file_path !== undefined) params.file_path = args.file_path;
+          if (args.kind !== undefined) params.kind = args.kind;
+          if (args.include_content !== undefined) params.include_content = args.include_content;
+          const subject = args.name ?? args.uid ?? args.file_path ?? '';
+          if (subject === '') {
+            return {
+              text:
+                'GitNexus context 需要 name、uid 或 file_path 之一 —— 只有 kind 或 include_content 无法定位符号。' +
+                '先用 gitnexus_query 找到它，再把那里打印的 id 作为 uid 传回来。',
+              ok: false,
+              result: null,
+            };
+          }
+          return answer('context', args.repo, params, subject, exec?.signal);
+        },
+        presentCall: (args) => ({
+          card: 'generic',
+          title: `GitNexus context · ${args.name ?? args.uid ?? args.file_path ?? ''}`,
+          kind: 'read',
+        }),
+      }),
+    );
+
+    ctx.tools.register(
+      defineTool<QueryToolArgs, GraphToolResult>({
+        name: 'gitnexus_query',
+        description:
+          'Ask the graph a question in plain language: "how is the delta verdict computed", "where ' +
+          'are routes mounted", "who writes the manifest". Returns the execution processes that match, ' +
+          'the symbols inside them, and the definitions whose names match — the fastest way to find ' +
+          'the part of an unfamiliar codebase that implements a concept. Use it instead of grepping ' +
+          'for a concept; grep is still the right tool for a literal string.',
+        parameters: {
+          repo: {
+            type: 'string',
+            required: true,
+            description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+          },
+          search_query: {
+            type: 'string',
+            required: true,
+            description: 'The question or concept, in the language of the codebase.',
+          },
+          goal: {
+            type: 'string',
+            description:
+              'What you are trying to do with the answer. Changes the ranking; worth setting when the ' +
+              'question is ambiguous.',
+          },
+          task_context: {
+            type: 'string',
+            description:
+              'Free-form context about the task the answer serves (the file you are editing, the error ' +
+              'you are chasing). Refines the ranking further than `goal` alone.',
+          },
+          limit: {
+            type: 'integer',
+            description: 'How many processes to return. Defaults to 5, capped at 100.',
+          },
+          max_symbols: {
+            type: 'integer',
+            description: 'How many symbols per process to return. Defaults to 10, capped at 200.',
+          },
+        },
+        output: graphToolOutput,
+        // Read-only, and each call owns its own temp directory and helper process, so
+        // two questions may be in flight at once — the host only parallelizes on `true`.
+        isConcurrencySafe: () => true,
+        // A query walks processes and definitions rather than one symbol's callers, and
+        // on a large index it is the slowest of the three. Give it half again the budget
+        // of the other two, so a broad question is not cut off by a per-symbol default.
+        timeoutMs: Math.round(config.graphToolTimeoutMs * 1.5) + 5_000,
+        async execute(args, exec) {
+          const params: Record<string, unknown> = { search_query: args.search_query };
+          if (args.goal !== undefined) params.goal = args.goal;
+          if (args.task_context !== undefined) params.task_context = args.task_context;
+          if (args.limit !== undefined) params.limit = args.limit;
+          if (args.max_symbols !== undefined) params.max_symbols = args.max_symbols;
+          return answer(
+            'query',
+            args.repo,
+            params,
+            args.search_query,
+            exec?.signal,
+            Math.round(config.graphToolTimeoutMs * 1.5),
+          );
+        },
+        presentCall: (args) => ({
+          card: 'generic',
+          title: `GitNexus query · ${args.search_query}`,
+          kind: 'read',
+        }),
+      }),
+    );
+  }
+
   if (config.serveRoutes) {
     // Optional carrier: absent on headless profiles, so the tool above still works.
     ctx.inject(['webServer'], (svcCtx) => {
@@ -461,52 +932,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // read-only half of the panel keeps working either way.
       const shellRaw: unknown = svcCtx.get('shell');
       const searchShell = isShellLike(shellRaw) ? shellRaw : null;
-      /**
-       * The sandbox policy for one repository, with the workspace root this route knows
-       * and the deployment's own mode.
-       *
-       * WHY THIS IS NOT ESCALATION
-       * --------------------------
-       * A panel route has no session, so `sandboxPolicy.resolve()` falls back to
-       * `config.workspaceRoot ?? process.cwd()` — the DSH application directory. The
-       * sandbox derives its write-capability SID from that path, so the repository's
-       * grant never applies and every write inside `.gitnexus` is refused. Measured on
-       * this machine: the ACE `S-1-4-160954772-582561662` on the repository is exactly
-       * `workspaceWriteSid('D:\\Project\\gitnexus-plus')`.
-       *
-       * This function therefore forwards the deployment's resolved policy and replaces
-       * only the root with the repository the caller named. The **mode** is never
-       * touched: read-only stays read-only, and a deployment without a policy service
-       * keeps the executor's own default. What it adds is the one input the agentless
-       * route cannot otherwise supply. It is used by every spawn this plugin starts for
-       * a repository: analyze, the search helper and the graph helper. Without it the
-       * helpers inherit the application directory, and on Windows the ACL runner fails
-       * before the helper starts (`SetNamedSecurityInfoW … grantWrite(<app dir>)`).
-       */
-      const sandboxPolicyForRoot = (repoPath: string): unknown => {
-        const raw: unknown = svcCtx.get('sandboxPolicy');
-        if (raw === null || typeof raw !== 'object') return undefined;
-        const service = raw as { resolve?: () => unknown };
-        if (typeof service.resolve !== 'function') return undefined;
-        let base: unknown;
-        try {
-          base = service.resolve();
-        } catch {
-          return undefined;
-        }
-        if (base === null || typeof base !== 'object') return undefined;
-        const policy = base as { mode?: unknown; workspaceRoot?: unknown };
-        if (typeof policy.mode !== 'string') return undefined;
-        // The capability SID is derived from this exact string, so it has to be the
-        // canonical path — the same one a session call would carry.
-        let root = path.resolve(repoPath);
-        try {
-          root = realpathSync.native(root);
-        } catch {
-          /* the resolved path is the best available canonical form */
-        }
-        return { ...(base as Record<string, unknown>), workspaceRoot: root };
-      };
+      // The two read helpers (search, graph) spawn through this runner: `argv` when the
+      // profile mounts `ctx.subprocess`, the shell command otherwise. The maintenance
+      // runners below keep taking `shell` directly — their output is a paste-able command
+      // and their cancellation story is their own.
+      const readRunner = runnerFor(searchShell);
+      // `sandboxPolicyForRoot` is defined above, outside this block: the graph tools
+      // spawn through the same policy and must work when `serveRoutes` is off.
       const analyze = createAnalyzeRunner({
         shell: searchShell,
         timeoutMs: config.analyzeTimeoutMs,
@@ -576,6 +1008,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           search: (repoPath, query, options) =>
             searchWithFallback(repoPath, query, {
               shell: searchShell,
+              runner: readRunner,
               helperPath: searchHelperPath,
               limit: options?.limit,
               managedPrefix: installPrefix,
@@ -589,6 +1022,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           project: (repoPath, view, id) =>
             projectViaHelper(repoPath, view, id, {
               shell: searchShell,
+              runner: readRunner,
               helperPath: graphHelperPath,
               managedPrefix: installPrefix,
               sandboxPolicy: sandboxPolicyForRoot,

@@ -184,7 +184,11 @@ export function CoveragePanel(props: SlotProps) {
   const onGraphNear = React.useCallback(() => setGraphVisible(true), []);
   /** Which project the current projection belongs to, so a switch can clear it. */
   const graphRepoRef = React.useRef<string | null>(null);
-  const running = run?.state === 'running' && runProject === projectPath;
+  // `anchoring` keeps the poll alive past `done`: the host asks git about the index's
+  // commit baseline after the run finishes, and that answer is a separate status. An
+  // older host never sets the flag, so nothing is waited for that will not arrive.
+  const running =
+    (run?.state === 'running' || run?.anchoring === true) && runProject === projectPath;
 
   /**
    * Poll while a run is in flight.
@@ -206,8 +210,11 @@ export function CoveragePanel(props: SlotProps) {
         setRun((previous) => (sameRun(previous, next) ? previous : next));
         setRunProject(projectPath);
         // A finished run changed the index, so the report on screen is now a reading of
-        // the previous one. This is the whole reason the run was started.
-        if (next !== null && next.state !== 'running') setReloadToken((n) => n + 1);
+        // the previous one. This is the whole reason the run was started. Deferred while
+        // the baseline is still being written, so the reload sees the final status.
+        if (next !== null && next.state !== 'running' && next.anchoring !== true) {
+          setReloadToken((n) => n + 1);
+        }
       } catch {
         /* a dropped poll is not worth surfacing; the next one reports the state */
       }

@@ -21,6 +21,12 @@ web-out.txt
 web-err.txt
 *.log
 
+# Test fixtures. Most are named after the running process and removed when the suite
+# exits, but a couple of suites build a fixed-name prefix that is meant to survive
+# between runs. `test/` itself is tracked — it used to be ignored wholesale, which is
+# how new test files were silently left out of the repository.
+test/.fixtures/
+
 # Pack artifacts.
 *.tgz
 
@@ -38,7 +44,6 @@ tmp-commit-msg.txt
 msg.txt
 msg2.txt
 msg3.txt
-test/
 msg4.txt
 msg5.txt
 msg6.txt

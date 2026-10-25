@@ -39,15 +39,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ShellLike } from '../shell.js';
-import {
-  exitDetail,
-  parseHelperOutput,
-  quoteArg,
-  readLineNumber,
-  runHelper,
-  shellFlavor,
-  type ShellFlavor,
-} from '../shell.js';
+import { exitDetail, parseHelperOutput, readLineNumber } from '../shell.js';
+import { shellRunner, type Runner } from '../subprocess.js';
 import { findGitnexusRoot } from './root.js';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
 import { readCapabilities } from './coverage.js';
@@ -122,6 +115,7 @@ export type SearchErrorCode =
   | 'no-index-store'
   | 'search-unavailable'
   | 'index-busy'
+  | 'search-cancelled'
   | 'search-failed';
 
 export class SearchError extends Error {
@@ -426,6 +420,13 @@ function graphQueryError(cause: unknown): SearchError {
 export interface HelperSearchOptions {
   /** The host's shell executor; `null` when the deployment has none. */
   shell: ShellLike | null;
+  /**
+   * The plugin's process runner, when one was built from the host's seams.
+   *
+   * Optional so existing callers keep the `ctx.shell` behaviour; when present the helper
+   * goes out as `argv` through `ctx.subprocess` if the host exposes that seam.
+   */
+  runner?: Runner | null;
   /** Absolute path to `lib/bin/search-helper.js`. */
   helperPath: string;
   /** The plugin-owned GitNexus prefix, when one was installed from the panel. */
@@ -454,6 +455,7 @@ function searchErrorCode(value: unknown): SearchErrorCode {
     case 'no-index-store':
     case 'search-unavailable':
     case 'index-busy':
+    case 'search-cancelled':
     case 'search-failed':
       return value;
     default:
@@ -530,7 +532,8 @@ export async function searchViaHelper(
   if (!existsSync(path.join(absRepo, '.gitnexus', 'lbug'))) {
     throw new SearchError('no-index-store', 409, '索引缺少 .gitnexus/lbug 图存储，无法搜索。');
   }
-  if (options.shell === null) {
+  const runner = options.runner ?? (options.shell === null ? null : shellRunner(options.shell));
+  if (runner === null) {
     throw new SearchError(
       'search-unavailable',
       503,
@@ -538,20 +541,14 @@ export async function searchViaHelper(
     );
   }
 
-  const flavor: ShellFlavor = shellFlavor();
   const limit = clampLimit(options.limit);
   const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
-  const args = [options.helperPath, absRepo, query, String(limit), options.managedPrefix ?? '']
-    .map((value) => quoteArg(flavor, value))
-    .join(' ');
-  const command = `node ${args}`;
 
-  const run = await runHelper({
-    shell: options.shell,
-    command,
-    workdir: absRepo,
+  const run = await runner.run({
+    argv: ['node', options.helperPath, absRepo, query, String(limit), options.managedPrefix ?? ''],
+    cwd: absRepo,
     timeoutMs: 20_000,
-    stdoutMaxBytes: 2 * 1024 * 1024,
+    maxBytes: 2 * 1024 * 1024,
     ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
   });
   if (run.kind === 'spawn-failed') {
@@ -559,6 +556,11 @@ export async function searchViaHelper(
   }
   if (run.kind === 'timed-out') {
     throw new SearchError('search-failed', 504, '搜索子进程超时（20 秒）。');
+  }
+  if (run.kind === 'cancelled') {
+    // The caller aborted; the executor already stopped the process. Reported with its
+    // own code so a route can tell "the client went away" from "the search broke".
+    throw new SearchError('search-cancelled', 499, '搜索已取消。');
   }
 
   const parsed = parseHelperOutput(run.stdout);

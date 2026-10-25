@@ -151,6 +151,15 @@ export interface StalenessInfo {
   dirtyCount: number | null;
   aheadBehind: AheadBehind | null;
   gitAvailable: boolean;
+  /**
+   * Why git could not be read, when `gitAvailable` is false — `git rev-parse HEAD →
+   * EPERM`, `… → exit 128`. Null when git answered.
+   *
+   * The panel used to print one sentence for three different problems (no git, no
+   * repository, a host that refuses to start processes), and the operator had no way
+   * to tell which. The diagnostic belongs next to the verdict, not in a log.
+   */
+  reason: string | null;
 }
 
 export interface ProvenanceInfo {
@@ -620,6 +629,7 @@ export async function analyzeCoverage(
       dirtyCount: git.dirtyCount,
       aheadBehind: git.aheadBehind,
       gitAvailable: git.available,
+      reason: git.reason,
     },
     // Provenance and analysis configuration. Each of these, if changed, forces a
     // full rebuild — so showing them is showing why an index might be about to be

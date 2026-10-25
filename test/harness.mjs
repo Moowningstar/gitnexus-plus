@@ -6,11 +6,34 @@
  * module called `check()`.
  */
 
+import { rmSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 let passed = 0;
 let failed = 0;
+
+/**
+ * Fixture directories this process built.
+ *
+ * They live inside the repository (see `fixturePath`), so leaving them behind shows
+ * up in `git status` as soon as `test/` stops being gitignored. Each suite removes
+ * its own fixture before rebuilding it, but nothing ran at the end of the run, so a
+ * machine that had run the suite a few hundred times was carrying a few hundred
+ * directories.
+ */
+const built = [];
+
+process.once('exit', () => {
+  for (const dir of built) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort: a fixture may already be gone, and failing to tidy up must
+      // never change the suite's exit code.
+    }
+  }
+});
 
 /** @returns {{passed: number, failed: number}} the totals the runner prints */
 export function summary() {
@@ -49,7 +72,9 @@ export function section(title) {
  */
 
 export function fixturePath(name) {
-  return path.join(import.meta.dirname, '.fixtures', `${name}-${process.pid}`);
+  const target = path.join(import.meta.dirname, '.fixtures', `${name}-${process.pid}`);
+  if (!built.includes(target)) built.push(target);
+  return target;
 }
 
 /** Build a repository containing one of each case the engine must distinguish. */

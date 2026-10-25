@@ -214,7 +214,7 @@ function apply(ctx: SlotsContext): void {
       : React.createElement(
           'div',
           { style: { padding: 12, color: '#fff', background: '#3a1111' } },
-          'GitNexus 缂哄皯缁勪欢: ' + missingComponents.join(', '),
+          'GitNexus 缺少组件: ' + missingComponents.join(', '),
         );
 
   safe('sidebar.right.pane.tab', () => {

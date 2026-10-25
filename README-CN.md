@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：0.1.7** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：0.1.8** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
@@ -81,8 +81,15 @@ npm install --prefix <DSH_HOME>/gitnexus-plus/gitnexus gitnexus@^1.6.12
 
 DSH 内暴露：
 
-- 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }`
+- 工具 `gitnexus_coverage`：`{ repo, includeLanguages? }` —— 索引漏掉了什么
 - 工具 `gitnexus_delta`：`{ repo }` —— 这次刷新会不会改变索引
+- 工具 `gitnexus_impact`：`{ repo, target, direction?, maxDepth?, summaryOnly?, limit?, minConfidence? }`
+  —— “改这个符号会波及谁”，改代码**之前**该问的
+- 工具 `gitnexus_context`：`{ repo, name?, uid?, file_path?, kind?, include_content? }` —— 一个符号的
+  定义、调用者、被调用者与它参与的流程；名字有歧义时用 `uid`（`gitnexus_query` 的定义行会打印
+  `uid <id>`）
+- 工具 `gitnexus_query`：`{ repo, search_query, goal?, task_context?, limit?, max_symbols? }` ——
+  用自然语言问图“这块功能在哪”，返回流程、流程内符号与同名定义
 - 路由 `GET /api/gitnexus/projects?root=<workspace>`：列出工作区下的项目（已索引与未索引 git）
 - 路由 `GET /api/gitnexus/coverage?repo=<project>`
 - 路由 `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
@@ -94,6 +101,15 @@ DSH 内暴露：
 - 路由 `POST/GET/DELETE /api/gitnexus/analyze`（唯一会改动索引的入口；`force=1` 全量重建，
   `mode=repair-fts` 只修搜索索引）
 - 右侧栏 tab `gitnexus`
+
+**名字对照**：GitNexus 自己生成的 `AGENTS.md`（每次 analyze 都会被重写）用的是上游 MCP 的裸名，本插件注册的是带前缀的工具名。照着那份文件调用会找不到工具，所以按这张表换：
+
+| `AGENTS.md` 里写的 | 本插件里的工具 | 说明 |
+| --- | --- | --- |
+| `impact({target, direction})` | `gitnexus_impact` | 同名参数，外加 `maxDepth`/`summaryOnly`/`limit`/`minConfidence` |
+| `context({name})` | `gitnexus_context` | 除 `name` 外可用 `uid`/`file_path`/`kind` |
+| `query({search_query})` | `gitnexus_query` | 同名参数，外加 `goal`/`task_context`/`limit`/`max_symbols` |
+| `detect_changes({scope})` | `gitnexus_delta` | 只回答「要不要刷新」；按 staged/compare 分范围的能力留待 0.1.9 |
 
 CLI：
 
@@ -107,10 +123,50 @@ npm run check
 npm test
 ```
 
-`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.7 时共 852 项（引擎 562、插件 60、
-客户端 230）。测试不依赖开发机的 `D:` 盘：格式测试会自建一次性仓库，真实仓库冒烟测试默认用本
+`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.8 时共 1026 项（引擎 708、插件 80、
+客户端 238）。其中 7 项是编解码护栏：它把 GBK 能编码的每个字符映回字节，一旦连续一段又能被
+UTF-8 解码成正常文本就失败 —— 这正是双解码字符串的样子，而字符黑名单总是漏掉它。另有 4 项是
+发布卫生：`.npmrc` 与 `package-lock.json` 必须只指向 `registry.npmjs.org`（0.1.7 的 lockfile 全指
+镜像，一次 `npm install` 就会写回，只有断言能发现）。测试不依赖
+开发机的 `D:` 盘：格式测试会自建一次性仓库，真实仓库冒烟测试默认用本
 checkout（或用 `GITNEXUS_SMOKE_REPO` 指定），没有索引时跳过。`.github/workflows/ci.yml` 在
 Windows 与 Ubuntu、Node 22 与 24 上跑 `npm ci`、`npm run check`、`npm test`。
+
+### 三个图工具怎么工作
+
+`gitnexus_impact`、`gitnexus_context`、`gitnexus_query` 不是插件自己实现的遍历：它们把请求交给
+`lib/bin/graph-query-helper.js`，由系统 Node 加载 GitNexus 自己的 MCP 后端来回答。原因是原生
+`lbug` 加载不进宿主进程（宿主是 Electron 的 Node，ABI 不匹配），这和画图投影用的是同一条边界。
+
+一次调用一个短命子进程，冷启动约 400–600 ms（node + 注册表 + 原生存储 + 遍历），和一次 grep
+同量级。请求体走临时文件而不是命令行参数：符号名是调用方的文本，可能有空格、引号、换行。
+
+**子进程走宿主的执行 seam，而不是插件自己 `spawn`**（`src/subprocess.ts`）：宿主挂了
+`ctx.subprocess` 就用它（`argv` 原样交给系统，不经 shell 解释；有沙箱策略时先过
+`ctx.sandbox.confine`，拿不到 `confine` 就**拒绝**无隔离启动，而不是偷偷放行）；没挂
+`ctx.subprocess` 才退回 `ctx.shell` 与命令字符串。两条路都转发了工具的 `exec.signal`，所以调用方
+取消时子进程会被停掉，回答是「这次查图被取消了」而不是等满超时。这条 seam 也让面板在没有 shell
+的部署里仍然能读图 —— 有 `ctx.subprocess` 就够了。
+
+回答里有两样东西**永远不会被截断**，因为它们是“这个答案能信多少”的元信息：
+
+- `risk`：`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`/`UNKNOWN`。**`UNKNOWN` 不等于安全** —— 它表示上游
+  遍历一个调用者都没解析到，可能只是调用点解析不出来（动态派发、跨语言、没索引的包）。
+- `epistemic`：`exact` 或 `lower-bound`。`lower-bound` 时列表是下界，真实依赖可能更多。
+
+上游还会在某些路径上给出 `boundaries`（中文解释「为什么是下界」）、`causes`（缺口来源的计数）
+和 `riskNote`（遍历自己的理由）。**有就照登，没有就不提** —— 实测 `impact`/`context` 在 1.6.12
+上通常不带这三个字段，所以本插件不替上游编，也不会因为它们缺失而省掉上面那两行。
+
+**查不到符号时会说出来。** 上游对不存在的目标返回 `{"error":"Target 'x' not found", …}` 加一个
+`risk: UNKNOWN`；只印 UNKNOWN 会被读成“没有人调用它”。现在渲染层把 `error` 原样登出，并补一句
+「这个符号不在索引里 —— 先刷新索引再问它」。
+
+列表本身有上限（调用者 12 条、流程 6 条、定义 12 条），但**计数永远是真实的**：被截断时会写明
+“还有 N 条未列出”。
+
+`graphTools: false` 可以把这三个工具整体关掉，只留 coverage 与 delta（它们不需要起子进程）。
+
 
 搜索分为两种模式：
 
@@ -149,7 +205,8 @@ Windows 与 Ubuntu、Node 22 与 24 上跑 `npm ci`、`npm run check`、`npm tes
 | 搜索报 `A dynamic link library (DLL) initialization routine failed` / `lbugjs.node` | 图查询在 `lib/bin/search-helper.js` 里跑，不在 Electron 宿主里加载原生模块；升级后重启 DSH，并确保 shell PATH 上有 `node`。helper 起不来时会回退源码。 | [`gitnexus/README.md` — Troubleshooting](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#troubleshooting) |
 | Windows 上搜索命中很少，或面板提示 FTS 不可用 | 先看 `.gitnexus/meta.json` 里的 `capabilities.fts`：`status: "unavailable"` 只是建索引时写下的记录，**可能是陈旧的**——本机实测记录说不可用，而 `gitnexus doctor` 报 `Full-text search: available`，扩展文件也都在。用 **修复搜索索引（FTS）**（`analyze --repair-fts`）重写这份记录与搜索索引，不动图；之后面板报的是「这次实际搜了什么」，不再复述 manifest。其余原因按可能性排：索引是 `--skip-fts` 建的；修复需要在**子进程**里安装/加载扩展而受限 shell 拒绝（`spawn EPERM` → 把命令复制到终端跑）；或扩展真的加载不了，那是 Windows 缺少原生运行时（VC++ 2015-2022 x64 与 OpenSSL 3）——四种里最少见的一种，值得先确认再下结论。 | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable)、[Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
 | 刷新按钮显示“无需刷新”且不可点 | 这是 Tier 0 的判断，不是故障：索引记录的文件内容哈希全部没变，再跑分析器也不会改变索引。**仍然刷新** 可以强制跑一次（例如 GitNexus 升级或 schema 变化后）。如果索引没有记录提交基线，面板**不会**说“无需刷新”，而是显示“无法确认”并保持按钮可用。 | 本插件的差量引擎；无上游 GitNexus 路径。 |
-| 门禁显示“无法确认”，而不是“无需刷新” | 索引没有记录提交，所以只能比较工作区。受限沙箱里的 analyze 起不了 `git` 子进程，manifest 的 `lastCommit` 因此为空——本机实测：同一条命令在普通终端会写入提交，在沙箱里留空。想要更强的结论，把复制出的命令在沙箱外跑一次；无论哪种状态，刷新按钮都可用。 | 本插件差量引擎 + 分析器的 git 访问；无上游 GitNexus 路径。 |
+| 门禁显示“无法确认”，而不是“无需刷新” | 索引没有记录提交。0.1.8 起，插件在**自己发起的那次刷新成功之后**会把当前提交写回 manifest 的 `lastCommit` 和这次 analyze 用的那份 registry，所以沙箱里刷新完也能给出“已是最新”。工作区有未提交改动时它**不写** —— 把提交记上去会让门禁误报“已是最新”，面板会说明“还有 N 处未提交改动，提交后再刷新”。仍然只剩三种情况需要去普通终端：索引是别人在终端建的、目录不是 git 仓库、或这个仓库还没有提交。写回只填空不覆盖，已有基线不会被改动。 | 本插件差量引擎 + 分析器的 git 访问；无上游 GitNexus 路径。 |
+| 面板显示 git 不可用，活动与文件历史为空 | 0.1.7 及以前用**管道**捕获 `git` 的输出，受限宿主（DSH 沙箱、以受限令牌启动子进程的 Windows 服务）会拒绝命名管道，表现为 `spawn EPERM`，于是被误读成“机器上没有 git”。0.1.8 起所有 git 调用都改成把子进程的输出写进文件再读回（`src/gitnexus/git-capture.ts`）；stdout 与 stderr 分开捕获，避免 git 的 `LF will be replaced by CRLF` 警告混进文件名列表。捕获先试宿主自己的 spawner，够不到 git 时回退到文件描述符；临时文件放在**工作区内**（`<repo>/.gitnexus/plugin-home/tmp`），因为宿主进程往往正是无权写系统临时目录的那一方。全都失败时，结论会写出原因（`git rev-parse HEAD → EPERM`、`… → exit 128`）——「没装 git」「不是仓库」「宿主拒绝起进程」是三件不同的事。 | 本插件的子进程捕获；无上游 GitNexus 路径。 |
 | 图视图空白，或报 404 | 404 说明宿主还没有 `/api/gitnexus/graph` 路由，重启 DSH，而不是只刷新页面。空白画布但下面有说明，通常是索引还没有社区（旧索引）或索引忙：刷新索引即可。节点数按预算截断，卡片会写明省略了多少。 | 本插件宿主路由；图数据本身来自 GitNexus 索引。 |
 | 图视图对某些项目一直加载或 504，另一些正常 | Windows ACL 沙箱第一次给 workspace 授权时会把可继承 ACE 传播到整棵仓库树，大仓库可能超过 25 秒 helper 超时；已授权过的项目则很快。0.1.5 起搜索/图 helper 的 workspace 根收窄到 `<repo>/.gitnexus`，只覆盖索引目录；重启 DSH 后生效。仍失败时确认 `.gitnexus/lbug` 存在，并检查是否有另一个 analyze 正占用该索引。 | 本插件的 sandbox 策略根；图数据本身来自 GitNexus 索引。 |
 | 3D 视图打不开，或弹层里一片空白 | 先看卡片上的状态文案：`不可用` 表示宿主没有 shell 执行器，或本机没有 `gitnexus`（卡片会给出安装命令）；`启动失败` 会附上子进程自己的输出，端口被占（`EADDRINUSE`）与索引版本不匹配（`database file version`）是最常见的两种。`服务在跑，但索引对不上` 说明端口上的服务注册表里没有本仓库：先刷新本仓库索引，或停掉外部启动的服务。卡片整个缺失/报 404 则是宿主没挂载路由，重启 DSH。 | 本插件的 web 视图生命周期；SPA 是 GitNexus 包里的 `web/` 目录。 |
