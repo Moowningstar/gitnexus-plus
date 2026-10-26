@@ -158,8 +158,12 @@ export function ToolchainNotice({
         open: confirming,
         title: '授权本插件安装 GitNexus？',
         description:
-          '本插件将执行：\n\nnpm install --prefix <插件数据目录>/gitnexus gitnexus@^1.6.12\n\n' +
-          '· 从你已配置的 npm 源下载约 500 MB ~ 1 GB\n' +
+          // The spec mirrors `GITNEXUS_RANGE` in `src/gitnexus/install.ts` (kept as a
+          // literal because the client bundle cannot import a node-only module); the
+          // client suite asserts the two stay in step.
+          '本插件将执行：\n\nnpm install --prefix <插件数据目录>/gitnexus ' +
+          '"gitnexus@^1.6.12"\n\n' +
+          '· 从你已配置的 npm 源下载几百 MB（解压后约 220 MB；1.6.13 起约 430 MB）\n' +
           '· 需要几分钟；网络慢或需要本地编译时更久\n' +
           '· 会在本机运行这些包的安装期构建脚本（原生数据库与解析器需要本地编译）\n' +
           '· 安装到插件自己的目录，不改动你的全局 npm 前缀\n' +

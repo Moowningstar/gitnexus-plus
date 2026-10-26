@@ -678,6 +678,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
         shell,
         runner: runnerFor(shell),
         helperPath: graphQueryHelperPath,
+        // Same prefix the analyzer and the graph projection use, so all three resolve
+        // one GitNexus. Without it a plugin-installed rc writes a store and a PATH
+        // build that predates it answers "different storage version" — see
+        // `GraphToolOptions.managedPrefix`.
+        managedPrefix: installPrefix,
         gitnexusHome: config.gitnexusHome,
         timeoutMs,
         sandboxPolicy: sandboxPolicyForRoot,

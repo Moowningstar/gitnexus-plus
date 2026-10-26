@@ -312,6 +312,26 @@ export async function graphQueryToolTests() {
   const command = shell.calls[0]?.command ?? '';
   check('the helper is invoked with the request file, not the symbol', command.includes('graph-query-helper.js') && command.includes('request.json'), command);
   check('a configured home is passed to the helper', command.includes('GITNEXUS_HOME'), command);
+
+  // The plugin's own install directory has to reach the helper, or a plugin-installed
+  // GitNexus and a PATH build disagree about which engine owns the store (storage 42 vs
+  // 47 on rc). It travels as the last argv element, after the request file.
+  const managedPrefix = path.join(fixturePath('managed prefix'), 'gitnexus');
+  const managedShell = stubShell(payload);
+  const managed = await runGraphTool(indexed, 'impact', { target: 'sendJson' }, {
+    shell: managedShell,
+    helperPath,
+    managedPrefix,
+    timeoutMs: 5_000,
+  });
+  const managedCommand = managedShell.calls[0]?.command ?? '';
+  check('a managed install still answers through the same helper', managed.ok === true, JSON.stringify(managed).slice(0, 200));
+  check(
+    'the managed install directory is the last argument, after the request file',
+    managedCommand.includes(managedPrefix) &&
+      managedCommand.lastIndexOf(managedPrefix) > managedCommand.indexOf('request.json'),
+    managedCommand,
+  );
   check('the helper runs with the repository as its working directory', shell.calls[0]?.workdir === indexed, String(shell.calls[0]?.workdir));
   check('the timeout is forwarded to the executor', shell.calls[0]?.timeoutMs === 5_000, String(shell.calls[0]?.timeoutMs));
 

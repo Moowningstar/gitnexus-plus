@@ -171,6 +171,16 @@ try {
 
 check('registered id matches the package name', captured?.id === 'dsh-gitnexus-plus', String(captured?.id));
 
+// The install confirmation spells the version spec out, and it cannot import the
+// node-only constant that the installer actually uses. Assert the two agree, so the
+// card can never promise a range the runner would not install.
+const { GITNEXUS_RANGE } = await import('../lib/gitnexus/install.js');
+check(
+  "the install confirmation quotes the runner's version range",
+  source.includes(`gitnexus@${GITNEXUS_RANGE}`),
+  GITNEXUS_RANGE,
+);
+
 /**
  * Every `@deepseek-ai/dsh-client-ui-primitives` export this plugin may use.
  *

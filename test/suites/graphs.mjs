@@ -32,6 +32,37 @@ export async function graphTests() {
     isGraphView('communities') && isGraphView('community') && isGraphView('symbols') && !isGraphView('neighbors'),
   );
 
+  // A checkpoint killed mid-write leaves `.shadow` behind and the engine then refuses
+  // every open with one specific sentence. The plugin parks that file and retries once;
+  // anything else it must classify as a real failure and leave the store alone.
+  const { isOrphanShadowError, quarantineOrphanShadow } = await import('../../lib/gitnexus/lbug-heal.js');
+  check(
+    'a stale shadow sidecar is recognised',
+    isOrphanShadowError(
+      'Runtime exception: Found shadow file D:\\r\\.gitnexus\\lbug.shadow but no corresponding database file. This file may have been left behind from a previous database.',
+    ),
+  );
+  check(
+    'other store refusals are not mistaken for a stale shadow',
+    !isOrphanShadowError('IO exception: Could not set lock on file: D:\\r\\.gitnexus\\lbug') &&
+      !isOrphanShadowError('Cannot open database in read-only mode while checkpoint is in progress') &&
+      !isOrphanShadowError('Trying to read a database file with a different version. Database file version: 47'),
+  );
+
+  const parkedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lbug-heal-'));
+  const parkedDb = path.join(parkedDir, 'lbug');
+  check('the sidecar is left alone when there is none', quarantineOrphanShadow(parkedDb) === null);
+  await fs.writeFile(`${parkedDb}.shadow`, 'sidecar');
+  const parked = quarantineOrphanShadow(parkedDb, 1234);
+  check('the stale sidecar is parked, not deleted', parked === `${parkedDb}.shadow.orphan-1234`, String(parked));
+  check(
+    'the parked sidecar keeps its bytes',
+    await fs.readFile(parked, 'utf8') === 'sidecar',
+  );
+  check('quarantine never creates a database file of its own', !(await fs.access(parkedDb).then(() => true).catch(() => false)));
+  check('a second call has nothing left to park', quarantineOrphanShadow(parkedDb, 1234) === null);
+  await fs.rm(parkedDir, { recursive: true, force: true });
+
   const repo = process.cwd();
   const hasStore = await fs
     .access(path.join(repo, '.gitnexus', 'lbug'))

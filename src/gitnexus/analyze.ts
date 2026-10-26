@@ -51,7 +51,7 @@ import {
 } from '../shell.js';
 import { anchorIndex, type AnchorReport } from './anchor.js';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
-import { hasGitMarker } from './index-meta.js';
+import { hasGitMarker, readIndexMeta } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
 
 /** Where a run got to. `unavailable` is decided before anything is spawned. */
@@ -355,6 +355,37 @@ function clearStaleLock(repoPath: string): void {
 }
 
 /**
+ * Did this run write a newer index, whatever its exit code claimed?
+ *
+ * Measured on `1.6.13-rc.159`: a full rebuild printed `Repository indexed successfully
+ * (72.1s)` and then exited 1, after a tolerant-COPY warning —
+ *
+ *   Copy exception: Unable to find primary key value Trait:types/…d.ts:'…'
+ *   First COPY failure; retrying with IGNORE_ERRORS=true
+ *
+ * — which is the newer release's own fallback for a row whose key it could not derive.
+ * The index was complete and readable; reporting that run as failed sends the operator
+ * to rebuild a graph that is already on disk. Re-running `--force` on the same input
+ * exited 0, so the non-zero exit is not even reproducible: it is a warning channel, not
+ * a verdict.
+ *
+ * The exit code stays on the status either way, so the warning remains visible; only
+ * the state changes — to `done`, because that is what the artifact says.
+ */
+async function indexWrittenSince(repoPath: string, since: number): Promise<boolean> {
+  const meta = await readIndexMeta(repoPath).catch(() => null);
+  if (meta === null) return false;
+  // The manifest's own timestamp, not the file's mtime: an editor or a scanner touching
+  // the file must not turn a real failure into a success.
+  const at = Date.parse(meta.indexedAt);
+  if (!Number.isFinite(at)) return false;
+  // A second of slack: the stamp is written before the process exits.
+  if (at < since - 1000) return false;
+  // The graph store is the artifact; a manifest without it would be a partial write.
+  return existsSync(path.join(repoPath, '.gitnexus', 'lbug'));
+}
+
+/**
  * The **durable** caches, created from the host before the shell starts.
  *
  * A worker running under a restricted host token can be denied `mkdir` on the project's
@@ -644,6 +675,60 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
         const body = tailToLine(combined, tailLimit);
         const exitCode = typeof result.exitCode === 'number' ? result.exitCode : null;
 
+        // The "finished" path, shared by a zero exit and a non-zero one that still wrote
+        // the index (see `indexWrittenSince`). `message` carries the warning, if any.
+        const complete = (message: string | null): void => {
+          const done = finish(key, {
+            state: 'done',
+            attempts: attempt,
+            exitCode,
+            output: body,
+            // No message yet: whether the index can carry a commit baseline depends on
+            // git, which is asked below. The old wording told the operator to re-run in a
+            // terminal, which was true only because nothing here was writing the field.
+            message,
+            anchoring: true,
+          });
+          // Deliberately not awaited: `start()` is synchronous and its caller has already
+          // received a status. The panel polls every second, so it picks the anchored
+          // status up on the next tick instead of waiting for two git calls.
+          void (async () => {
+            // `finish` already cleared `inFlight`, so a second refresh can start while
+            // these two git calls are in flight. If one did, its status is the truth and
+            // this run's finish must not overwrite it with a stale `done`.
+            const stillCurrent = (): boolean => runs.get(key)?.startedAt === done.startedAt;
+            try {
+              const anchor = await anchorIndex(key, { gitnexusHome, skipGit });
+              if (!stillCurrent()) return;
+              // `anchor` carries the baseline detail either way; a warning about the run
+              // itself must not be replaced by it, so the two are joined rather than one
+              // standing in for the other.
+              const anchorNote = anchor.message;
+              rememberRun(key, {
+                ...done,
+                anchor,
+                anchoring: false,
+                message:
+                  message === null
+                    ? anchorNote
+                    : anchorNote === ''
+                      ? message
+                      : `${message} ${anchorNote}`,
+              });
+            } catch (error) {
+              if (!stillCurrent()) return;
+              // The index is correct; only the baseline is unknown. Say that rather than
+              // losing the completed run to an exception.
+              rememberRun(key, {
+                ...done,
+                anchor: null,
+                anchoring: false,
+                message: `刷新完成，但记录提交基线时出错：${String((error as Error)?.message ?? error)}。索引本身可用。`,
+              });
+            }
+          })();
+        };
+
         if (
           attempt === 1 &&
           result.timedOut !== true &&
@@ -717,41 +802,16 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
             message: '沙箱拒绝了这次写入。本插件不会申请扩权 —— 需要在终端里手动执行这条命令。',
           });
         } else if (exitCode === 0) {
-          const done = finish(key, {
-            state: 'done',
-            attempts: attempt,
-            exitCode,
-            output: body,
-            // No message yet: whether the index can carry a commit baseline depends on
-            // git, which is asked below. The old wording told the operator to re-run in a
-            // terminal, which was true only because nothing here was writing the field.
-            message: null,
-            anchoring: true,
-          });
-          // Deliberately not awaited: `start()` is synchronous and its caller has already
-          // received a status. The panel polls every second, so it picks the anchored
-          // status up on the next tick instead of waiting for two git calls.
-          void (async () => {
-            // `finish` already cleared `inFlight`, so a second refresh can start while
-            // these two git calls are in flight. If one did, its status is the truth and
-            // this run's finish must not overwrite it with a stale `done`.
-            const stillCurrent = (): boolean => runs.get(key)?.startedAt === done.startedAt;
-            try {
-              const anchor = await anchorIndex(key, { gitnexusHome, skipGit });
-              if (!stillCurrent()) return;
-              rememberRun(key, { ...done, anchor, anchoring: false, message: anchor.message });
-            } catch (error) {
-              if (!stillCurrent()) return;
-              // The index is correct; only the baseline is unknown. Say that rather than
-              // losing the completed run to an exception.
-              rememberRun(key, {
-                ...done,
-                anchor: null,
-                anchoring: false,
-                message: `刷新完成，但记录提交基线时出错：${String((error as Error)?.message ?? error)}。索引本身可用。`,
-              });
-            }
-          })();
+          complete(null);
+        } else if (await indexWrittenSince(key, started.startedAt)) {
+          // A non-zero exit that still produced an index. On rc that is the tolerant-COPY
+          // warning above; keep the exit code and say what it probably means rather than
+          // presenting the run as a failure the operator has to fix.
+          complete(
+            `gitnexus 以退出码 ${exitCode ?? '未知'} 结束，但索引已经写入。` +
+              '这通常是上游在 COPY 阶段跳过了取不到主键的类型行（输出里有 `IGNORE_ERRORS`）。' +
+              '图可用；如果结果看起来缺边，再刷新一次通常就干净了。',
+          );
         } else {
           finish(key, {
             state: 'failed',

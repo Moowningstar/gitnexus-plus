@@ -79,6 +79,18 @@ export interface GraphToolOptions {
   runner?: Runner | null;
   /** Absolute path to `lib/bin/graph-query-helper.js`. */
   helperPath: string;
+  /**
+   * The plugin's own install directory, when it installed GitNexus itself.
+   *
+   * Load-bearing, not a hint. Without it the helper resolves `gitnexus` from PATH or
+   * from a `createRequire` walk, which can be a *different copy* than the one `analyze`
+   * and the graph projection use. The two copies differ in the native store they link
+   * (`@ladybugdb/core`: storage 42 on 1.6.12, 47 on 1.6.13-rc.*), and a reader older
+   * than the writer cannot open the index at all:
+   * `Trying to read a database file with a different version`. The failure looks like a
+   * corrupt index and is really two engines disagreeing about which one is installed.
+   */
+  managedPrefix?: string;
   /** The operator's `gitnexusHome`, when set. Empty means "resolve it". */
   gitnexusHome?: string;
   timeoutMs?: number;
@@ -169,9 +181,11 @@ export async function runGraphTool(
     const sandboxPolicy = options.sandboxPolicy?.(path.join(absRepo, '.gitnexus'));
 
     // `argv[0]` is `node` on both paths: the shell path quotes the two paths after it,
-    // the argv path resolves `node` to an absolute executable first.
+    // the argv path resolves `node` to an absolute executable first. The managed prefix
+    // travels last, like `graph-helper` and `search-helper`, so the helper resolves the
+    // same GitNexus that wrote the index.
     const run = await runner.run({
-      argv: ['node', options.helperPath, requestFile],
+      argv: ['node', options.helperPath, requestFile, options.managedPrefix ?? ''],
       cwd: absRepo,
       env,
       timeoutMs,

@@ -283,6 +283,80 @@ export async function analyzeTests() {
   await settle();
   check('a non-zero exit is a failure', failed.status('D:/Project/f')?.state === 'failed');
 
+  // 1.6.13-rc.159 measured: a full rebuild prints `Repository indexed successfully` and
+  // then exits 1 behind its tolerant-COPY warning. The artifact is on disk, so the exit
+  // code is a warning channel, not a verdict — reporting `failed` sends the operator to
+  // rebuild a graph that already exists.
+  {
+    const writtenRepo = path.join(import.meta.dirname, '..', '.fixtures', `written-${process.pid}`);
+    await fs.rm(writtenRepo, { recursive: true, force: true });
+    await fs.mkdir(path.join(writtenRepo, '.gitnexus', 'lbug'), { recursive: true });
+    await fs.writeFile(
+      path.join(writtenRepo, '.gitnexus', 'gitnexus.json'),
+      JSON.stringify({ indexedAt: new Date().toISOString(), lastCommit: '' }),
+    );
+    const cliRoot = path.join(writtenRepo, 'cli');
+    const cliPkg = path.join(cliRoot, 'node_modules', 'gitnexus');
+    await fs.mkdir(path.join(cliPkg, 'dist', 'cli'), { recursive: true });
+    await fs.mkdir(path.join(cliPkg, 'dist', 'core', 'ingestion'), { recursive: true });
+    await fs.writeFile(path.join(cliPkg, 'package.json'), JSON.stringify({ name: 'gitnexus', version: '1.6.13-rc.159' }));
+    await fs.writeFile(path.join(cliPkg, 'dist', 'cli', 'index.js'), '');
+    await fs.writeFile(path.join(cliPkg, 'dist', 'core', 'ingestion', 'filesystem-walker.js'), '');
+
+    const warned = createAnalyzeRunner({
+      shell: stubShell({
+        exitCode: 1,
+        stdout: {
+          text:
+            'Copy exception: Unable to find primary key value Trait:types/dsh-tools.d.ts:…\n' +
+            'First COPY failure; retrying with IGNORE_ERRORS=true\n' +
+            'Repository indexed successfully (72.1s)',
+        },
+      }).shell,
+      retryDelayMs: 5,
+      toolchain: { managedPrefix: cliRoot },
+    });
+    warned.start(writtenRepo);
+    await new Promise((r) => setTimeout(r, 120));
+    const status = warned.status(writtenRepo);
+    check(
+      'a non-zero exit that still wrote the index is a completed run',
+      status?.state === 'done',
+      JSON.stringify(status?.state),
+    );
+    check('the exit code is still recorded', status?.exitCode === 1, String(status?.exitCode));
+    check(
+      'the warning explains the exit code instead of hiding it',
+      /退出码 1/.test(status?.message ?? '') && /索引/.test(status?.message ?? ''),
+      status?.message,
+    );
+    warned.dispose();
+
+    // And the same exit code with no newer manifest stays a failure: the rule is the
+    // artifact, not the exit code.
+    const nothingWritten = createAnalyzeRunner({
+      shell: stubShell({ exitCode: 1, stderr: { text: 'boom' } }).shell,
+      retryDelayMs: 5,
+      toolchain: { managedPrefix: cliRoot },
+    });
+    const staleRepo = path.join(import.meta.dirname, '..', '.fixtures', `stale-${process.pid}`);
+    await fs.mkdir(path.join(staleRepo, '.gitnexus', 'lbug'), { recursive: true });
+    await fs.writeFile(
+      path.join(staleRepo, '.gitnexus', 'gitnexus.json'),
+      JSON.stringify({ indexedAt: new Date(Date.now() - 60_000).toISOString(), lastCommit: '' }),
+    );
+    nothingWritten.start(staleRepo);
+    await new Promise((r) => setTimeout(r, 120));
+    check(
+      'an exit 1 that left the old index untouched is still a failure',
+      nothingWritten.status(staleRepo)?.state === 'failed',
+      JSON.stringify(nothingWritten.status(staleRepo)?.state),
+    );
+    nothingWritten.dispose();
+    await fs.rm(writtenRepo, { recursive: true, force: true });
+    await fs.rm(staleRepo, { recursive: true, force: true });
+  }
+
   // A transient Windows file lock on `.gitnexus` is not a policy refusal: the measured
   // failure is `EPERM … open '…\\.gitnexus\\lbug.init.lock'` while a scanner holds the
   // directory, and the ACL for that path was verified healthy. One retry, after clearing
@@ -611,10 +685,10 @@ export async function analyzeTests() {
 
 export async function installTests() {
   section('gitnexus installer (the prerequisite the plugin can satisfy)');
-  const { createInstallRunner, installCommandLine, defaultInstallPrefix } = await import('../../lib/gitnexus/install.js');
+  const { createInstallRunner, installCommandLine, defaultInstallPrefix, GITNEXUS_RANGE } = await import('../../lib/gitnexus/install.js');
 
   // The two properties that make this safe to offer at all.
-  const win = installCommandLine('C:\\Users\\u\\.dsh\\gitnexus-plus\\gitnexus', 'gitnexus@^1.6.12', { platform: 'win32' });
+  const win = installCommandLine('C:\\Users\\u\\.dsh\\gitnexus-plus\\gitnexus', `gitnexus@${GITNEXUS_RANGE}`, { platform: 'win32' });
   check('the install is an npm install', win.includes('npm install'), win);
   check('it installs under a prefix rather than changing directory', win.includes("--prefix '"), win);
   check(
@@ -625,7 +699,25 @@ export async function installTests() {
   // No `--registry`: the operator's npmrc is the only authority on where their packages
   // come from, and hardcoding one breaks exactly the users who need this path.
   check('no registry is hardcoded', !win.includes('--registry'), win);
-  check('the version spec is explicit', win.includes('gitnexus@^1.6.12'), win);
+  check('the version spec is explicit', win.includes(`gitnexus@${GITNEXUS_RANGE}`), win);
+  // A range can contain spaces and `|`, which PowerShell reads as a pipeline chain and a
+  // redirect. Unquoted, the install would split into several commands.
+  check(
+    'the version spec is quoted into one argument',
+    win.includes(`'gitnexus@${GITNEXUS_RANGE}'`),
+    win,
+  );
+  // Two different statements, and they must stay different: what a fresh install asks for
+  // is the stable line, what an existing checkout may be is the wider range. An rc is a
+  // superset that reads every 1.6.12 index, but it is not what the button may install.
+  check('a fresh install asks for the stable line', GITNEXUS_RANGE === '^1.6.12', GITNEXUS_RANGE);
+  const manifest = JSON.parse(await fs.readFile(path.join(process.cwd(), 'package.json'), 'utf8'));
+  const peerRange = manifest.peerDependencies?.gitnexus ?? '';
+  check(
+    'the peer range still accepts the 1.6.13 prereleases',
+    peerRange.includes('>=1.6.13-rc.0') && peerRange.includes('^1.6.12'),
+    peerRange,
+  );
 
   check('the default prefix is plugin-owned, not the global prefix', defaultInstallPrefix({ DSH_HOME: 'C:\\x' }).endsWith('gitnexus'), defaultInstallPrefix({ DSH_HOME: 'C:\\x' }));
 

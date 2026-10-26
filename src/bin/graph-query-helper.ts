@@ -11,7 +11,14 @@
  * one more thing to get wrong; a path plus a JSON body has no quoting rules at all.
  *
  * Invocation:
- *   node graph-query-helper.js <request.json>
+ *   node graph-query-helper.js <request.json> [managedPrefix]
+ *
+ * `managedPrefix` is the plugin's install directory. It is passed in rather than
+ * resolved here for the same reason `graph-helper` and `search-helper` take it: the
+ * plugin may have installed its own GitNexus, and PATH can point at a different one.
+ * Two copies of the package link different native stores (`@ladybugdb/core`), and a
+ * reader older than the writer refuses the index outright — "different storage
+ * version" is what that looks like from here. Absent or empty means "discover it".
  *
  * The request is `{ "repo": "<absolute path>", "tool": "impact"|"context"|"query",
  * "params": { … } }` — `params` is passed through to the upstream tool.
@@ -85,7 +92,7 @@ function describe(error: unknown): string {
 }
 
 async function main(): Promise<void> {
-  const [, , requestArg] = process.argv;
+  const [, , requestArg, managedArg] = process.argv;
   if (typeof requestArg !== 'string' || requestArg === '') {
     emit({ ok: false, code: 'invalid-request', message: 'usage: graph-query-helper <request.json>' });
     return;
@@ -101,8 +108,13 @@ async function main(): Promise<void> {
 
   // The package root is resolved here rather than passed in: the helper runs on the
   // system Node, and `root.js` is the plugin's own discovery, so helper and panel agree.
+  // The managed prefix comes from the caller so that agreement survives the case where
+  // the plugin installed GitNexus itself and PATH points elsewhere.
   const { findGitnexusRoot } = await import('../gitnexus/root.js');
-  const root = findGitnexusRoot({ env: process.env });
+  const root = findGitnexusRoot({
+    env: process.env,
+    ...(typeof managedArg === 'string' && managedArg !== '' ? { managedPrefix: managedArg } : {}),
+  });
   if (root === null) {
     emit({
       ok: false,

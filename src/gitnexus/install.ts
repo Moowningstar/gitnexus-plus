@@ -30,8 +30,19 @@
  * the operator already has. A plugin-owned copy is removable, self-describing, and does
  * not make the plugin responsible for someone else's global state.
  *
- * The cost is real and the confirmation must state it: roughly 500 MB to 1 GB, several
- * minutes, network access, and the package's build scripts running on this machine.
+ * The cost is real and the confirmation must state it: several hundred MB unpacked
+ * (220 MB measured on 1.6.12, 434 MB on 1.6.13-rc.159, which ships prebuilt grammars
+ * and compiler artifacts instead of building them here), several minutes, network
+ * access, and whatever build scripts the package still runs.
+ *
+ * WHICH VERSION
+ * -------------
+ * `GITNEXUS_RANGE` below installs the stable line. `peerDependencies.gitnexus` in
+ * `package.json` is wider on purpose — `^1.6.12 || >=1.6.13-rc.0 <2.0.0` — because npm
+ * excludes a prerelease from a range unless the same `major.minor.patch` is named, so
+ * `^1.6.12` alone would report an already-installed `1.6.13-rc.*` as an unsupported
+ * version even though it reads every 1.6.12 index (storage 42 against its 47). Peer
+ * records what works with what, not what we ship.
  */
 
 import os from 'node:os';
@@ -71,7 +82,14 @@ export interface InstallStatus {
   output: string;
 }
 
-/** The version range this plugin is known to work against. */
+/**
+ * The version range the install button resolves to.
+ *
+ * Deliberately the *stable* line: 1.6.12 is what this plugin is supported against end to
+ * end, and a fresh install should not quietly land on a release candidate. The candidate
+ * line is still *accepted* — see the `peerDependencies` note below — but it is not what
+ * this range asks for.
+ */
 export const GITNEXUS_RANGE = '^1.6.12';
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -141,7 +159,11 @@ export function installCommandLine(
   // workspace-write sandbox rooted at the prefix would deny those writes, so keep the
   // cache inside the granted tree; it is also easier to remove with the install.
   const cacheDir = options.cacheDir ?? path.join(prefix, '.npm-cache');
-  const args = ['install', '--prefix', quoteArg(flavor, prefix), spec, '--no-audit', '--no-fund'];
+  // The spec is quoted, not spliced. A range can contain spaces (`^1.6.12 || >=1.6.13-rc.0
+  // <2.0.0`), and in PowerShell `||`, `<` and `>` are operators — unquoted, the install
+  // command would be a pipeline chain with a redirect in it rather than one npm argument.
+  // Quoting also contains a caller-supplied `spec` (the runner accepts one for testing).
+  const args = ['install', '--prefix', quoteArg(flavor, prefix), quoteArg(flavor, spec), '--no-audit', '--no-fund'];
   return `${envPrefix(flavor, [['npm_config_cache', cacheDir]])}npm ${args.join(' ')}`;
 }
 

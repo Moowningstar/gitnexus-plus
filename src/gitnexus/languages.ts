@@ -5,8 +5,10 @@
  * `gitnexus/dist/_shared/`. Importing that copy is deliberate: the detector that
  * classified the files *in an existing index* is the one that must classify them
  * in the report. Copying the map from source would be wrong — the installed
- * 1.6.12 differs from the checkout (e.g. `.ipynb` resolves to `null` there, not
- * to `python`), and such gaps are invisible until a percentage looks odd.
+ * detector tracks the checkout it shipped from, not the one this plugin was written
+ * against: `.ipynb` resolves to `null` on 1.6.12 and to `python` on 1.6.13, so the
+ * same file lands in a different row depending on which GitNexus built the index.
+ * Such gaps are invisible until a percentage looks odd.
  *
  * Three classes, because "is this file in the graph as code?" has three answers:
  *

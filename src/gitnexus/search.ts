@@ -43,6 +43,7 @@ import { exitDetail, parseHelperOutput, readLineNumber } from '../shell.js';
 import { shellRunner, type Runner } from '../subprocess.js';
 import { findGitnexusRoot } from './root.js';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
+import { isOrphanShadowError, quarantineOrphanShadow } from './lbug-heal.js';
 import { readCapabilities } from './coverage.js';
 import { isFtsLoadFailure, mergeHits, messageOf, searchViaFts } from './search-fts.js';
 import type { FtsSearchOutcome } from './search-fts.js';
@@ -343,23 +344,37 @@ export async function searchSymbols(
     rows: unknown[];
     fts: FtsSearchOutcome;
   }
-  const attempt = async (skipFts: boolean): Promise<Attempt> =>
-    (await adapter.withLbugDb(
-      lbugPath,
-      async (): Promise<Attempt> => {
-        const rows = (await adapter.executePrepared(cypher, {})) as unknown[];
-        // The content pass reuses the connection this call opened, so it has to run
-        // inside the operation rather than after it.
-        const fts: FtsSearchOutcome = skipFts
-          ? { hits: [], ran: false, failure: null }
-          : await searchViaFts(adapter, query, limit);
-        return { rows, fts };
-      },
-      // `skipFts` follows the index's own manifest now, instead of being hardcoded
-      // true: an index built with FTS tables gets asked for a content match, and one
-      // built without them does not pay for a load that cannot help.
-      { readOnly: true, skipFts },
-    )) as Attempt;
+  const attempt = async (skipFts: boolean, healed = false): Promise<Attempt> => {
+    try {
+      return (await adapter.withLbugDb(
+        lbugPath,
+        async (): Promise<Attempt> => {
+          const rows = (await adapter.executePrepared(cypher, {})) as unknown[];
+          // The content pass reuses the connection this call opened, so it has to run
+          // inside the operation rather than after it.
+          const fts: FtsSearchOutcome = skipFts
+            ? { hits: [], ran: false, failure: null }
+            : await searchViaFts(adapter, query, limit);
+          return { rows, fts };
+        },
+        // `skipFts` follows the index's own manifest now, instead of being hardcoded
+        // true: an index built with FTS tables gets asked for a content match, and one
+        // built without them does not pay for a load that cannot help.
+        { readOnly: true, skipFts },
+      )) as Attempt;
+    } catch (cause) {
+      // A checkpoint killed mid-write leaves a `.shadow` sidecar the engine refuses to
+      // open over, and this read-only path is exactly the one that cannot quarantine it
+      // (the engine opens read-only connections with `allowQuarantine: false`). Park it
+      // once and retry, so a kill during `analyze` degrades into one slow search instead
+      // of a panel that stays broken until someone rebuilds the index.
+      const message = messageOf(cause);
+      if (!healed && isOrphanShadowError(message) && quarantineOrphanShadow(lbugPath) !== null) {
+        return await attempt(skipFts, true);
+      }
+      throw cause;
+    }
+  };
 
   let outcome: Attempt;
   let degradedBy: string | null = null;

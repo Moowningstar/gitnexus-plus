@@ -28,6 +28,7 @@
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
+import { isOrphanShadowError, quarantineOrphanShadow } from './lbug-heal.js';
 import { loadAdapter } from './search.js';
 import type { ShellLike } from '../shell.js';
 import { exitDetail, parseHelperOutput, readLineNumber } from '../shell.js';
@@ -217,7 +218,7 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
     throw new GraphError('graph-unavailable', 503, `图数据库适配器不可用：${message}`);
   }
 
-  const runQuery = async (cypher: string): Promise<unknown> => {
+  const runQuery = async (cypher: string, healed = false): Promise<unknown> => {
     try {
       return await adapter.withLbugDb(lbugPath, async () => adapter.executePrepared(cypher, {}), {
         readOnly: true,
@@ -225,6 +226,13 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
       });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
+      // A checkpoint killed mid-write leaves a `.shadow` sidecar that the engine
+      // refuses to open over, and its read-only path may not quarantine it. Park it
+      // once, then let GitNexus' own WAL recovery finish the job. Retried through the
+      // same `runQuery` so the budget and error classification stay in one place.
+      if (!healed && isOrphanShadowError(message) && quarantineOrphanShadow(lbugPath) !== null) {
+        return await runQuery(cypher, true);
+      }
       if (/busy|locked|lock held|another process|timeout/i.test(message)) {
         throw new GraphError('index-busy', 503, '索引正被另一个 GitNexus 操作占用，稍后重试。');
       }
