@@ -125,11 +125,13 @@ npm run check
 npm test
 ```
 
-`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.8 时共 1026 项（引擎 708、插件 80、
+`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.8 时共 1028 项（引擎 710、插件 80、
 客户端 238）。其中 7 项是编解码护栏：它把 GBK 能编码的每个字符映回字节，一旦连续一段又能被
-UTF-8 解码成正常文本就失败 —— 这正是双解码字符串的样子，而字符黑名单总是漏掉它。另有 4 项是
+UTF-8 解码成正常文本就失败 —— 这正是双解码字符串的样子，而字符黑名单总是漏掉它。另有 6 项是
 发布卫生：`.npmrc` 与 `package-lock.json` 必须只指向 `registry.npmjs.org`（0.1.7 的 lockfile 全指
-镜像，一次 `npm install` 就会写回，只有断言能发现）。测试不依赖
+镜像，一次 `npm install` 就会写回，只有断言能发现）；`LICENSE` 必须只有 MIT 正文、后面不能追加
+任何东西（一追加，GitHub 就报 `NOASSERTION`，抄它的目录站全显示 "Other"；所以那段说明搬到了
+`NOTICE.md`）。测试不依赖
 开发机的 `D:` 盘：格式测试会自建一次性仓库，真实仓库冒烟测试默认用本
 checkout（或用 `GITNEXUS_SMOKE_REPO` 指定），没有索引时跳过。`.github/workflows/ci.yml` 在
 Windows 与 Ubuntu、Node 22 与 24 上跑 `npm ci`、`npm run check`、`npm test`。
@@ -261,7 +263,7 @@ $env:GITNEXUS_MEMORY='off'; $env:NODE_OPTIONS='--max-old-space-size=8192'; `
 
 ## 许可证（商用前必读）
 
-本插件是 **MIT**（见 [LICENSE](LICENSE)）。
+本插件是 **MIT**（见 [LICENSE](LICENSE)；授权范围、以及它**不**覆盖什么，写在 [NOTICE.md](NOTICE.md) 里 —— `LICENSE` 里刻意只留标准正文，因为带附录的许可证文件会被识别成 "Other"）。
 
 **GitNexus 是 `PolyForm-Noncommercial-1.0.0`**：允许非商业使用，限制商业使用。`gitnexus` 是本包的 **peer**，不随包安装，插件也不打包或再分发它。但使用本插件的 GitNexus 相关功能（读索引、刷新、安装）时，**你对 GitNexus 的使用受 GitNexus 许可证约束**；商业使用需要 GitNexus 作者的单独授权：
 

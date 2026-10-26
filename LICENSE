@@ -19,20 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This licence covers THIS PROJECT ONLY.
-
-This project is a visualization and automation layer for GitNexus. It does not
-fork GitNexus, does not modify it, and does not redistribute its source. GitNexus
-is a separate project distributed under PolyForm-Noncommercial-1.0.0 and
-remains the property of its author, Abhigyan Patwari — see
-https://github.com/abhigyanpatwari/GitNexus.
-
-GitNexus is declared as a PEER, not a dependency: installing this project does
-not install GitNexus, and nothing under that licence ships inside this package.
-But **your use of GitNexus through this project is subject to GitNexus's
-licence**: noncommercial use is granted, commercial use requires a separate
-grant from its author. A
-summary is in README.md under "License and what this project is not".

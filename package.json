@@ -41,7 +41,8 @@
     "cordis.patch.yml",
     "README.md",
     "README-CN.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE.md"
   ],
   "engines": {
     "node": ">=22",

@@ -1,10 +1,13 @@
 /**
- * Publish hygiene: the two files that decide *where a dependency comes from*.
+ * Publish hygiene: the files that decide what a catalog sees, and where a dependency
+ * comes from.
  *
  * `0.1.7` was published from a lockfile whose every `resolved` pointed at a China mirror.
  * Fixing that once is not a fix — the next `npm install` on a machine with a mirror
- * configured writes the mirror back, and nothing fails. These checks are the only thing
- * that would notice, so they are deliberately dull: read two files, assert one host.
+ * configured writes the mirror back, and nothing fails. The same is true of `LICENSE`:
+ * an appended notice turns the detected licence into "Other" and nothing in the build
+ * notices. These checks are the only thing that would, so they are deliberately dull:
+ * read a file, assert the shape.
  */
 
 import { readFileSync } from 'node:fs';
@@ -61,5 +64,26 @@ export async function hygieneTests() {
     '.npmrc and the lockfile agree',
     registryLine !== null && hosts.size === 1 && hosts.has(PUBLIC),
     `npmrc=${registryLine?.[1] ?? '(none)'} lock=${[...hosts].join(',')}`,
+  );
+
+  // Same shape of trap, one file over: a licence file with an appendix is not the MIT
+  // template any more. GitHub then reports `NOASSERTION`, npm says "Other", and every
+  // catalog that copies them (dsh.so, dshget) shows "Other" next to a MIT package. The
+  // appendix lives in NOTICE.md; if it ever gets pasted back, this line says so.
+  const licence = readFileSync(path.join(ROOT, 'LICENSE'), 'utf8');
+  const paragraphs = licence.split(/\n\s*\n/).map(part => part.trim()).filter(part => part !== '');
+  const last = paragraphs.at(-1) ?? '';
+  check(
+    'LICENSE holds the MIT text and nothing appended to it',
+    licence.includes('MIT License') &&
+      licence.includes('WITHOUT WARRANTY OF ANY KIND') &&
+      last.endsWith('SOFTWARE.') &&
+      !licence.includes('NOTICE.md'),
+    `${paragraphs.length} paragraph(s), ends with "${last.slice(-24)}"`,
+  );
+  check(
+    'NOTICE.md is what carries the scope note',
+    readFileSync(path.join(ROOT, 'NOTICE.md'), 'utf8').includes('PolyForm-Noncommercial-1.0.0'),
+    'NOTICE.md names the upstream licence',
   );
 }

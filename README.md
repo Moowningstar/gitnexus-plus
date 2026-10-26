@@ -215,13 +215,15 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.8 that is 1026
-checks (708 engine, 80 plugin, 238 client). Seven of those are an encoding guard: it maps every
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.8 that is 1028
+checks (710 engine, 80 plugin, 238 client). Seven of those are an encoding guard: it maps every
 GBK-encodable character back to its bytes and fails when a run of them decodes as UTF-8 again,
 which is what a double-decoded string looks like and what a character blocklist keeps missing.
-Four more are publish hygiene: `.npmrc` and `package-lock.json` must point only at
+Six more are publish hygiene: `.npmrc` and `package-lock.json` must point only at
 `registry.npmjs.org` (0.1.7's lockfile pointed entirely at a mirror, and one `npm install` on a
-mirror-configured machine writes it back — only an assertion notices).
+mirror-configured machine writes it back — only an assertion notices), and `LICENSE` must hold
+the MIT text with nothing appended to it (an appendix makes GitHub report `NOASSERTION` and
+every catalog that copies it show "Other"; the scope note therefore lives in `NOTICE.md`).
 The suite no longer depends on a developer's
 `D:` drive: the format test builds a disposable repository, and the real-repository smoke
 test defaults to this checkout (or `GITNEXUS_SMOKE_REPO`) and skips when it has no index.
@@ -397,7 +399,9 @@ typo never costs you the 3D view.
 
 ## License (read before commercial use)
 
-This plugin is **MIT** (see [LICENSE](LICENSE)).
+This plugin is **MIT** (see [LICENSE](LICENSE); the scope of that grant, and the part
+it does not cover, is in [NOTICE.md](NOTICE.md) — `LICENSE` deliberately holds nothing
+but the standard text, because a licence file with an appendix is detected as "Other").
 
 **GitNexus is `PolyForm-Noncommercial-1.0.0`**: noncommercial use is granted, commercial
 use is restricted. `gitnexus` is a **peer**; this package does not install, bundle or
