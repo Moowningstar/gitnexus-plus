@@ -42,3 +42,13 @@ This project is indexed by GitNexus as **gitnexus-plus** (4622 symbols, 10596 re
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Version baseline (this repo's own policy — everything above is generated)
+
+This package **consumes** GitNexus; it is not a fork. Two versions are in play at once, on purpose:
+
+- **Development baseline: `gitnexus@1.6.12`.** `GITNEXUS_RANGE` in `src/gitnexus/install.ts` is `^1.6.12`, the install confirmation quotes that same string, and the fixtures are written against it. Code must not assume anything the candidate line adds.
+- **Daily driver: the newest published build** (currently `1.6.13-rc.159`), installed both globally and in the plugin's managed prefix. Upstream regressions are meant to surface here first, so a green run on this machine means "works on the candidate", never "works for users".
+- **The bridge is `peerDependencies.gitnexus`** = `^1.6.12 || >=1.6.13-rc.0 <2.0.0`. npm hides prereleases from a plain range, so the second arm says *a candidate checkout is accepted*, not *we ship a candidate*.
+- **Storage versions are one-way.** 1.6.12 pins lbug storage 42, 1.6.13 pins 47. The newer reader opens the older store; the older reader refuses a 47 store (`Trying to read a database file with a different version`). This checkout's `.gitnexus` is a **47** store, so pointing it back at 1.6.12 needs `gitnexus analyze --force` (about 90 s) first.
+- **Cross-engine rule.** A change that touches an upstream artifact — walker constants, `LocalBackend`, `stdio-context`, `GITNEXUS_WEB_DIST` resolution — is verified on both engines before it is called done. The measured contract matrix lives in `.docs/audit-v1.6.13-rc.159.md` §7 (local, gitignored).
