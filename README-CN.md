@@ -1,6 +1,6 @@
 # dsh-gitnexus-plus
 
-[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/moowningstar/gitnexus-plus) [![dsh.so install · dsh 0.2.1-rc.2](https://www.dsh.so/badge/install/gitnexus-plus@0.2.1-rc.2.svg)](https://www.dsh.so/artifact/gitnexus-plus/)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/moowningstar/gitnexus-plus) [![dsh.so install · dsh 0.2.1-rc.2](https://www.dsh.so/badge/install/gitnexus-plus@0.2.1-rc.2.svg)](https://www.dsh.so/artifact/gitnexus-plus/) [![Listed on DSH Get](https://img.shields.io/badge/Listed_on-DSH_Get-1677ff?style=flat-square)](https://dshget.com/plugins/Moowningstar/gitnexus-plus)
 
 [English](README.md) · **简体中文**
 
