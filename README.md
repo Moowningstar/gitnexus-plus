@@ -1,5 +1,7 @@
 # dsh-gitnexus-plus
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/moowningstar/gitnexus-plus) [![dsh.so install · dsh 0.2.1-rc.2](https://www.dsh.so/badge/install/gitnexus-plus@0.2.1-rc.2.svg)](https://www.dsh.so/artifact/gitnexus-plus/)
+
 **English** · [简体中文](README-CN.md)
 
 **Current release: [0.1.8](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.8)** ·
