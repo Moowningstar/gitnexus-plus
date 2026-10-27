@@ -383,14 +383,20 @@ export function capabilityRows(capabilities: Record<string, ClientCapability> | 
     const ok = entry.status === 'available';
     const raw = String(entry.skipReason ?? entry.status ?? 'unavailable');
     const reason = CAPABILITY_REASONS[raw] ?? raw;
+    // The consequence matters more than the cause: an unavailable keyword index means
+    // search matches names and paths only, which is exactly what the search box does.
+    // "vector index not built" is not "semantic search off" — the provider still scans
+    // chunks exactly up to a reported ceiling, and that ceiling is the useful number.
+    const scanLimit =
+      typeof entry.exactScanLimit === 'number' && Number.isFinite(entry.exactScanLimit)
+        ? ` · 未建向量索引时语义检索退化为精确扫描（上限 ${compactNumber(entry.exactScanLimit)} 块）`
+        : '';
     return {
       key,
       label: labels[key],
       ok,
       provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',
-      // The consequence matters more than the cause: an unavailable keyword index means
-      // search matches names and paths only, which is exactly what the search box does.
-      note: ok ? '' : key === 'fts' ? `${reason} · 仅按名称/路径匹配` : reason,
+      note: ok ? '' : key === 'fts' ? `${reason} · 仅按名称/路径匹配` : key === 'vectorSearch' ? `${reason}${scanLimit}` : reason,
     };
   });
 }

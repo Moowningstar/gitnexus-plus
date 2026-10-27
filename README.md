@@ -236,8 +236,8 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.9 that is 1161
-checks (804 engine, 81 plugin, 276 client). Seven of those are an encoding guard: it maps every
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.9 that is 1164
+checks (804 engine, 81 plugin, 279 client). Seven of those are an encoding guard: it maps every
 GBK-encodable character back to its bytes and fails when a run of them decodes as UTF-8 again,
 which is what a double-decoded string looks like and what a character blocklist keeps missing.
 Six more are publish hygiene: `.npmrc` and `package-lock.json` must point only at

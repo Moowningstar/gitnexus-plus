@@ -74,6 +74,8 @@ export interface ClientCapability {
   status?: string;
   skipReason?: string;
   provider?: string;
+  /** Chunk ceiling the provider reports for exact (non-indexed) vector scans. */
+  exactScanLimit?: number;
 }
 
 /** Freshness of the index against HEAD. */

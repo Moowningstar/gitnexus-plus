@@ -567,6 +567,25 @@ check(
 );
 check('missing capabilities object does not throw', I.capabilityRows(undefined).length === 3);
 
+// "vector index not built" is not "semantic search off": the provider still scans chunks
+// exactly, up to a reported ceiling, and that ceiling is the number a reader can act on.
+const capsScan = I.capabilityRows({
+  vectorSearch: { provider: 'ladybugdb-vector', status: 'unavailable', exactScanLimit: 10000 },
+});
+check(
+  'an unbuilt vector index states the exact-scan ceiling',
+  capsScan[2].note.includes('精确扫描') && capsScan[2].note.includes('10.0k'),
+  capsScan[2].note,
+);
+const capsNoScan = I.capabilityRows({
+  vectorSearch: { provider: 'ladybugdb-vector', status: 'unavailable' },
+});
+check(
+  'without a ceiling the note does not invent one',
+  capsNoScan[2].note.includes('精确扫描') === false,
+  capsNoScan[2].note,
+);
+
 const quality = I.graphQualitySummary({ counts: { unwrap: 272, map: 163 }, totalSites: 435 });
 check('graphQualitySummary sorts by count', quality.names[0].name === 'unwrap', JSON.stringify(quality));
 check('graphQualitySummary prefers the reported total', quality.total === 435);
