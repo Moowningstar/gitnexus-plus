@@ -91,12 +91,16 @@ const hooks = {
 /**
  * Render an element tree to flat text plus the host tag sequence.
  *
+ * `styles` collects every `style` object met on the way: a layout decision that only
+ * exists in CSS (a sticky header, an opaque background) cannot be asserted from text.
+ *
  * @param {any} node
- * @returns {{text: string, tags: string[]}}
+ * @returns {{text: string, tags: string[], styles: any[]}}
  */
 function renderTree(node) {
   const text = [];
   const tags = [];
+  const styles = [];
 
   const walk = (current) => {
     if (current === null || current === undefined || typeof current === 'boolean') return;
@@ -119,11 +123,12 @@ function renderTree(node) {
       return;
     }
     tags.push(String(current.type));
+    if (current.props?.style !== undefined) styles.push(current.props.style);
     walk(current.props?.children);
   };
 
   walk(node);
-  return { text: text.join(' '), tags };
+  return { text: text.join(' '), tags, styles };
 }
 
 /** Render a component with the hook shim active. */
@@ -440,8 +445,72 @@ check('compactNumber keeps one decimal for thousands', I.compactNumber(26788) ==
 check('compactNumber compacts millions', I.compactNumber(2_366_932) === '2.4M');
 check('compactNumber rejects non-finite', I.compactNumber(Number.NaN) === '—');
 
+// A+C: the flow count only means something next to its budgets, and the version pair
+// only means "problem" when the pair was checked against the supported range.
+const budgetedFlows = I.processCoverageLine({
+  processes: 315,
+  processCoverage: { state: 'budget-limited', note: '流程 315 条——在分支 ≤4、深度 ≤10、入口候选 ≤200 的预算内得到；可能漏报，不代表流程只有这些。' },
+});
+check('a budget-limited flow count is a warning', budgetedFlows.tone === 'warn' && budgetedFlows.text.includes('可能漏报'));
+
+const unseenFlows = I.processCoverageLine({
+  processes: 0,
+  processCoverage: { state: 'unseen', note: '0 条流程——入口点存在（候选上限 200），但本次没有流程进入排名；不代表仓库里没有流程。' },
+});
+check('zero flows with entry candidates is unseen, not empty', unseenFlows.tone === 'warn' && unseenFlows.text.includes('不代表'));
+
+const legacyFlows = I.processCoverageLine({
+  processes: 0,
+  processCoverage: { state: 'unknown', note: '该索引未记录流程检测预算（旧版分析器）；0 条流程的完整性无法判断。' },
+});
+check('a manifest without budgets is unknown, not zero', legacyFlows.text.includes('无法判断'));
+
+const completeFlows = I.processCoverageLine({ processes: 42, processCoverage: { state: 'complete', note: '流程 42 条，分析器未记录任何流程预算上限。' } });
+check('a complete flow count is muted, not a warning', completeFlows.tone === 'muted' && completeFlows.text.includes('42'));
+
+check('a graph without a verdict yields no line', I.processCoverageLine(null) === null && I.processCoverageLine({}) === null);
+
+const crossing = I.compatibilityLine({
+  status: 'mismatch',
+  relation: 'cross-line',
+  message: '',
+  supportedRange: '^1.6.12 || >=1.6.13-rc.0 <2.0.0',
+  indexedBy: '1.6.12',
+  indexedLine: 'stable',
+  installed: '1.6.13-rc.159',
+  installedLine: 'candidate',
+});
+check('cross-line is muted and says 跨线', crossing.tone === 'muted' && crossing.text.includes('跨线'));
+
+const outOfRange = I.compatibilityLine({
+  status: 'mismatch',
+  relation: 'cli-out-of-range',
+  message: '',
+  supportedRange: '^1.6.12 || >=1.6.13-rc.0 <2.0.0',
+  indexedBy: '1.6.12',
+  indexedLine: 'stable',
+  installed: '2.0.0',
+  installedLine: 'other',
+});
+check('an out-of-range pair is a warning naming the version', outOfRange.tone === 'warn' && outOfRange.text.includes('2.0.0'));
+
+check('no compatibility data yields no line', I.compatibilityLine(null) === null);
+
+// UI pass: the reader's clock, and a verdict that fits beside the project name.
+const localInstant = I.localTimeText('2026-10-16T03:31:31.049Z');
+check('timestamps render on the local clock, not raw ISO', /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(localInstant) && !localInstant.includes('T'));
+check('a clock-only read time has no date', I.localTimeText('2026-10-16T03:31:31.049Z', false).length === 5);
+check('an unparseable timestamp survives verbatim', I.localTimeText('not-a-date') === 'not-a-date');
+const behindShort = I.stalenessShort({ state: 'behind', gitAvailable: true, aheadBehind: { ahead: 12 }, dirtyCount: 2 });
+check(
+  'the header verdict is a fragment, not a paragraph',
+  behindShort.state === 'warning' && behindShort.text === '落后 12 个提交 · 2 处未提交',
+  behindShort.text,
+);
+check('a fresh index says so in four characters', I.stalenessShort({ state: 'current', gitAvailable: true }).text === '已是最新');
+
 const current = I.stalenessView({ state: 'current', headCommit: 'a'.repeat(40), indexedCommit: 'a'.repeat(40), gitAvailable: true, dirtyCount: 0 });
-check('current staleness is a done dot', current.state === 'done' && current.text.includes('current'), JSON.stringify(current));
+check('current staleness is a done dot', current.state === 'done' && current.text.includes('已是最新'), JSON.stringify(current));
 
 // Diverged is a SPLIT history: the indexed commit holds work HEAD no longer
 // reaches, so `behind` (the indexed-side count) is non-zero. A linear fast-forward
@@ -458,7 +527,7 @@ const diverged = I.stalenessView({
 check('diverged staleness warns', diverged.state === 'warning', JSON.stringify(diverged));
 check(
   'diverged reports the indexed-side count, not a "behind N" it cannot give',
-  diverged.text.includes('diverged') && diverged.text.includes('索引侧另有 2') && !diverged.text.includes('落后'),
+  diverged.text.includes('已偏离') && diverged.text.includes('索引侧另有 2') && !diverged.text.includes('落后'),
   diverged.text,
 );
 
@@ -519,6 +588,96 @@ check(
   actView.verdicts.find((v) => v.key === 'missing').tone === 'warning',
 );
 check('activityView returns null for no activity', I.activityView(null) === null);
+
+section('git activity: the branch switch lives in the header, the timeline under the row');
+const activityFixture = {
+  window: { sinceDays: 7, truncated: false },
+  totals: { commits: 93, authors: 3, files: 124, indexKnown: true, verdicts: { indexed: 100, excluded: 20, missing: 4 } },
+  branches: [{ name: 'main', current: true }, { name: 'feat/gitnexus-1.6.13-rc' }],
+  currentBranch: 'main',
+  byChanges: [{ path: 'src/index.ts', changes: 7, insertions: 1, deletions: 1, lastChange: '', verdict: 'indexed' }],
+  byRecency: [{ path: 'src/index.ts', changes: 7, insertions: 1, deletions: 1, lastChange: '', verdict: 'indexed' }],
+  timeline: [],
+  timelineTruncated: false,
+};
+const activityTree = render(I.GitActivitySection, { activity: activityFixture, projectPath: null, selectedFile: null });
+check(
+  'the card no longer repeats the branch control the header owns',
+  !activityTree.text.includes('活动分支') && !activityTree.text.includes('回到当前分支'),
+  activityTree.text.slice(0, 160),
+);
+const opened = render(I.GitActivitySection, {
+  activity: activityFixture,
+  projectPath: null,
+  selectedFile: 'src/index.ts',
+});
+const headers = (opened.text.match(/文件时间线/g) ?? []).length;
+check('selecting a file from the header renders exactly one timeline block', headers === 1, String(headers));
+// The header picker names a file without naming a list, so the block lands under the
+// bar next to it. Inline placement belongs to a row click, which is what the baseline
+// fixture below exercises (`renderBlock`) — the harness cannot dispatch a click.
+check(
+  'a header pick renders the timeline at the top, not under a row',
+  opened.text.indexOf('文件时间线') < opened.text.indexOf('改动最频繁'),
+  opened.text.slice(0, 240),
+);
+const failedHistory = render(I.FileHistorySection, {
+  projectPath: '/tmp/repo',
+  filePath: 'src/a.ts',
+  history: null,
+  busy: false,
+  error: 'boom',
+  onClose: () => {},
+  onRetry: () => {},
+});
+check('a failed file read can be retried', failedHistory.text.includes('重试'), failedHistory.text.slice(0, 200));
+
+const excludedRow = { path: 'notes.log', changes: 1, insertions: 0, deletions: 0, lastChange: '', verdict: 'excluded' };
+check('the index filter hides an excluded row in the normal view', I.listedActivityFiles([excludedRow]).length === 0);
+check(
+  'a kept row survives the index filter',
+  I.listedActivityFiles([{ ...excludedRow, verdict: 'indexed' }]).length === 1,
+);
+check('an absent list is empty, not an error', I.listedActivityFiles(undefined).length === 0);
+
+section('git activity: the timeline opens under the row that was clicked');
+check(
+  'a click in the by-changes list hosts the block there',
+  I.activityBlockHost({ path: 'a.ts', list: 'byChanges' }, 'a.ts') === 'byChanges',
+  String(I.activityBlockHost({ path: 'a.ts', list: 'byChanges' }, 'a.ts')),
+);
+check(
+  'the same path in another list is not the host',
+  I.activityBlockHost({ path: 'a.ts', list: 'byChanges' }, 'b.ts') === null,
+);
+check('a selection the header picker made has no host', I.activityBlockHost(null, 'a.ts') === null);
+check(
+  'a stale origin does not claim a new selection',
+  I.activityBlockHost({ path: 'a.ts', list: 'baseline' }, 'c.ts') === null,
+);
+
+const baselineTree = render(I.ActivityBaseline, {
+  baseline: {
+    ref: 'e3a18715',
+    available: true,
+    commits: 3,
+    files: 1,
+    insertions: 2,
+    deletions: 1,
+    changedFiles: [
+      { path: 'src/a.ts', changes: 2, insertions: 2, deletions: 1, lastChange: '', verdict: 'indexed' },
+    ],
+  },
+  onSelect: () => {},
+  selectedPath: 'src/a.ts',
+  renderBlock: (path) => (path === 'src/a.ts' ? 'BLOCK-HERE' : null),
+});
+check(
+  'the baseline list renders the block under its own row',
+  baselineTree.text.includes('BLOCK-HERE'),
+  baselineTree.text.slice(0, 200),
+);
+check('the baseline row marks itself open', baselineTree.text.includes('收起'), baselineTree.text.slice(0, 200));
 
 section('route URL resolution');
 // In Node there is no `document`, so each case is exercised with an explicit fake

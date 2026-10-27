@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { routeUrl } from '../navigation';
-import { Button, HAIRLINE, MUTED, SOFT_BG, Section, StateDot, h, styles } from '../primitives';
+import { Button, HAIRLINE, INLINE_BUTTON, MUTED, SOFT_BG, Section, StateDot, h, styles } from '../primitives';
 import { ClientWebViewStatus } from '../types';
 
 /**
@@ -526,7 +526,7 @@ export function WebViewCard({
         ? h(
             'details',
             null,
-            h('summary', { style: { cursor: 'pointer', ...MUTED } }, '服务输出'),
+            h('summary', { style: { ...INLINE_BUTTON } }, '服务输出'),
             h(
               'pre',
               {

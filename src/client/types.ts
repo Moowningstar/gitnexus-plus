@@ -58,6 +58,15 @@ export interface ClientGraph {
   processes: number;
   embeddings: number;
   edgesPerNode: number;
+  /** Absent on hosts that predate process-budget reporting. */
+  processDetection?: {
+    maxProcesses?: number | null;
+    maxProcessBranching?: number | null;
+    maxProcessTraceDepth?: number | null;
+    maxEntryPointCandidates?: number | null;
+  } | null;
+  /** The verdict + sentence for how complete the flow count is. */
+  processCoverage?: { state?: string; note?: string } | null;
 }
 
 /** One query surface's availability. */
@@ -102,6 +111,12 @@ export interface ClientCompatibility {
   installed?: string | null;
   status?: 'match' | 'mismatch' | 'unknown' | string;
   message?: string;
+  /** The peer range both sides are judged against. */
+  supportedRange?: string;
+  /** `same` / `cross-line` / out-of-range / `unknown`; may be absent on old hosts. */
+  relation?: string;
+  indexedLine?: string;
+  installedLine?: string;
 }
 
 /** One oversized file the size cap dropped. */
@@ -202,6 +217,8 @@ export interface ClientActivity {
   byRecency?: ClientActivityFile[];
   missingFiles?: ClientActivityFile[];
   branches?: Array<{ name: string; current?: boolean; lastCommitDate?: string | null }>;
+  /** The branch the window was read on; absent on hosts older than the branch view. */
+  currentBranch?: string | null;
   histogram?: { bucketDays: number; buckets: HistogramBucketLike[] } | null;
   cross?: { rows?: ClientActivityCrossRow[]; totalFiles?: number; totalChanges?: number };
   baseline?: ClientActivityBaseline | null;

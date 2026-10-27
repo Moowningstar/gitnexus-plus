@@ -36,12 +36,13 @@ import { mountAnalyzeRoute } from './routes/analyze.js';
 import { mountInstallRoute } from './routes/install.js';
 import { mountSearchRoute } from './routes/search.js';
 import { mountFileHistoryRoute } from './routes/file-history.js';
+import { mountCheckoutRoute } from './routes/checkout.js';
 import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
 import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
-import { readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
+import { checkoutBranch, readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { provideGitSeams } from './gitnexus/git-capture.js';
 import { projectViaHelper } from './gitnexus/graph.js';
@@ -475,16 +476,20 @@ export function apply(ctx: Context, config: PluginConfig): void {
    */
   const coverageFor = async (
     repoPath: string,
-    options: { fresh?: boolean; onProgress?: (progress: CoverageProgress) => void } = {},
+    options: { fresh?: boolean; onProgress?: (progress: CoverageProgress) => void; activitySinceDays?: number } = {},
   ): Promise<CoverageReport> => {
-    const key = String(repoPath);
+    // The window is part of the key: a cached 90-day report answering a 7-day request
+    // is how the card came to print "近 7 天" above ninety days of commits.
+    const windowDays = options.activitySinceDays ?? null;
+    const key = `${String(repoPath)}|${windowDays ?? 'default'}`;
     if (options.fresh !== true) {
       const hit = cache.get(key);
       if (hit !== undefined && Date.now() - hit.at < CACHE_TTL_MS) return hit.report;
     }
-    const report = await analyzeCoverage(key, {
+    const report = await analyzeCoverage(String(repoPath), {
       minifiedSampleLimit: config.minifiedSampleLimit,
       toolchain: managedToolchain,
+      activitySinceDays: windowDays ?? undefined,
       onProgress: options.onProgress,
     });
     rememberCoverage(key, report, Date.now());
@@ -991,6 +996,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
         }),
         mountFileHistoryRoute(svcCtx.webServer, {
           read: (repoPath, filePath, options) => readFileActivity(repoPath, filePath, options),
+        }),
+        // The one mutating git route: switching branches is a real checkout, so the
+        // panel never shows another branch's history as a read-only projection.
+        mountCheckoutRoute(svcCtx.webServer, {
+          checkout: (repoPath, branch) => checkoutBranch(repoPath, branch),
         }),
         mountFileDiffRoute(svcCtx.webServer, {
           read: (repoPath, filePath, sha) => readCommitDiff(repoPath, filePath, sha),

@@ -86,6 +86,12 @@ export function formatReport(report: CoverageReport, withLanguages = true): stri
       `  graph: ${g.nodes} nodes, ${g.edges} edges, ${g.communities} communities, ` +
         `${g.processes} processes, ${g.embeddings} embeddings (${g.edgesPerNode.toFixed(2)} edges/node)`,
     );
+    // The count without the budgets reads as "this is all there is". 1.6.13's own
+    // stderr says whole flows are missing when the branching / entry-point budgets
+    // bite, and the manifest is the only place that survives the terminal scroll.
+    if (g.processCoverage !== null && g.processCoverage !== undefined && g.processCoverage.state !== 'complete') {
+      lines.push(`  process budgets: ${g.processCoverage.note}`);
+    }
   }
   const caps = report.capabilities ?? {};
   const capNames = ['graph', 'fts', 'vectorSearch'];

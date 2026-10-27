@@ -51,7 +51,17 @@ const DEFAULTS = Object.freeze({
 async function git(repoPath: string, args: string[], maxBuffer = 32 * 1024 * 1024): Promise<string | null> {
   // A confined host denies the pipe `execFile` needs, so the log is read through the
   // file-descriptor capture; without it this whole panel is empty in the host it ships for.
-  const result = await captureGit(repoPath, args, { timeoutMs: TIMEOUT_MS, maxBytes: maxBuffer });
+  const options = { timeoutMs: TIMEOUT_MS, maxBytes: maxBuffer };
+  let result = await captureGit(repoPath, args, options);
+  // A folder on another drive, copied from another machine, or created by an elevated
+  // process is refused by git's ownership guard even though the human explicitly picked
+  // it in the panel. The guard exists so a *foreign* repository's config and hooks never
+  // run; every command this helper issues is a read (`log`, `diff`, `for-each-ref`), so
+  // retrying with this one directory trusted is the decision `safe.directory` records,
+  // scoped to one spawn and one path instead of the global config.
+  if (!result.ok && result.stderr.includes('dubious ownership')) {
+    result = await captureGit(repoPath, ['-c', `safe.directory=${repoPath}`, ...args], options);
+  }
   // The size cap is a hard failure on purpose: a partial parse would understate activity.
   return result.ok ? result.text : null;
 }
@@ -262,8 +272,86 @@ export interface ReadGitActivityOptions {
   maxBranches?: number;
   indexedPaths?: Iterable<string>;
   scannablePaths?: Iterable<string>;
-  /** The index's recorded commit; when set, also review HEAD against it. */
+  /**
+   * The index's recorded commit; when set, also review HEAD against it.
+   */
   baselineRef?: string | null;
+}
+
+/**
+ * Accept only a ref that cannot be read as an option or a pathspec.
+ *
+ * `git log` takes the ref as a bare positional, so a value starting with `-` would be
+ * parsed as a flag, and one containing whitespace would split into two arguments.
+ * Rejecting those shapes is checked instead of trusted: the name arrives in a query
+ * string, and `--all` is a valid thing for a caller to try.
+ *
+ * @param {unknown} branch
+ * @returns {string | null} the ref to pass, or null for "current branch"
+ */
+export function normalizeActivityRef(branch: unknown): string | null {
+  if (typeof branch !== 'string') return null;
+  const trimmed = branch.trim();
+  if (trimmed === '' || trimmed.length > 255) return null;
+  if (trimmed.startsWith('-') || trimmed.startsWith('/')) return null;
+  if (/[\s\x00-\x1f~^:?*[\]\\]/.test(trimmed)) return null;
+  if (trimmed.includes('..') || trimmed.endsWith('/') || trimmed.endsWith('.')) return null;
+  return trimmed;
+}
+
+/** What a branch switch did, in the one shape the route forwards. */
+export interface CheckoutResult {
+  ok: boolean;
+  /** The ref that was asked for, normalized when possible. */
+  branch: string;
+  /** git's own sentence on failure, or the reason the name was refused. */
+  message: string | null;
+}
+
+/**
+ * Switch the working tree to another branch.
+ *
+ * The one mutating git call in this plugin. It is `git checkout <ref> --`, not
+ * `checkout -f`: a working tree with changes that conflict is exactly when a human
+ * must decide, and force-checking would discard work the panel never saw. git's refusal
+ * is carried back verbatim so the card can say which file blocked it.
+ *
+ * The index is not rebuilt here. `.gitnexus` still describes the branch that was
+ * checked out when it was built, which the report already surfaces as a branch
+ * mismatch — rebuild is a separate, explicit action.
+ *
+ * @param {string} repoPath
+ * @param {string} branch
+ */
+export async function checkoutBranch(repoPath: string, branch: string): Promise<CheckoutResult> {
+  const ref = normalizeActivityRef(branch);
+  if (ref === null) {
+    return { ok: false, branch, message: '分支名不合法（不能以 - 开头，不能含空格、.. 或特殊字符）' };
+  }
+  const args = ['checkout', ref, '--'];
+  let result = await captureGit(repoPath, args, { timeoutMs: 30_000 });
+  // Same ownership-guard case as {@link git}: the user picked this folder and asked for
+  // the switch, so a checkout refused only because the directory's owner differs from
+  // this process retries with the one path trusted. Any other refusal (a dirty tree,
+  // an unknown branch, a rebase in progress) is reported verbatim — git's message is
+  // the half a human can act on.
+  if (!result.ok && result.stderr.includes('dubious ownership')) {
+    result = await captureGit(repoPath, ['-c', `safe.directory=${repoPath}`, ...args], {
+      timeoutMs: 30_000,
+    });
+  }
+  if (result.ok) return { ok: true, branch: ref, message: null };
+  const detail = result.stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .slice(-2)
+    .join(' ');
+  return {
+    ok: false,
+    branch: ref,
+    message: detail !== '' ? detail : `git checkout 失败（${result.failure ?? 'unknown'}）`,
+  };
 }
 
 /**
@@ -390,6 +478,9 @@ export async function readGitActivity(
     'refs/heads',
   ]);
 
+  // One `git log`, one window. The ref is never supplied: the activity card follows the
+  // checked-out branch, and looking at another branch is a `git checkout` (see
+  // {@link checkoutBranch}) rather than a second read path — one history reader, not two.
   const log = await git(repoPath, [
     'log',
     `--since=${since}`,

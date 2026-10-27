@@ -3,6 +3,8 @@ import {
   ClientAnalyzeRun,
   ClientCap,
   ClientCapability,
+  ClientCompatibility,
+  ClientGraph,
   ClientGraphQuality,
   ClientReport,
   ClientStaleness,
@@ -273,7 +275,7 @@ export function stalenessView(staleness: ClientStaleness | undefined): { state: 
 
   switch (staleness.state) {
     case 'current':
-      return { state: 'done', text: `current · HEAD ${head} 与索引一致${dirty}` };
+      return { state: 'done', text: `已是最新 · HEAD ${head} 与索引一致${dirty}` };
     case 'behind': {
       const ahead = staleness.aheadBehind?.ahead ?? 0;
       // Says where the action lives, not that one is available nearby. The previous
@@ -283,7 +285,7 @@ export function stalenessView(staleness: ClientStaleness | undefined): { state: 
       // costs one clause and stops the panel promising something it does not do.
       return {
         state: 'warning',
-        text: `behind · 索引落后 ${ahead} 个提交（${indexed} → ${head}）· 重建见下方「维护命令」${dirty}`,
+        text: `落后 ${ahead} 个提交（${indexed} → ${head}）· 重建见下方「维护命令」${dirty}`,
       };
     }
     case 'diverged': {
@@ -295,13 +297,47 @@ export function stalenessView(staleness: ClientStaleness | undefined): { state: 
       return {
         state: 'warning',
         text:
-          `diverged · HEAD ${head} 已偏离索引提交 ${indexed}（索引侧另有 ${indexedSide} 个提交不在 HEAD 上）` +
+          `已偏离 · HEAD ${head} 不在索引提交 ${indexed} 的历史上（索引侧另有 ${indexedSide} 个提交）` +
           `${dirty}`,
       };
     }
     default:
-      return { state: 'idle', text: `unknown · 无法比对 ${indexed} 与 ${head}${dirty}` };
+      return { state: 'idle', text: `无法比对 ${indexed} 与 ${head}${dirty}` };
   }
+}
+
+/**
+ * The verdict, reduced to what fits beside the project name.
+ *
+ * The full sentence stays in the card body for the states that need explaining; the
+ * header answers the one question a reader opens the panel with — “is this index
+ * describing what I am looking at?” — without pushing the cards down.
+ */
+export function stalenessShort(staleness: ClientStaleness | undefined): { state: DotState; text: string } {
+  if (!staleness || staleness.gitAvailable !== true) return { state: 'idle', text: 'git 不可用' };
+  const dirtyCount = typeof staleness.dirtyCount === 'number' ? staleness.dirtyCount : 0;
+  const dirty = dirtyCount > 0 ? ` · ${dirtyCount} 处未提交` : '';
+  switch (staleness.state) {
+    case 'current':
+      return { state: 'done', text: `已是最新${dirty}` };
+    case 'behind':
+      return { state: 'warning', text: `落后 ${staleness.aheadBehind?.ahead ?? 0} 个提交${dirty}` };
+    case 'diverged':
+      return { state: 'warning', text: `已偏离索引提交${dirty}` };
+    default:
+      return { state: 'idle', text: `无法比对${dirty}` };
+  }
+}
+
+/** An ISO instant on the reader's clock, or the raw string when it does not parse. */
+export function localTimeText(iso: string | null | undefined, withDate = true): string | null {
+  if (typeof iso !== 'string' || iso === '') return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return iso;
+  const date = new Date(ms);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return withDate ? `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${time}` : time;
 }
 
 /**
@@ -395,4 +431,64 @@ export function compactNumber(value: number): string {
   if (value < 1000) return String(value);
   if (value < 1_000_000) return `${(value / 1000).toFixed(1)}k`;
   return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+/** How a caveat line should be toned: a budget caveat is not an error. */
+export type CaveatTone = 'muted' | 'warn';
+
+/**
+ * The sentence under the flow count.
+ *
+ * The panel used to print `流程 315` and nothing else, which reads as "this is the
+ * complete set". The manifest records the budgets the detector ran under; the count
+ * is only honest together with them (or with the fact that no budgets were recorded
+ * at all, which is itself information).
+ */
+export function processCoverageLine(graph: ClientGraph | null | undefined): { text: string; tone: CaveatTone } | null {
+  const coverage = graph?.processCoverage;
+  if (coverage === null || coverage === undefined) return null;
+  const text = typeof coverage.note === 'string' && coverage.note !== '' ? coverage.note : null;
+  if (text === null) return null;
+  return { text, tone: coverage.state === 'budget-limited' || coverage.state === 'unseen' ? 'warn' : 'muted' };
+}
+
+/**
+ * When the index and the CLI differ, say *how*.
+ *
+ * A plain `1.6.12 / 1.6.13-rc.159` is a version pair, not a verdict: it cannot tell
+ * "a supported crossing between the stable and candidate lines" from "one side is
+ * outside the range". The peer range is printed with the verdict so the reader does
+ * not have to open `package.json`.
+ */
+export function compatibilityLine(
+  compatibility: ClientCompatibility | null | undefined,
+): { text: string; tone: CaveatTone } | null {
+  if (compatibility === null || compatibility === undefined) return null;
+  const range = compatibility.supportedRange ?? '^1.6.12 || >=1.6.13-rc.0 <2.0.0';
+  const indexed = compatibility.indexedBy ?? '缺失';
+  const installed = compatibility.installed ?? '缺失';
+  const lineOf = (value: string | undefined): string =>
+    value === 'stable' ? '稳定线' : value === 'candidate' ? '候选线' : value === 'other' ? '范围外' : '未知';
+  switch (compatibility.relation) {
+    case 'same':
+      return { text: `受支持范围 ${range} · 同线：${indexed}（${lineOf(compatibility.indexedLine)}）`, tone: 'muted' };
+    case 'cross-line':
+      return {
+        text:
+          `受支持范围 ${range} · 跨线：索引 ${indexed}（${lineOf(compatibility.indexedLine)}）` +
+          ` → CLI ${installed}（${lineOf(compatibility.installedLine)}）；两者都在范围内`,
+        tone: 'muted',
+      };
+    case 'index-out-of-range':
+    case 'cli-out-of-range':
+    case 'out-of-range':
+      return {
+        text:
+          `受支持范围 ${range} · 不受支持：索引 ${indexed}（${lineOf(compatibility.indexedLine)}）、` +
+          `CLI ${installed}（${lineOf(compatibility.installedLine)}）`,
+        tone: 'warn',
+      };
+    default:
+      return { text: `受支持范围 ${range} · 版本关系未知（索引 ${indexed}，CLI ${installed}）`, tone: 'muted' };
+  }
 }

@@ -8,8 +8,8 @@
  */
 
 import * as React from 'react';
-import { ZERO_ANALYZER, ZERO_CAP, ZERO_TOTALS, capSourceLabel, compactNumber, coverageRatio, fileSize, fixed, healthState, splitWarnings, stalenessView } from '../format';
-import { Button, HAIRLINE, IconRefreshOutlineRegular, MUTED, MetricGrid, PathLabel, Row, Section, StateDot, SOFT_BG, h, styles } from '../primitives';
+import { ZERO_ANALYZER, ZERO_CAP, ZERO_TOTALS, capSourceLabel, compactNumber, coverageRatio, fileSize, fixed, healthState, localTimeText, splitWarnings, stalenessShort, stalenessView } from '../format';
+import { Button, HAIRLINE, BG_BASE, INLINE_BUTTON, IconRefreshOutlineRegular, MUTED, MetricGrid, PathLabel, Row, Section, StateDot, SOFT_BG, h, styles } from '../primitives';
 import { MemoizedOverviewBody } from '../sections/overview';
 import { MemoizedGitActivitySection, activityCollapsed, activityView } from '../sections/activity';
 import { ProvenanceBlock, provenanceCollapsed } from '../sections/capabilities';
@@ -26,6 +26,22 @@ export interface CoverageViewProps {
   report: ClientReport | null;
   maintenance: ClientMaintenance | null | undefined;
   projectPath: string | null;
+  /**
+   * The activity card's window, in days. Controlled by the panel because the coverage
+   * request has to carry it; a view rendered without it keeps its own state.
+   */
+  activityDays?: number;
+  onActivityDaysChange?: (days: number) => void;
+  /**
+   * The branch switch, rendered in the top bar. Switching runs `git checkout` in the
+   * project, so the whole panel reloads against the new working tree afterwards.
+   * Optional so a fixture render needs no host.
+   */
+  branches?: Array<{ name: string; current: boolean }>;
+  currentBranch?: string | null;
+  branchBusy?: boolean;
+  branchError?: string | null;
+  onSwitchBranch?: (branch: string) => void;
   /**
    * The workspace the panel was opened with. It is the search root for the project
    * list; the active project may be one of its descendants.
@@ -151,10 +167,27 @@ export function LoadingBar({ label, percent }: { label: string; percent?: number
   );
 }
 
+/** The first line is the summary; the rest is evidence a reader can expand. */
+function splitError(error: string): { summary: string; detail: string | null } {
+  const lines = error
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  if (lines.length <= 1) return { summary: lines[0] ?? error, detail: null };
+  return { summary: lines[0], detail: lines.slice(1).join('\n') };
+}
+
 export function CoverageView({
   report,
   maintenance,
   projectPath,
+  activityDays,
+  onActivityDaysChange,
+  branches,
+  currentBranch,
+  branchBusy = false,
+  branchError = null,
+  onSwitchBranch,
   workspacePath,
   projects,
   projectsVisited,
@@ -192,7 +225,32 @@ export function CoverageView({
   // `report === null` while the first request is in flight, then again with the
   // report. Declaring this state after the loading/no-index returns changed the
   // hook count between those renders and crashed the sidebar with React #310.
-  const [activityDays, setActivityDays] = React.useState(7);
+  // Controlled by the panel when it can carry the window into the coverage request;
+  // a standalone render (a fixture, a test) keeps its own value.
+  const [ownActivityDays, setOwnActivityDays] = React.useState(7);
+  const activeDays = activityDays ?? ownActivityDays;
+  const chooseActivityDays = (days: number): void => {
+    if (onActivityDaysChange) onActivityDaysChange(days);
+    else setOwnActivityDays(days);
+  };
+  // The branch control is a text field with a datalist, not a select: a select truncates
+  // a long `feat/...` name in a narrow sidebar and cannot be searched. The draft clears
+  // whenever the branch changes, so the field always shows the branch that is checked out.
+  const [branchDraft, setBranchDraft] = React.useState('');
+  React.useEffect(() => {
+    setBranchDraft('');
+  }, [currentBranch]);
+  const branchNames = (branches ?? []).map((branch) => branch.name);
+  const checkedOutBranch = currentBranch ?? branches?.find((branch) => branch.current)?.name ?? '';
+  const submitBranch = (): void => {
+    const wanted = branchDraft.trim();
+    if (wanted === '' || wanted === checkedOutBranch) return;
+    // Only a name the host listed is accepted: the field is for filtering a long list,
+    // not for inventing a ref that `git checkout` would then fail on.
+    if (!branchNames.includes(wanted)) return;
+    onSwitchBranch?.(wanted);
+    setBranchDraft('');
+  };
 
   /**
    * Tell the panel when the graph card is near the viewport.
@@ -276,15 +334,20 @@ export function CoverageView({
                     onSelectProject?.(event.target.value),
                   'aria-label': '切换工作区内的 GitNexus 索引',
                   title: `工作区：${workspacePath ?? ''} · ${projectChoices.length} 个索引`,
+                  // A picker that renders as plain text is invisible as a control. It
+                  // gets the same hairline-and-fill chrome as every other clickable
+                  // thing in the panel; the native arrow is kept, because hiding it
+                  // behind a fake ▾ made the value look like a label.
                   style: {
-                    appearance: 'none',
-                    border: 0,
-                    background: 'transparent',
+                    border: HAIRLINE,
+                    borderRadius: '4px',
+                    background: SOFT_BG,
                     color: 'inherit',
                     font: 'inherit',
+                    fontSize: '11px',
                     minWidth: 0,
                     maxWidth: '100%',
-                    padding: 0,
+                    padding: '1px 4px',
                     cursor: 'pointer',
                   },
                 },
@@ -296,7 +359,6 @@ export function CoverageView({
                   ),
                 ),
               ),
-              h('span', { style: { ...MUTED, fontSize: '10px' } }, '▾'),
             )
           : h(
               'span',
@@ -304,9 +366,53 @@ export function CoverageView({
               h(PathLabel, { path: projectPath }),
             ),
       h('span', { style: { flex: 1 } }),
+      // The branch switch sits in the top bar, next to the project. It is a real
+      // checkout, not a view filter: the host runs `git checkout` and the panel reloads,
+      // so the graph, the activity card and the file lists all describe one working tree.
+      Array.isArray(branches) && branches.length > 1 && onSwitchBranch !== undefined
+        ? h(
+            'span',
+            { style: { display: 'flex', alignItems: 'center', gap: '3px', minWidth: 0 } },
+            h('span', { style: { ...MUTED, fontSize: '10px', whiteSpace: 'nowrap' } }, '分支'),
+            h('input', {
+              list: 'gnx-branch-options',
+              value: branchDraft,
+              placeholder: checkedOutBranch === '' ? '分支' : checkedOutBranch,
+              'aria-label': '切换分支',
+              disabled: branchBusy,
+              title: branchBusy
+                ? '正在切换分支…'
+                : `当前分支：${checkedOutBranch}（输入或从列表选择后回车，会对项目执行 git checkout）`,
+              onChange: (event: React.ChangeEvent<HTMLInputElement>) => setBranchDraft(event.target.value),
+              onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
+                if (event.key === 'Enter') submitBranch();
+                if (event.key === 'Escape') setBranchDraft('');
+              },
+              style: {
+                font: 'inherit',
+                fontSize: '11px',
+                padding: '1px 4px',
+                border: HAIRLINE,
+                borderRadius: '4px',
+                background: SOFT_BG,
+                color: 'inherit',
+                width: '120px',
+                minWidth: 0,
+              },
+            }),
+            h(
+              'datalist',
+              { id: 'gnx-branch-options' },
+              branches.map((branch) =>
+                h('option', { key: branch.name, value: branch.name }, branch.current ? `${branch.name}（当前）` : branch.name),
+              ),
+            ),
+          )
+        : null,
       // The label states the scope. "刷新" alone next to a staleness warning reads as
       // "rebuild the index", which this control has never done and — by design, since
-      // the plugin spawns nothing — cannot do.
+      // the plugin spawns nothing — cannot do. A word beats an icon alone in a narrow
+      // sidebar, where the glyph is the only thing between two selects.
       h(
         Button,
         {
@@ -317,8 +423,34 @@ export function CoverageView({
           'aria-label': '重新读取报告',
         },
         h(IconRefreshOutlineRegular, { size: 14 }),
+        h('span', { style: { marginLeft: '4px' } }, '重读'),
       ),
     ),
+    branchError !== null && branchError !== undefined
+      ? h('div', { style: { ...MUTED, fontSize: '11px', color: 'var(--vscode-errorForeground, #d33)' } }, `切换分支失败：${branchError}`)
+      : null,
+    // The verdict belongs beside the project name: "is this index describing what I am
+    // looking at?" is the question the header exists to answer, and it used to be the
+    // first line of the scrollable body, so it disappeared as soon as the reader scrolled.
+    report !== null && report.staleness !== undefined
+      ? (() => {
+          const short = stalenessShort(report.staleness);
+          const full = stalenessView(report.staleness);
+          return h(
+            'div',
+            {
+              style: { display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0, fontSize: '11px' },
+              title: full.text,
+            },
+            h(StateDot, { state: short.state }),
+            h(
+              'span',
+              { style: { ...MUTED, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              short.text,
+            ),
+          );
+        })()
+      : null,
     showSwitcher ||
     activeDiffers ||
     projectsTruncated === true ||
@@ -349,6 +481,29 @@ export function CoverageView({
       : null,
   );
 
+  // Pinned on purpose: the project, its branch and the refresh control stay in reach
+  // while the cards scroll. Opaque on purpose too — a translucent bar let card text show
+  // through the project path. The root's top padding was moved onto this bar so it can
+  // reach the pane's edge instead of pinning 12px below it with content visible above.
+  const stickyHeader = h(
+    'div',
+    {
+      style: {
+        gridColumn: '1 / -1',
+        position: 'sticky',
+        top: 0,
+        zIndex: 2,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '4px',
+        background: BG_BASE,
+        borderBottom: HAIRLINE,
+        padding: '12px 0 8px',
+      },
+    },
+    header,
+  );
+
   // A report already on screen stays readable while a manual refresh runs; the bar
   // rides above it. Before the first report exists, the bar is the whole body.
   // `percent` is null when the host does not stream (old host, or a cached read):
@@ -357,8 +512,7 @@ export function CoverageView({
     report === null || busy
       ? h(LoadingBar, {
           label: progress?.label ?? (report === null ? '正在读取索引…' : '正在刷新索引…'),
-          percent: progress?.percent ?? null,
-        })
+          percent: progress?.percent ?? null,        })
       : null;
 
   // "I cannot tell which project this is" and "this project has no index" are
@@ -370,7 +524,7 @@ export function CoverageView({
     return h(
       'div',
       { style: styles.root },
-      header,
+      stickyHeader,
       h(
         Section,
         { wide: true, style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
@@ -394,12 +548,39 @@ export function CoverageView({
     return h(
       'div',
       { style: styles.root },
-      header,
+      stickyHeader,
       h(
         Section,
         { wide: true, style: { display: 'flex', gap: '8px', alignItems: 'flex-start' } },
         h(StateDot, { state: 'error' }),
-        h('span', null, error),
+        (() => {
+          const parts = splitError(error);
+          return h(
+            'div',
+            { style: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 } },
+            h('span', null, parts.summary),
+            parts.detail === null
+              ? null
+              : h(
+                  'details',
+                  null,
+                  h('summary', { style: { ...INLINE_BUTTON } }, '技术详情'),
+                  h(
+                    'pre',
+                    {
+                      style: {
+                        margin: '4px 0 0',
+                        whiteSpace: 'pre-wrap',
+                        overflowWrap: 'anywhere',
+                        fontSize: '11px',
+                        ...MUTED,
+                      },
+                    },
+                    parts.detail,
+                  ),
+                ),
+          );
+        })(),
       ),
       maintenanceSection !== null
         ? h(
@@ -417,7 +598,7 @@ export function CoverageView({
   }
 
   if (report === null) {
-    return h('div', { style: styles.root }, header, progressBar);
+    return h('div', { style: styles.root }, stickyHeader, progressBar);
   }
 
   // Defaults are resolved before the no-index branch: a scan-only report still has
@@ -449,7 +630,7 @@ export function CoverageView({
     return h(
       'div',
       { style: styles.root },
-      h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+      stickyHeader,
       progressBar,
       h(ToolchainNotice, {
         toolchain: report.toolchain,
@@ -528,9 +709,9 @@ export function CoverageView({
   return h(
     'div',
     { style: styles.root },
-    // The header and the two status lines span everything: they describe the whole
-    // panel, so giving them a column would make them look like one card's heading.
-    h('div', { style: { gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: '6px' } }, header),
+    // The header spans everything and stays pinned: it describes the whole panel, so
+    // giving it a column would make it look like one card's heading.
+    stickyHeader,
     progressBar,
 
     // Immediately after the header, before any index content. If GitNexus is missing,
@@ -552,18 +733,28 @@ export function CoverageView({
       h(
         'div',
         { style: MUTED },
-        `${report.repo.indexedAt ?? '未知时间'} · ${report.repo.branch ?? 'unknown'}@${String(report.repo.lastCommit ?? '').slice(0, 8)}` +
-          ` · manifest ${report.repo.metaFile ?? '?'} · GitNexus ${analyzer.gitnexusVersion}` +
+        [
+          `索引于 ${localTimeText(report.repo.indexedAt) ?? '未知时间'}`,
+          report.repo.branch === null || report.repo.branch === undefined ? null : `分支 ${report.repo.branch}`,
+          typeof report.repo.lastCommit === 'string' && report.repo.lastCommit !== ''
+            ? report.repo.lastCommit.slice(0, 8)
+            : null,
+          `manifest ${report.repo.metaFile ?? '?'}`,
+          `GitNexus ${analyzer.gitnexusVersion}`,
           // The read time is the only thing on screen a refresh can change when the
           // repository has not moved, so without it the control reads as broken.
-          (readAt === null ? '' : ` · 读取于 ${String(readAt).slice(11, 19)}Z`),
+          readAt === null ? null : `读取于 ${localTimeText(readAt, false)}`,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(' · '),
       ),
-      // Freshness against HEAD. The line above states the *indexed* commit, which
-      // reads as current unless this one says otherwise.
+      // The short verdict is in the header; the body explains it only when there is
+      // something to do. A "current" report does not need a second sentence.
       report.staleness === undefined
         ? null
         : (() => {
             const s = stalenessView(report.staleness);
+            if (stalenessShort(report.staleness).state === 'done') return null;
             return h(
               'div',
               { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
@@ -787,7 +978,7 @@ export function CoverageView({
             // The header names the window the reader is actually looking at (the
             // timeline's 7-day default), not the 90-day fetch window — the two used to
             // disagree, so the card read "近 90 天" above a list of seven days.
-            title: `Git 活动 · 近 ${activityDays} 天`,
+            title: `Git 活动 · 近 ${activeDays} 天`,
             meta: h(
               'span',
               { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', ...MUTED, fontSize: '11px' } },
@@ -797,10 +988,10 @@ export function CoverageView({
               h(
                 'select',
                 {
-                  value: String(activityDays),
+                  value: String(activeDays),
                   'aria-label': 'Git 活动窗口',
                   onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
-                    setActivityDays(Number(event.target.value)),
+                    chooseActivityDays(Number(event.target.value)),
                   style: {
                     font: 'inherit',
                     fontSize: '11px',
@@ -819,14 +1010,16 @@ export function CoverageView({
               }),
               activityCollapsed(report.activity),
             ),
-            // Timeline + cross-tab + baseline is the longest card in the panel.
-            scroll: 560,
+            // No inner scroller: three lists plus a fold already bound the height, and a
+            // card that scrolled inside the page's own scroller was the panel's worst
+            // "where am I" moment — two scrollbars, one of them off-screen.
+            scroll: false,
           },
           h(MemoizedGitActivitySection, {
             activity: report.activity,
             projectPath,
-            days: activityDays,
-            onDaysChange: setActivityDays,
+            days: activeDays,
+            onDaysChange: chooseActivityDays,
           }),
         ),
 

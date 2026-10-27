@@ -1,4 +1,4 @@
-import { capabilityRows, compactNumber, graphQualitySummary } from '../format';
+import { capabilityRows, compactNumber, compatibilityLine, graphQualitySummary } from '../format';
 import { MUTED, MetricGrid, StateDot, Tag, h } from '../primitives';
 import { ClientCapability, ClientCompatibility, ClientGraphQuality, ClientProvenance } from '../types';
 
@@ -34,6 +34,7 @@ export function CapabilityStrip({ capabilities }: { capabilities: Record<string,
  */
 export function ProvenanceBlock({ quality, provenance, compatibility }: { quality: ClientGraphQuality | null; provenance: ClientProvenance | null; compatibility?: ClientCompatibility | null }) {
   const summary = graphQualitySummary(quality);
+  const versionLine = compatibilityLine(compatibility);
 
   return h(
     'div',
@@ -80,6 +81,20 @@ export function ProvenanceBlock({ quality, provenance, compatibility }: { qualit
               },
             ],
           }),
+          versionLine === null
+            ? null
+            : h(
+                'div',
+                {
+                  style: {
+                    ...MUTED,
+                    marginTop: '4px',
+                    fontSize: '10px',
+                    ...(versionLine.tone === 'warn' ? { color: '#d9a441' } : null),
+                  },
+                },
+                versionLine.text,
+              ),
         ),
   );
 }

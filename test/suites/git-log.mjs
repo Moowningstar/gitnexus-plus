@@ -108,4 +108,21 @@ export async function gitLogTests() {
     'an empty log yields empty tallies',
     empty.commitCount === 0 && empty.files.size === 0 && empty.stamps.length === 0 && empty.capped === false,
   );
+
+  section('a branch reaches git log only as a plain ref');
+  const { normalizeActivityRef } = await import('../../lib/gitnexus/git-activity.js');
+  check(
+    'a branch name passes through',
+    normalizeActivityRef('feat/gitnexus-1.6.13-rc') === 'feat/gitnexus-1.6.13-rc',
+    String(normalizeActivityRef('feat/gitnexus-1.6.13-rc')),
+  );
+  check('surrounding whitespace is trimmed', normalizeActivityRef('  main  ') === 'main');
+  check(
+    'empty means "the current branch"',
+    normalizeActivityRef('') === null && normalizeActivityRef('   ') === null && normalizeActivityRef(null) === null,
+  );
+  check('a flag-shaped value is refused', normalizeActivityRef('--all') === null);
+  check('a ref containing whitespace is refused', normalizeActivityRef('a b') === null);
+  check('a revision range is refused', normalizeActivityRef('main..other') === null);
+  check('a non-string is refused', normalizeActivityRef(7) === null && normalizeActivityRef(undefined) === null);
 }

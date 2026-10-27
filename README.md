@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.8](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.8)** ·
+**Current release: [0.1.9](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.9)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -71,14 +71,32 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Index freshness** — indexed commit vs `HEAD`, classified `current` / `behind` /
   `diverged` / `unknown`, plus the uncommitted-change count.
 - **Version consistency** — compares the GitNexus CLI that wrote the index
-  (`runnerIdentity.cliVersion`) with the CLI installed now. A mismatch is reported as a
-  warning, not silently rendered as if the index and the query path agreed.
+  (`runnerIdentity.cliVersion`) with the CLI installed now. A mismatch inside the
+  supported range (`^1.6.12 || >=1.6.13-rc.0 <2.0.0`) is reported as a **cross-line**
+  note — the index was built on the stable line and the CLI is a candidate, or the
+  reverse — not as an error; only a pair with one side outside the range is a warning.
+  The card names all three facts: the range, the line that wrote the index, and the
+  line installed now.
+- **Process budgets** — every graph card states what the process detector was allowed
+  to do. The index's manifest records `processDetection` (max processes, branching,
+  trace depth, entry-point candidates); the panel tells three cases apart: the flow
+  count was cut by a budget, the scan produced no flows although entry points exist
+  (the count is not zero because the repository has none), and no budget is recorded
+  at all (an index from an older analyzer — the completeness is unknown, not "none").
+
 - **Graph composition** — nodes, edges, communities, processes, embeddings, edges per node.
 - **Git activity × index** — recent commits, authors, branches and most-changed files,
   each file marked **indexed**, **excluded by design**, or **missing from the index**.
   Includes an activity × index cross-tab, a baseline review against the indexed commit
   (or the activity-window start when the index recorded none), a 7/14/30-day commit
-  timeline, and a per-file timeline when a file row is clicked.
+  timeline, and a per-file commit timeline that opens under the row that was clicked
+  (whichever of the three lists it came from). One list renders at a time — the segmented
+  control switches between baseline, most-changed, most-recent and missing, with the
+  cross-tab and authors behind one disclosure. A commit expands into a framed patch with
+  old/new line numbers, background-tinted added/removed rows and a copy button. The
+  header's branch select runs a real `git checkout` and reloads the report against the
+  new branch; it never stashes and never guesses, and git's own refusal is shown as-is.
+
 - **Language distribution** — bytes split into languages GitNexus can parse, formats it
   only recognizes, and everything else. Without GitNexus, a built-in extension map keeps
   the breakdown useful and marks it `builtin`, never "parsed".
@@ -184,6 +202,9 @@ Inside DSH:
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's
   bounded commit timeline
+- route `POST /api/gitnexus/checkout?repo=<project>` with body `{"branch": "<ref>"}` — the
+  top bar's branch switch: runs `git checkout` in the project (the one route that writes
+  to the working tree), then the panel reloads the report
 - route `GET /api/gitnexus/delta?repo=<project>` — Tier 0 comparison against the index
 - route `GET /api/gitnexus/graph?repo=<project>&view=communities|community&id=<community>`
   — a bounded graph projection
@@ -215,8 +236,8 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.8 that is 1028
-checks (710 engine, 80 plugin, 238 client). Seven of those are an encoding guard: it maps every
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.9 that is 1161
+checks (804 engine, 81 plugin, 276 client). Seven of those are an encoding guard: it maps every
 GBK-encodable character back to its bytes and fails when a run of them decodes as UTF-8 again,
 which is what a double-decoded string looks like and what a character blocklist keeps missing.
 Six more are publish hygiene: `.npmrc` and `package-lock.json` must point only at
@@ -323,6 +344,7 @@ GitNexus path owns the rest.
 | The AI settings inside the 3D view are still empty | The **AI 设置** line on the card names the reason: no `GITNEXUS_PLUS_AI_*` variables set (export them and restart DSH or press **重新启动**), a partial set (`缺少 GITNEXUS_PLUS_AI_MODEL` / `缺少 GITNEXUS_PLUS_AI_API_KEY`), or `外部启动的服务` — that server was not started by the plugin, so its page cannot be seeded and the dialog has to be filled once by hand. The variables are read from the DSH process environment, so a restart is required after changing them. | This plugin's generated page (`GITNEXUS_WEB_DIST`); the SPA keeps its own settings in `sessionStorage`. |
 | Clicking a search hit does not open a file | The click uses `ctx.sidebarRight.openResourceIn`; a profile without that service falls back to copying `path:line`. Restart DSH; if it persists, use the Copy button. | This panel/DSH boundary; no upstream GitNexus path. |
 | The file timeline fails with 404/401 | The client hot-reloaded before the host did, so `/api/gitnexus/file-history` is not mounted yet. Restart DSH (not just refresh the page). | This plugin's host route; no upstream GitNexus path. |
+| 切换分支失败 / 分支下拉不出现 | 下拉只在面板拿到报告、且项目有多个本地分支时出现。失败信息是 git 的原话：工作树有未提交改动（`Your local changes … would be overwritten`）、rebase 进行中、或分支名写错都会拒绝切换；面板不会 stash、不会丢弃改动。切换成功后索引仍是旧分支构建的那份，报告会以「索引不是当前分支构建的」标出，重建是另一个显式动作。`dubious ownership` 时面板会对该路径重试一次（等价于给这一个目录加 `safe.directory`，不写全局配置）。 | This plugin's host route; no upstream GitNexus path. |
 | Analyze runs out of memory | Keep the panel's `NODE_OPTIONS` / `GITNEXUS_MEMORY` settings, or raise the heap manually; the index may need a full rebuild. | [`gitnexus/README.md` — Analysis runs out of memory](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analysis-runs-out-of-memory), [`RUNBOOK.md` — Memory / analyze crashes](https://github.com/abhigyanpatwari/GitNexus/blob/main/RUNBOOK.md#memory--analyze-crashes) |
 | A large file is missing from the graph | This is what the panel reports: size/share, generated/minified heuristics, binary detection. Raising the cap is an upstream analyze option; this plugin only reports the skip. | [`gitnexus/README.md` — Large files are being skipped](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#large-files-are-being-skipped) |
 | Native install fails (`@ladybugdb/core`, `tree-sitter-*`) | The plugin runs `npm install --prefix …`; it needs a C++ toolchain and a reachable registry. Run the manual command from **Getting GitNexus** to see the compiler error. | [`gitnexus/README.md` — Installation fails with native module errors](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#installation-fails-with-native-module-errors) |

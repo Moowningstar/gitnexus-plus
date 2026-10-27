@@ -41,14 +41,18 @@
 import {
   capabilityRows,
   compactNumber,
+  compatibilityLine,
   coverageRatio,
   fileSize,
   formatBytes,
   graphQualitySummary,
   healthState,
+  localTimeText,
   percent,
+  processCoverageLine,
   splitWarnings,
   stackSegments,
+  stalenessShort,
   stalenessView,
   summaryLine,
 } from './format';
@@ -68,7 +72,7 @@ import {
   Section,
   classifyFileType,
 } from './primitives';
-import { GitActivitySection, activityView } from './sections/activity';
+import { GitActivitySection, ActivityBaseline, activityView, listedActivityFiles, activityBlockHost } from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
 import {
@@ -83,7 +87,7 @@ import {
     webViewSummary,
 } from './sections/webview';
 import { CapabilityStrip, ProvenanceBlock } from './sections/capabilities';
-import { FileHistorySection } from './sections/file-history';
+import { DiffView, FileHistorySection } from './sections/file-history';
 import { LanguageBar, LanguageSection } from './sections/languages';
 import { LargeFileList } from './sections/large-files';
 import { MaintenanceSection } from './sections/maintenance';
@@ -253,7 +257,11 @@ export const __internals = {
     stalenessView,
     capabilityRows,
     graphQualitySummary,
+    processCoverageLine,
+    compatibilityLine,
     activityView,
+    activityBlockHost,
+    listedActivityFiles,
     highlightLine,
     languageOf,
     communityColors,
@@ -267,6 +275,8 @@ export const __internals = {
     overlaySizeLabel,
     parseOverlaySize,
     compactNumber,
+    localTimeText,
+    stalenessShort,
     useProjectPath,
     contextDiagnostic,
     chooseProject,
@@ -280,7 +290,9 @@ export const __internals = {
     MetricGrid,
     Histogram,
     GitActivitySection,
+    ActivityBaseline,
     FileHistorySection,
+    DiffView,
     ProvenanceBlock,
     MaintenanceSection,
     WorkspaceOverview,

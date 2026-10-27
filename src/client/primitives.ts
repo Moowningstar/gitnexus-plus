@@ -42,6 +42,9 @@ export const LABEL_SECONDARY = 'var(--dsw-alias-label-secondary, currentColor)';
 export const LABEL_PRIMARY = 'var(--dsw-alias-label-primary, inherit)';
 export const BG_LAYER_1 = 'var(--dsw-alias-bg-layer-1, transparent)';
 export const BG_LAYER_2 = 'var(--dsw-alias-bg-layer-2, color-mix(in srgb, currentColor 6%, transparent))';
+// The pane's own base colour, not a layer: used where something must be opaque because
+// other content scrolls underneath it (the sticky project header).
+export const BG_BASE = 'var(--dsw-alias-bg-base, #11111b)';
 export const BORDER_L2 = 'var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 16%, transparent))';
 
 export const MUTED = { color: LABEL_SECONDARY };
@@ -50,6 +53,31 @@ export const SOFT_BG = BG_LAYER_2;
 
 /** Tabular figures, so a column of counts lines up instead of drifting. */
 export const NUMERIC = { fontVariantNumeric: 'tabular-nums' as const };
+
+/**
+ * Chrome for a clickable piece of text.
+ *
+ * A row or a word that toggles something but is dressed as prose has no affordance: the
+ * reader has to hover to learn it is interactive, and on a card full of tags nothing
+ * signals which items act. Everything clickable gets the same quiet button: hairline,
+ * tinted fill, same radius as the cards, and a pointer cursor. It is deliberately
+ * lighter than `Button` — this is for the action at the end of a row, not a command.
+ */
+export const INLINE_BUTTON: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '4px',
+  padding: '0 6px',
+  border: HAIRLINE,
+  borderRadius: '4px',
+  background: SOFT_BG,
+  cursor: 'pointer',
+  userSelect: 'none',
+  fontSize: '10px',
+  lineHeight: '16px',
+  color: 'inherit',
+  flexShrink: 0,
+};
 
 /**
  * Layout.
@@ -79,7 +107,10 @@ export const styles = {
     gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
     alignItems: 'start',
     gap: '8px',
-    padding: '12px',
+    // No top padding: the first item is the sticky project header, which carries its own
+    // top padding. With it here, the header would pin 12px below the scrollport and cards
+    // would be visible in the gap above it.
+    padding: '0 12px 12px',
     fontSize: '13px',
     lineHeight: 1.5,
     width: '100%',

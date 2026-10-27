@@ -167,7 +167,7 @@ export function renderSuite(ctx) {
   // declared after the loading/no-index early returns changes the hook count between
   // those two renders and crashes the whole sidebar.
   const panelSource = readFileSync(path.join(root, 'src/client/views/coverage-view.ts'), 'utf8');
-  const activityHookAt = panelSource.indexOf('const [activityDays');
+  const activityHookAt = panelSource.indexOf('const [ownActivityDays');
   const reportGuardAt = panelSource.indexOf('if (report === null)');
   check(
     'CoverageView declares its activity state before the loading return',
@@ -328,7 +328,15 @@ export function renderSuite(ctx) {
     view.text.includes('扩展无法加载') && view.text.includes('仅按名称/路径匹配'),
     view.text.slice(0, 400),
   );
-  check('renders staleness as diverged', view.text.includes('diverged'), view.text.slice(0, 400));
+  check('renders staleness as diverged', view.text.includes('已偏离'), view.text.slice(0, 400));
+  // The short verdict is in the pinned header; the full sentence stays in the body for
+  // the states that need explaining. Pinning it is the point: it used to scroll away.
+  check(
+    'the staleness verdict sits in the pinned header, above the cards',
+    view.text.indexOf('已偏离索引提交') !== -1 &&
+      view.text.indexOf('已偏离索引提交') < view.text.indexOf('索引概览'),
+    view.text.slice(0, 400),
+  );
   check(
     'staleness does not fake a "behind N" for a diverged head',
     // Scoped to a count: the maintenance copy legitimately says "索引落后或…" without
@@ -361,10 +369,29 @@ export function renderSuite(ctx) {
     view.text.includes('索引基线审查') && view.text.includes('abc12345') && view.text.includes('4 个提交'),
     view.text.slice(-800),
   );
+  // Four lists over one window were the density problem: one renders, and the control
+  // names the others with their counts so nothing is hidden without a trace.
+  check(
+    'the activity card renders one file list at a time',
+    view.text.includes('基线以来 3') &&
+      view.text.includes('改动最频繁 3') &&
+      view.text.includes('最近改动 1') &&
+      // A path only the by-changes list carries must stay unrendered while the baseline
+      // view is selected — otherwise "one list" is a claim about styling, not about DOM.
+      !view.text.includes('src/hot.ts'),
+    view.text.slice(-1200),
+  );
+  check(
+    'the cross table sits behind one disclosure',
+    view.tags.includes('details') && view.text.includes('更多统计 · 活动 × 索引交叉对比、提交者'),
+    view.text.slice(-500),
+  );
   check(
     'the commit timeline starts folded and keeps its count visible',
     view.text.includes('提交时间线 · 近 7 天') &&
-      view.text.includes('展开') &&
+      // The fold is a real button now: the caret is the collapsed marker, and the label
+      // carries the count instead of a second "展开" word.
+      view.text.includes('▸') &&
       // The rows behind the fold must not be rendered until it is opened.
       !view.text.includes('Add fresh module'),
     view.text.slice(-800),
@@ -410,6 +437,59 @@ export function renderSuite(ctx) {
     fileTimeline.text.slice(0, 500),
   );
 
+  // A patch is a code block with history: the frame, the language tag and the copy
+  // action come from how the chat renders fences; the gutters and hunk bars are what a
+  // diff needs on top of that.
+  const patchView = render(I.DiffView, {
+    path: 'notes.md',
+    busy: false,
+    error: null,
+    diff: {
+      available: true,
+      truncated: false,
+      patch:
+        '@@ -10,2 +10,3 @@ function main() {\n' +
+        '-const a = 1;\n' +
+        '+const a = 2;\n' +
+        '+const b = 3;\n' +
+        ' const c = 4;',
+    },
+  });
+  check(
+    'the diff header names the language and the change counts',
+    patchView.text.includes('改动 · 文本') && patchView.text.includes('+2') && patchView.text.includes('−1'),
+    patchView.text.slice(0, 300),
+  );
+  check(
+    'the diff rows carry both line-number gutters',
+    patchView.styles.some((style) => String(style.gridTemplateColumns || '').startsWith('3.2em 3.2em')),
+    JSON.stringify(patchView.styles.slice(0, 3)),
+  );
+  // Every clickable piece of chrome has to be recognisable without hovering: the whole
+  // point of the shared inline-button style is that border + fill + pointer travel
+  // together, so a test can check the combination instead of individual words.
+  check(
+    'the diff copy control is dressed as a button',
+    patchView.styles.some(
+      (style) =>
+        style.cursor === 'pointer' &&
+        typeof style.border === 'string' &&
+        style.border.includes('solid') &&
+        typeof style.background === 'string',
+    ),
+    JSON.stringify(patchView.styles.slice(0, 6)),
+  );
+  check(
+    'the diff marks added lines by background, not only by text colour',
+    patchView.styles.some((style) => String(style.background || '').startsWith('rgba(63, 185, 80')),
+    JSON.stringify(patchView.styles.filter((style) => style.background)),
+  );
+  check(
+    'the diff body keeps the patch lines',
+    patchView.text.includes('const b = 3;') && patchView.text.includes('@@ -10,2 +10,3 @@'),
+    patchView.text.slice(0, 400),
+  );
+
   // The diff body is tokenized by the plugin's own scanner: no highlighter is exposed to
   // plugins, and bundling one is not possible in this single-artifact build.
   section('highlight: diff line tokenizer');
@@ -452,7 +532,33 @@ export function renderSuite(ctx) {
   check('renders a missing-file tag', view.text.includes('缺失'));
   check('renders the author list', view.text.includes('Ada') && view.text.includes('dependabot[bot]'));
   check('marks a bot author', view.text.includes('bot'));
-  check('renders branches with the current marker', view.text.includes('feature/x') && view.text.includes('当前'));
+  check(
+    'the activity card leaves the branch list to the header',
+    !view.text.includes('分支 ·'),
+    view.text.slice(0, 200),
+  );
+  const sticky = view.styles.find((style) => style?.position === 'sticky');
+  check('the project header is pinned', sticky !== undefined && sticky.top === 0, JSON.stringify(sticky));
+  check(
+    'the pinned header is opaque, so cards cannot show through it',
+    typeof sticky?.background === 'string' && sticky.background !== 'transparent' && !sticky.background.includes(', transparent)'),
+    String(sticky?.background),
+  );
+  const branchView = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    branches: [
+      { name: 'main', current: true },
+      { name: 'feature/x' },
+    ],
+    currentBranch: 'main',
+    onSwitchBranch: () => {},
+  });
+  check(
+    'the header offers the branch switch with the current marker',
+    branchView.text.includes('main（当前）') || branchView.text.includes('切换分支'),
+    branchView.text.slice(0, 240),
+  );
   check('renders the provenance block', view.text.includes('解析质量与溯源'));
   check('provenance surfaces the untyped receiver total', view.text.includes('435'), view.text.slice(-400));
 

@@ -399,15 +399,21 @@ section('the host process seams are used when a profile mounts them');
 
 section('apply() mounts the routes through optional injection');
 check('webServer was injected', stub.injected.includes('webServer'), JSON.stringify(stub.injected));
-// Ten routes now: list the workspace's indexes, read the working tree, keyword-search
-// the graph, read one file's commit history, read one commit's patch for a file, check
-// whether a refresh would change anything, read a bounded graph projection, refresh an
-// index, install GitNexus when there is none, and start/stop the GitNexus web server.
+// Eleven routes now: list the workspace's indexes, read the working tree, keyword-search
+// the graph, read one file's commit history, read one commit's patch for a file, switch
+// the project's branch, check whether a refresh would change anything, read a bounded
+// graph projection, refresh an index, install GitNexus when there is none, and start/stop
+// the GitNexus web server.
 // Separate modules because their privileges differ sharply — listing/reading/searching/
 // history/patch/delta/graph are unprivileged, refreshing writes inside the workspace,
-// installing runs the dependency tree's build scripts, and the web view owns a child
-// process that outlives the request.
-check('exactly ten routes mounted', stub.routes.length === 10, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+// installing runs the dependency tree's build scripts, the branch switch writes to the
+// project's working tree, and the web view owns a child process that outlives the request.
+check('exactly eleven routes mounted', stub.routes.length === 11, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+check(
+  'the branch switch is mounted',
+  stub.routes.some((r) => r.path === '/api/gitnexus/checkout'),
+  JSON.stringify(stub.routes.map((r) => r.path)),
+);
 check(
   'the projects route is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/projects'),

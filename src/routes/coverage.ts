@@ -53,7 +53,12 @@ export interface CoverageRouteDeps {
    */
   get: (
     repoPath: string,
-    options?: { fresh?: boolean; onProgress?: (progress: CoverageProgress) => void },
+    options?: {
+      fresh?: boolean;
+      onProgress?: (progress: CoverageProgress) => void;
+      /** How far back the activity window reaches; absent means the engine's default. */
+      activitySinceDays?: number;
+    },
   ) => Promise<CoverageReport>;
   maintenance?: (repoPath: string) => MaintenanceInfo;
 }
@@ -96,6 +101,14 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
     // `refresh=1` comes from the panel's manual refresh control. A background poll
     // omits it and gets the cached copy, which is what the TTL is for.
     const fresh = url.searchParams.get('refresh') === '1';
+    // `days` is the activity window the card's own selector shows. Without it the card
+    // labelled a 90-day report "近 7 天" and a file whose one change sat on day 12
+    // opened a "0 commits" timeline.
+    const rawDays = url.searchParams.get('days');
+    const parsedDays = rawDays === null ? Number.NaN : Number.parseInt(rawDays, 10);
+    const activitySinceDays = Number.isFinite(parsedDays)
+      ? Math.max(1, Math.min(90, parsedDays))
+      : undefined;
     // The maintenance commands ride along with the report because they are
     // config-derived and only meaningful next to the index they would rebuild.
     const maintenance = typeof deps.maintenance === 'function' ? deps.maintenance(absRepo) : null;
@@ -122,6 +135,7 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
       try {
         const report = await deps.get(absRepo, {
           fresh,
+          activitySinceDays,
           onProgress: (progress) => write({ type: 'progress', ...progress }),
         });
         // The engine ends at 99%; the final boundary is the route having the whole
@@ -150,7 +164,7 @@ export function mountCoverageRoute(webServer: WebServerService, deps: CoverageRo
       return;
     }
 
-    const report = await deps.get(absRepo, { fresh });
+    const report = await deps.get(absRepo, { fresh, activitySinceDays });
     // `readAt` is what makes a refresh visible: without it two reads of an unchanged
     // repository are byte-identical on screen, so the control looks inert even when
     // it did exactly what it was asked.

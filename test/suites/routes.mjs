@@ -43,6 +43,8 @@ export async function routeTests() {
 
   /** Every `{ fresh }` the route asked the engine for, so the cache bypass is asserted. */
   const freshnessRequests = [];
+  /** The activity window each read asked for; `undefined` means the engine default. */
+  const windowRequests = [];
   /** The path the coverage route described, so exact-path semantics can be asserted. */
   const requestedRepos = [];
   const maintenanceRepos = [];
@@ -50,6 +52,7 @@ export async function routeTests() {
   const dispose = mountCoverageRoute(shimServer, {
     get: async (repoPath, options) => {
       freshnessRequests.push(options?.fresh === true);
+      windowRequests.push(options?.activitySinceDays);
       requestedRepos.push(repoPath);
       options?.onProgress?.({
         phase: 'scan',
@@ -109,6 +112,16 @@ export async function routeTests() {
     typeof refreshed.body?.readAt === 'string' && !Number.isNaN(Date.parse(refreshed.body.readAt)),
     String(refreshed.body?.readAt),
   );
+
+  // The card's own window selector: without this the label said "近 7 天" above a
+  // ninety-day report, and the file timeline (read with the label's 7 days) disagreed
+  // with the list it was opened from.
+  await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path) + '&days=7');
+  check('days is forwarded as the activity window', windowRequests.at(-1) === 7, String(windowRequests.at(-1)));
+  await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path) + '&days=999');
+  check('the activity window is capped at 90 days', windowRequests.at(-1) === 90, String(windowRequests.at(-1)));
+  await hit('/api/gitnexus/coverage?repo=' + encodeURIComponent(known.path));
+  check('omitting days leaves the engine default', windowRequests.at(-1) === undefined, String(windowRequests.at(-1)));
 
   // The numeric-progress channel: NDJSON lines, a real progress event forwarded from
   // the engine, and one final report object. Plain JSON callers keep the old path.

@@ -23,6 +23,7 @@ import {
   hasGitMarker,
   normalizePathKey,
   type IndexStats,
+  type ProcessDetection,
 } from './index-meta.js';
 import { scanRepository, type CapSource } from './scan.js';
 import {
@@ -35,6 +36,13 @@ import {
 import { readGitState, classifyStaleness } from './git.js';
 import { readGitActivity, type ActivityInfo } from './git-activity.js';
 import { readToolchainStatus, type ToolchainStatus } from './toolchain.js';
+import {
+  compareVersionLines,
+  versionLineLabel,
+  SUPPORTED_PEER_RANGE,
+  type VersionLine,
+  type VersionRelation,
+} from './version-lines.js';
 
 /**
  * Re-exported so a consumer of the report can name these without also depending on
@@ -130,6 +138,84 @@ export interface GraphInfo {
   processes: number;
   embeddings: number;
   edgesPerNode: number;
+  /** The detector budgets the manifest recorded; null when the manifest predates them. */
+  processDetection: ProcessDetection | null;
+  /** How complete the flow count is, and the sentence that says so. */
+  processCoverage: ProcessCoverage;
+}
+
+/**
+ * The three states the flow count must never be conflated in.
+ *
+ * `budget-limited` says a budget existed (so the count may be short of reality),
+ * `unseen` says entry points existed but no flow was produced, and `none` says the
+ * detector produced nothing and recorded no candidates. `unknown` is for manifests
+ * that predate the field — a 1.6.12 index must not claim either completeness or
+ * emptiness. `complete` is reserved for a manifest that explicitly recorded no caps.
+ */
+export type ProcessCoverageState = 'complete' | 'budget-limited' | 'unseen' | 'none' | 'unknown';
+
+export interface ProcessCoverage {
+  state: ProcessCoverageState;
+  note: string;
+}
+
+/**
+ * Judge the flow count against the budgets the analyzer recorded.
+ *
+ * The manifest says what the budgets *were*, never whether they were hit, so this
+ * function reports the weakest honest claim: "at most this many flows, under these
+ * budgets". It is deliberately unable to say "the graph is complete" unless the
+ * analyzer recorded no budget at all.
+ *
+ * @param processes `stats.processes` from the manifest
+ * @param detection parsed `processDetection`, or null when the manifest has no block
+ * @param files `stats.files`, used to distinguish "an empty repository" from "a
+ *   detector that ran and produced nothing"
+ */
+export function judgeProcessCoverage(
+  processes: number,
+  detection: ProcessDetection | null,
+  files: number,
+): ProcessCoverage {
+  if (detection === null) {
+    return {
+      state: 'unknown',
+      note: `该索引未记录流程检测预算（旧版分析器）；${processes} 条流程的完整性无法判断。`,
+    };
+  }
+  const branching = detection.maxProcessBranching;
+  const depth = detection.maxProcessTraceDepth;
+  const candidates = detection.maxEntryPointCandidates;
+  if (processes === 0) {
+    if (candidates !== null && candidates > 0 && files > 0) {
+      return {
+        state: 'unseen',
+        note: `0 条流程——入口点存在（候选上限 ${candidates}），但本次没有流程进入排名；不代表仓库里没有流程。`,
+      };
+    }
+    return { state: 'none', note: '0 条流程——检测没有产出流程，也没有记录入口点候选。' };
+  }
+  if (detection.maxProcesses !== null) {
+    return {
+      state: 'budget-limited',
+      note: `流程 ${processes} 条——达到流程上限 ${detection.maxProcesses}，可能被截断，不代表流程只有这些。`,
+    };
+  }
+  if (branching !== null || depth !== null || candidates !== null) {
+    const budgets = [
+      branching === null ? null : `分支 ≤${branching}`,
+      depth === null ? null : `深度 ≤${depth}`,
+      candidates === null ? null : `入口候选 ≤${candidates}`,
+    ]
+      .filter((part): part is string => part !== null)
+      .join('、');
+    return {
+      state: 'budget-limited',
+      note: `流程 ${processes} 条——在${budgets}的预算内得到；可能漏报，不代表流程只有这些。`,
+    };
+  }
+  return { state: 'complete', note: `流程 ${processes} 条，分析器未记录任何流程预算上限。` };
 }
 
 /** Commit counts on either side of `indexed...HEAD`. */
@@ -181,6 +267,12 @@ export interface CompatibilityInfo {
   installed: string | null;
   status: VersionCompatibility;
   message: string;
+  /** The peer range both sides are judged against — shown verbatim in the panel. */
+  supportedRange: string;
+  /** `same` / `cross-line` / out-of-range / `unknown`; `status` stays the string equality. */
+  relation: VersionRelation;
+  indexedLine: VersionLine;
+  installedLine: VersionLine;
 }
 
 /**
@@ -199,27 +291,45 @@ export function readCompatibility(indexedBy: string | null, installed: string | 
   };
   const index = normalize(indexedBy);
   const cli = normalize(installed);
+  const comparison = compareVersionLines(index, cli);
+  const base = {
+    indexedBy: index,
+    installed: cli,
+    supportedRange: SUPPORTED_PEER_RANGE,
+    relation: comparison.relation,
+    indexedLine: comparison.indexedLine,
+    installedLine: comparison.installedLine,
+  };
   if (index === null || cli === null) {
     return {
-      indexedBy: index,
-      installed: cli,
+      ...base,
       status: 'unknown',
       message: `无法确认索引与当前 CLI 的版本关系（索引记录 ${index ?? '缺失'}，当前 ${cli ?? '缺失'}）。`,
     };
   }
   if (index === cli) {
     return {
-      indexedBy: index,
-      installed: cli,
+      ...base,
       status: 'match',
-      message: `索引与当前 CLI 均为 GitNexus ${cli}。`,
+      message: `索引与当前 CLI 均为 GitNexus ${cli}（${versionLineLabel(comparison.installedLine)}）。`,
+    };
+  }
+  if (comparison.relation === 'cross-line') {
+    return {
+      ...base,
+      status: 'mismatch',
+      message:
+        `索引由 GitNexus ${index}（${versionLineLabel(comparison.indexedLine)}）构建，` +
+        `当前 CLI 是 ${cli}（${versionLineLabel(comparison.installedLine)}）；` +
+        `两者都在受支持范围内（${SUPPORTED_PEER_RANGE}），属跨线，不是版本错误。`,
     };
   }
   return {
-    indexedBy: index,
-    installed: cli,
+    ...base,
     status: 'mismatch',
-    message: `索引由 GitNexus ${index} 构建，当前 CLI 是 ${cli}；查询/刷新行为可能不一致。`,
+    message:
+      `索引由 GitNexus ${index} 构建，当前 CLI 是 ${cli}；查询/刷新行为可能不一致` +
+      `（受支持范围 ${SUPPORTED_PEER_RANGE}，其中一方或双方不在范围内）。`,
   };
 }
 
@@ -616,6 +726,15 @@ export async function analyzeCoverage(
       processes: meta.stats?.processes ?? 0,
       embeddings: meta.stats?.embeddings ?? 0,
       edgesPerNode: meta.stats?.nodes > 0 ? (meta.stats.edges ?? 0) / meta.stats.nodes : 0,
+      // The count alone reads as "this is all there is". The budgets it was produced
+      // under are the difference between "315 flows" and "315 flows found within
+      // branching ≤4, entry candidates ≤200".
+      processDetection: meta.processDetection,
+      processCoverage: judgeProcessCoverage(
+        meta.stats?.processes ?? 0,
+        meta.processDetection,
+        meta.stats?.files ?? 0,
+      ),
     },
     // Which query surfaces are actually available. A disabled FTS or vector index
     // changes what the graph can answer, so it belongs next to the counts rather

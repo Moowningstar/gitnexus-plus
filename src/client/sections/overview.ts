@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { capSourceLabel, compactNumber, fileSize, summaryLine } from '../format';
+import { capSourceLabel, compactNumber, fileSize, processCoverageLine, summaryLine } from '../format';
 import { HAIRLINE, MUTED, MetricGrid, Ring, h } from '../primitives';
 import { ClientCap, ClientReport, ClientTotals } from '../types';
 import { CapabilityStrip } from './capabilities';
@@ -22,6 +22,9 @@ export function OverviewBody({
   cap: ClientCap;
   ratio: number | null;
 }) {
+  // The flow count is only honest next to the budgets it was produced under; the
+  // manifest records them, so the caveat is data rather than a fixed disclaimer.
+  const coverage = processCoverageLine(report.graph);
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
@@ -90,6 +93,20 @@ export function OverviewBody({
                       { label: '向量', value: compactNumber(report.graph.embeddings), color: '#f7768e' },
                     ],
                   }),
+                  coverage === null
+                    ? null
+                    : h(
+                        'div',
+                        {
+                          style: {
+                            ...MUTED,
+                            marginTop: '4px',
+                            fontSize: '10px',
+                            ...(coverage.tone === 'warn' ? { color: '#d9a441' } : null),
+                          },
+                        },
+                        coverage.text,
+                      ),
                 ),
             h(
               'div',

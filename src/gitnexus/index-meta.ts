@@ -200,6 +200,50 @@ export interface RunnerIdentity {
 }
 
 /**
+ * The budgets the process detector ran under, as the analyzer recorded them.
+ *
+ * Every field is nullable on purpose: `maxProcesses: null` means "the flow count was
+ * not clamped by a process budget", which is not the same as "the detector found
+ * every flow" — branching and entry-point budgets can still drop flows. Absent
+ * manifests (1.6.12) have no block at all, and callers must treat that as unknown
+ * rather than as an absence of limits.
+ */
+export interface ProcessDetection {
+  /** Null when the flow count was not capped. */
+  maxProcesses: number | null;
+  /** Branches explored per symbol during trace; every skipped branch is a dropped flow. */
+  maxProcessBranching: number | null;
+  /** Trace depth cap; deeper chains are cut. */
+  maxProcessTraceDepth: number | null;
+  /** Entry points considered for ranking; the rest never enter the ranking at all. */
+  maxEntryPointCandidates: number | null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Parse `processDetection` from a manifest.
+ *
+ * A newer manifest may carry a partial block; a missing field stays `null` rather
+ * than being defaulted to 0, because 0 would read as "no budget" and 0 flows. The
+ * block itself is only reported as present when it is an object — 1.6.12 writes no
+ * block at all, and the caller must keep that distinction.
+ */
+export function readProcessDetection(raw: unknown): ProcessDetection | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const detection = raw as Record<string, unknown>;
+  return {
+    maxProcesses: numberOrNull(detection.maxProcesses),
+    maxProcessBranching: numberOrNull(detection.maxProcessBranching),
+    maxProcessTraceDepth: numberOrNull(detection.maxProcessTraceDepth),
+    maxEntryPointCandidates: numberOrNull(detection.maxEntryPointCandidates),
+  };
+}
+
+
+/**
  * The parsed manifest, as far as this plugin reads it.
  *
  * Named fields are the ones read here or in the report built from them; the index
@@ -225,6 +269,8 @@ export interface RawIndexManifest {
   analysisFeatures?: Record<string, number>;
   crossLanguageProperties?: unknown[];
   unresolvedReceiverMembers?: unknown;
+  /** Present on 1.6.13+; absent on 1.6.12, where it must stay unknown. */
+  processDetection?: unknown;
   [key: string]: unknown;
 }
 
@@ -246,6 +292,8 @@ export interface IndexMeta {
   capabilities: Record<string, unknown>;
   schemaFingerprint?: string;
   runnerIdentity?: RunnerIdentity;
+  /** Process-detection budgets, or null when the manifest predates the field. */
+  processDetection: ProcessDetection | null;
   /** the full parsed manifest */
   raw: RawIndexManifest;
 }
@@ -311,6 +359,7 @@ export async function readIndexMeta(repoPath: string): Promise<IndexMeta | null>
     capabilities: raw.capabilities ?? {},
     schemaFingerprint: typeof raw.schemaFingerprint === 'string' ? raw.schemaFingerprint : undefined,
     runnerIdentity: raw.runnerIdentity,
+    processDetection: readProcessDetection(raw.processDetection),
     raw,
   };
 }

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Button, HAIRLINE, MUTED, PathLabel, SOFT_BG, Section, Tag, h, styles } from '../primitives';
+import { Button, HAIRLINE, INLINE_BUTTON, MUTED, PathLabel, SOFT_BG, Section, Tag, h, styles } from '../primitives';
 import { ClientSearchHit, SearchViewState } from '../types';
 
 /**
@@ -115,18 +115,13 @@ export function SearchSection({ search }: { search: SearchViewState }) {
                         ? `打开 ${hit.filePath}`
                         : `打开 ${hit.filePath}:${hit.startLine}`,
                     style: {
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
+                      ...INLINE_BUTTON,
                       flex: '1 1 auto',
                       minWidth: 0,
-                      padding: 0,
-                      border: 0,
-                      background: 'none',
-                      color: 'inherit',
-                      font: 'inherit',
+                      gap: '6px',
+                      padding: '3px 6px',
+                      fontSize: '12px',
                       textAlign: 'left',
-                      cursor: 'pointer',
                     },
                   },
                   h(Tag, { tone: 'neutral' }, hit.kind),

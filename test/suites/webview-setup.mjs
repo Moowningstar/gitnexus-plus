@@ -250,6 +250,27 @@ export async function shellTests() {
         under !== null && under.window.truncated === true,
         JSON.stringify(under?.window),
       );
+
+      // The switch is a real `git checkout`, not a view filter: the working tree moves
+      // and a read afterwards follows it.
+      const { checkoutBranch } = await import('../../lib/gitnexus/git-activity.js');
+      await git([...identity, 'checkout', '-b', 'side']);
+      await git([...identity, 'checkout', '-']);
+      const switched = await checkoutBranch(root, 'side');
+      const head = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      check('switching checks the branch out', switched.ok === true && head === 'side', `${head} ${JSON.stringify(switched)}`);
+      const unknown = await checkoutBranch(root, 'no-such-branch');
+      check(
+        'an unknown branch is refused with git\'s own words',
+        unknown.ok === false && typeof unknown.message === 'string' && unknown.message !== '',
+        JSON.stringify(unknown),
+      );
+      const flagShaped = await checkoutBranch(root, '--all');
+      check(
+        'a flag-shaped branch never reaches git',
+        flagShaped.ok === false && String(flagShaped.message).includes('不合法'),
+        JSON.stringify(flagShaped),
+      );
     } catch (cause) {
       // The confined test environment cannot spawn git; the same skip the delta tests use.
       check(

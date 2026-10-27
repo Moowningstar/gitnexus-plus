@@ -2,12 +2,16 @@ import * as React from 'react';
 import { compactNumber } from '../format';
 import { routeUrl } from '../navigation';
 import {
+  Button,
   FileTypeIcon,
   HAIRLINE,
   Histogram,
+  INLINE_BUTTON,
   MUTED,
   MetricGrid,
   PathLabel,
+  SOFT_BG,
+  SegmentedControl,
   StateDot,
   Tag,
   h,
@@ -57,18 +61,60 @@ export function activityView(activity: ClientActivity | null | undefined): { win
 }
 
 /**
+ * Rows a list should show.
+ *
+ * `excluded` is dropped because a dotfile or an ignored path is not something to act
+ * on. Without this filter the lists read as noise: the index classifies every scanned
+ * file, and the ones nobody is looking for outnumber the ones they are.
+ *
+ * @param {ClientActivityFile[] | undefined} files
+ * @returns {ClientActivityFile[]}
+ */
+export function listedActivityFiles(files: ClientActivityFile[] | undefined): ClientActivityFile[] {
+  if (!Array.isArray(files)) return [];
+  return files.filter((file) => file.verdict !== 'excluded');
+}
+
+/** Which of the card's lists a row was clicked in. */
+export type ActivityFileList = 'baseline' | 'missing' | 'byChanges' | 'byRecency';
+
+/**
+ * The list that owns the open timeline, given where it was clicked.
+ *
+ * The same path can sit in three lists at once, so "where the block goes" cannot be
+ * derived from the path — it is the pair that was clicked. Returning null means the
+ * header's picker named the file, and the block belongs under the picker.
+ *
+ * @param {{path: string, list: string} | null} origin
+ * @param {string | null} selectedFile
+ * @returns {ActivityFileList | null}
+ */
+export function activityBlockHost(
+  origin: { path: string; list: ActivityFileList } | null,
+  selectedFile: string | null,
+): ActivityFileList | null {
+  if (origin === null || selectedFile === null) return null;
+  return origin.path === selectedFile ? origin.list : null;
+}
+
+/**
  * One touched file, with its verdict as a tag.
  *
  * The verdict tag is the whole point of the row: a path alone cannot tell a reader
  * whether the graph knows about it.
- * @param {{file: any}} props
  */
 export function ActivityFileRow({
   file,
   onSelect,
+  selected = false,
+  showVerdict = true,
 }: {
   file: ClientActivityFile;
   onSelect?: (path: string) => void;
+  /** The open timeline belongs to this row: tint it and say how to close. */
+  selected?: boolean;
+  /** Off while the row is classified against a different branch's manifest. */
+  showVerdict?: boolean;
 }) {
   const tone = file.verdict === 'indexed' ? 'solid' : file.verdict === 'missing' ? 'outline' : 'neutral';
   const label = file.verdict === 'indexed' ? '已索引' : file.verdict === 'missing' ? '缺失' : '排除';
@@ -88,7 +134,16 @@ export function ActivityFileRow({
             }
           }
         : undefined,
-      style: { ...styles.fileRow, cursor: interactive ? 'pointer' : undefined },
+      style: {
+        ...styles.fileRow,
+        // A clickable row is a button: the same hairline and radius as the workspace
+        // project rows, so "this row acts" is visible before hovering. A row that only
+        // reports (no `onSelect`) stays plain text.
+        ...(interactive
+          ? { cursor: 'pointer', border: HAIRLINE, borderRadius: '4px', padding: '3px 6px' }
+          : {}),
+        ...(selected ? { background: SOFT_BG } : {}),
+      },
     },
     h(FileTypeIcon, { path: file.path, size: 16 }),
     h('span', { style: { minWidth: 0, flex: '1 1 auto' } }, h(PathLabel, { path: file.path })),
@@ -96,10 +151,10 @@ export function ActivityFileRow({
       'span',
       { style: styles.fileMeta },
       interactive
-        ? h('span', { style: { ...MUTED, fontSize: '10px', whiteSpace: 'nowrap' } }, '时间线')
+        ? h('span', { style: { ...INLINE_BUTTON, ...MUTED } }, selected ? '收起' : '时间线')
         : null,
-      h(Tag, { tone }, label),
-      h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${file.changes}×`),
+      showVerdict ? h(Tag, { tone }, label) : null,
+      h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${file.changes} 次`),
     ),
   );
 }
@@ -139,7 +194,7 @@ export function ActivityCrossTable({ cross }: { cross: NonNullable<ClientActivit
           gridTemplateColumns: 'minmax(0, 1.5fr) repeat(4, minmax(0, 0.65fr))',
           gap: '4px',
           alignItems: 'center',
-          fontSize: '10px',
+          fontSize: '11px',
         },
       },
       h('span', { style: MUTED }, '分类'),
@@ -170,9 +225,15 @@ export function ActivityCrossTable({ cross }: { cross: NonNullable<ClientActivit
 export function ActivityBaseline({
   baseline,
   onSelect,
+  selectedPath = null,
+  renderBlock,
 }: {
   baseline: ClientActivityBaseline;
   onSelect?: (path: string) => void;
+  /** The file whose timeline is open, when this list owns it. */
+  selectedPath?: string | null;
+  /** Renders the timeline directly under its row. */
+  renderBlock?: (path: string) => React.ReactNode;
 }) {
   const changedFiles = Array.isArray(baseline.changedFiles) ? baseline.changedFiles : [];
   const short = baseline.shortSha ?? baseline.ref?.slice(0, 8) ?? '未知';
@@ -214,9 +275,18 @@ export function ActivityBaseline({
       ? h(
           'div',
           { style: { marginTop: '4px' } },
-          changedFiles
-            .slice(0, 8)
-            .map((file) => h(ActivityFileRow, { key: file.path, file, onSelect })),
+          changedFiles.slice(0, 8).map((file) =>
+            h(
+              'div',
+              { key: file.path },
+              h(ActivityFileRow, {
+                file,
+                onSelect,
+                selected: selectedPath === file.path,
+              }),
+              typeof renderBlock === 'function' ? renderBlock(file.path) : null,
+            ),
+          ),
         )
       : null,
   );
@@ -346,12 +416,34 @@ export function GitActivitySection({
   const timelineDays = days ?? ownDays;
   /** The commit list starts folded: its header keeps the count visible. */
   const [timelineOpen, setTimelineOpen] = React.useState(false);
+  // One list at a time: `baseline`, `byChanges`, `byRecency` and `missing` describe the
+  // same window from different angles, and stacking them made the card a wall of rows
+  // that repeated the same paths three times. The control keeps every view one click
+  // away without the duplication; `null` means "whichever list exists first".
+  const [listTab, setListTab] = React.useState<ActivityFileList | null>(null);
   const [ownFile, setOwnFile] = React.useState<string | null>(null);
   const selectedFile = controlledFile === undefined ? ownFile : controlledFile;
+  /** Which list the open timeline belongs to; null means the header's picker. */
+  const [origin, setOrigin] = React.useState<{ path: string; list: ActivityFileList } | null>(null);
   const [fileHistory, setFileHistory] = React.useState<ClientFileHistory | null>(null);
   const [fileHistoryBusy, setFileHistoryBusy] = React.useState(false);
   const [fileHistoryError, setFileHistoryError] = React.useState<string | null>(null);
+  /** Bumped by "重试"; it is the only thing that re-runs a failed read. */
+  const [fileHistoryAttempt, setFileHistoryAttempt] = React.useState(0);
   const fileHistorySeq = React.useRef(0);
+  const historyBlockRef = React.useRef<HTMLDivElement | null>(null);
+  /** The list whose row opened the block, or null when the header picker did. */
+  const blockHost = activityBlockHost(origin, selectedFile);
+
+  // Scroll the open block into the nearest edge of the card. The lists sit in the
+  // middle of a very long card, so a block opened from the last row can land off
+  // screen without this. `origin` is in the deps because clicking the same path in
+  // another list moves the block without changing `selectedFile`.
+  React.useEffect(() => {
+    const node = historyBlockRef.current;
+    if (selectedFile === null || node === null) return;
+    if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'nearest' });
+  }, [selectedFile, origin]);
 
   // Narrowed to a local const before use. `activityView` returns null for an absent
   // activity, but TypeScript cannot carry that back to the parameter, so every later
@@ -405,14 +497,17 @@ export function GitActivitySection({
         if (seq === fileHistorySeq.current) setFileHistoryBusy(false);
       });
     return undefined;
-  }, [selectedFile, timelineDays, projectPath]);
+  }, [selectedFile, timelineDays, projectPath, fileHistoryAttempt]);
 
-  const openFileHistory = (path: string): void => {
+  const openFileHistory = (path: string, list: ActivityFileList): void => {
+    // The origin is set here, not derived later: the same path can sit in three lists.
+    setOrigin({ path, list });
     if (onSelectFile) onSelectFile(path);
     else setOwnFile(path);
   };
   const closeFileHistory = (): void => {
     fileHistorySeq.current += 1;
+    setOrigin(null);
     if (onCloseFile) onCloseFile();
     else setOwnFile(null);
     setFileHistory(null);
@@ -428,69 +523,92 @@ export function GitActivitySection({
     },
   );
 
-  // Clicking a row expands that file's timeline under the row itself, so the answer
-  // appears where the question was asked. The header picker can name a file that is not
-  // in any of the lists below; that case still renders the block above the lists.
-  const toggleFileHistory = (path: string): void => {
-    if (selectedFile === path) closeFileHistory();
-    else openFileHistory(path);
+  // The timeline opens *under the row that asked for it*, and only that row can open it.
+  // Three lists name the same file independently (baseline, by-changes, by-recency), so
+  // "where" cannot be derived from the path — it is remembered at the click.
+  const toggleFileHistory = (path: string, list: ActivityFileList): void => {
+    if (selectedFile === path && blockHost === list) closeFileHistory();
+    else openFileHistory(path, list);
   };
-  const fileHistoryBlock = (path: string): React.ReactNode =>
-    selectedFile !== path
-      ? null
-      : h(
-          'div',
-          {
-            style: {
-              margin: '2px 0 8px',
-              paddingLeft: '10px',
-              borderLeft: HAIRLINE,
-            },
-          },
-          h(FileHistorySection, {
-            projectPath,
-            filePath: path,
-            history: fileHistory,
-            busy: fileHistoryBusy,
-            error: fileHistoryError,
-            onClose: closeFileHistory,
-          }),
-        );
+  const historyBlock = (path: string): React.ReactNode =>
+    h(
+      'div',
+      {
+        key: `${path}#history`,
+        ref: (node: HTMLDivElement | null) => {
+          historyBlockRef.current = node;
+        },
+        style: {
+          margin: '2px 0 8px',
+          padding: '6px 8px',
+          border: HAIRLINE,
+          borderRadius: '6px',
+          background: SOFT_BG,
+        },
+      },
+      h(FileHistorySection, {
+        projectPath,
+        filePath: path,
+        history: fileHistory,
+        busy: fileHistoryBusy,
+        error: fileHistoryError,
+        onClose: closeFileHistory,
+        onRetry: () => setFileHistoryAttempt((n) => n + 1),
+      }),
+    );
+  /** The block, but only for the list that was clicked — null everywhere else. */
+  const blockHere = (path: string, list: ActivityFileList): React.ReactNode =>
+    blockHost === list && selectedFile === path ? historyBlock(path) : null;
   /**
    * One file, plus its inline timeline when open.
    *
    * The wrapper owns the key: the row and the expansion are one list item, so React does
    * not reuse a row's DOM for a different file when the list is re-filtered.
    */
-  const fileListItem = (file: ClientActivityFile): React.ReactNode =>
+  const fileListItem = (file: ClientActivityFile, list: ActivityFileList): React.ReactNode =>
     h(
       'div',
       { key: file.path },
-      h(ActivityFileRow, { file, onSelect: toggleFileHistory }),
-      fileHistoryBlock(file.path),
+      h(ActivityFileRow, {
+        file,
+        // The click records where it came from; the block follows that list, not the path.
+        onSelect: (path: string) => toggleFileHistory(path, list),
+        selected: blockHost === list && selectedFile === file.path,
+        showVerdict: true,
+      }),
+      blockHere(file.path, list),
     );
 
-  const listedPaths = new Set<string>();
-  for (const list of [activity.byRecency, activity.byChanges, activity.missingFiles]) {
-    if (!Array.isArray(list)) continue;
-    for (const file of list) if (typeof file?.path === 'string') listedPaths.add(file.path);
+  // The header picker names a file that belongs to no list; its block renders under the
+  // control that named it, so the timeline still appears where the question was asked.
+  const headerHistory = selectedFile !== null && blockHost === null ? historyBlock(selectedFile) : null;
+
+  // The lists are one window seen from four angles: what changed since the index, what
+  // changed most, what changed last, and what the index should have but does not. Only
+  // one renders at a time — stacked, they repeated the same paths four times and turned
+  // the card into a wall of rows, which is the density complaint this layout answers.
+  const baselineData = activity.baseline;
+  const changeRows = Array.isArray(activity.byChanges) ? activity.byChanges : [];
+  const recentRows = Array.isArray(activity.byRecency) ? activity.byRecency : [];
+  const missingRows = Array.isArray(activity.missingFiles) ? activity.missingFiles : [];
+  const listViews: Array<{ value: ActivityFileList; label: string }> = [];
+  if (baselineData !== undefined && baselineData !== null) {
+    listViews.push({ value: 'baseline', label: `基线以来 ${baselineData.files ?? 0}` });
   }
-  const unlistedSelection = selectedFile !== null && !listedPaths.has(selectedFile);
+  if (changeRows.length > 0) listViews.push({ value: 'byChanges', label: `改动最频繁 ${changeRows.length}` });
+  if (recentRows.length > 0) listViews.push({ value: 'byRecency', label: `最近改动 ${recentRows.length}` });
+  if (missing > 0 && missingRows.length > 0) {
+    listViews.push({ value: 'missing', label: `应被索引缺失 ${missing}` });
+  }
+  const activeList =
+    listTab !== null && listViews.some((entry) => entry.value === listTab)
+      ? listTab
+      : (listViews[0]?.value ?? null);
 
   return h(
     'div',
     { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '4px' } },
-    // Only for a file that is not in a list below (usually picked in the header).
-    unlistedSelection
-      ? h(FileHistorySection, {
-          projectPath,
-          filePath: selectedFile,
-          history: fileHistory,
-          busy: fileHistoryBusy,
-          error: fileHistoryError,
-          onClose: closeFileHistory,
-        })
-      : null,
+    headerHistory,
     h('div', { style: MUTED }, view.totals),
     view.truncated
       ? h('div', { style: MUTED }, `活动窗口达到提交上限，更早的改动未统计`)
@@ -507,20 +625,33 @@ export function GitActivitySection({
       ? h(Histogram, { histogram: activity.histogram })
       : null,
 
-    // Three views over the same window: what the index sees, what changed since the
-    // index baseline, and the individual commits in order. Old hosts omit these
-    // fields; each block disappears rather than rendering a false empty state.
-    activity.totals?.indexKnown === false
-      ? h(
-          'div',
-          { style: { ...MUTED } },
-          '项目尚未建立索引：无法把活动文件与图谱交叉，也没有索引基线可审查。',
-        )
-      : activity.cross !== undefined && activity.cross !== null
-        ? h(ActivityCrossTable, { cross: activity.cross })
-        : null,
-    activity.baseline !== undefined && activity.baseline !== null
-      ? h(ActivityBaseline, { baseline: activity.baseline, onSelect: openFileHistory })
+    // One list, one control. Rendering all four side by side was the density problem:
+    // the same path appeared in three of them and the card ran past two screens.
+    listViews.length > 1
+      ? h(SegmentedControl, {
+          id: 'gnx-activity-list',
+          label: '活动文件列表视图',
+          value: activeList ?? '',
+          options: listViews,
+          onChange: (next: string) => setListTab(next as ActivityFileList),
+        })
+      : null,
+    activeList === 'baseline' && baselineData !== undefined && baselineData !== null
+      ? h(ActivityBaseline, {
+          baseline: baselineData,
+          onSelect: (path: string) => toggleFileHistory(path, 'baseline'),
+          selectedPath: blockHost === 'baseline' ? selectedFile : null,
+          renderBlock: (path: string) => blockHere(path, 'baseline'),
+        })
+      : null,
+    activeList === 'byChanges' && changeRows.length > 0
+      ? h('div', null, changeRows.slice(0, 8).map((file) => fileListItem(file, 'byChanges')))
+      : null,
+    activeList === 'byRecency' && recentRows.length > 0
+      ? h('div', null, recentRows.slice(0, 5).map((file) => fileListItem(file, 'byRecency')))
+      : null,
+    activeList === 'missing' && missingRows.length > 0
+      ? h('div', null, missingRows.slice(0, 8).map((file) => fileListItem(file, 'missing')))
       : null,
     h(
       'div',
@@ -529,35 +660,14 @@ export function GitActivitySection({
       // everything else (file lists, authors, branches) off the card. The count stays
       // visible, so the header still answers "how much happened" without the rows.
       h(
-        'div',
+        Button,
         {
-          role: 'button',
-          tabIndex: 0,
-          'aria-expanded': timelineOpen,
+          variant: 'ghost',
+          'aria-label': timelineOpen ? '收起提交时间线' : '展开提交时间线',
           title: timelineOpen ? '收起提交时间线' : '展开提交时间线',
           onClick: () => setTimelineOpen((open) => !open),
-          onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              setTimelineOpen((open) => !open);
-            }
-          },
-          style: {
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '4px',
-            cursor: 'pointer',
-            ...MUTED,
-            userSelect: 'none',
-          },
         },
-        h('span', { style: { fontSize: '10px' } }, timelineOpen ? '▾' : '▸'),
-        h(
-          'span',
-          null,
-          `提交时间线 · 近 ${timelineDays} 天 · ${projectTimeline.length} 个`,
-        ),
-        h('span', { style: { fontSize: '10px' } }, timelineOpen ? '收起' : '展开'),
+        `${timelineOpen ? '▾' : '▸'} 提交时间线 · 近 ${timelineDays} 天 · ${projectTimeline.length} 个`,
       ),
       // The range selector moved to the card header: it scopes every number on the card,
       // not just this list, so it should not live behind the fold.
@@ -576,89 +686,52 @@ export function GitActivitySection({
         )
       : null,
 
-      // Missing files come from their own list, not from the display-capped
-      // by-changes slice — otherwise the summary can report a count with no rows.
-      missing > 0 && Array.isArray(activity.missingFiles) && activity.missingFiles.length > 0
-        ? h(
-            'div',
-            null,
-            h('div', { style: { ...MUTED, marginBottom: '4px' } }, '应被索引却缺失'),
-            activity.missingFiles
-              .slice(0, 8)
-              .map((file) => fileListItem(file)),
-          )
-        : null,
-
-      Array.isArray(activity.byChanges) && activity.byChanges.length > 0
-        ? h(
-            'div',
-            null,
-            h('div', { style: { ...MUTED, marginBottom: '4px' } }, '改动最频繁'),
-            activity.byChanges
-              .filter((f) => f.verdict !== 'excluded')
-              .slice(0, 8)
-              .map((file) => fileListItem(file)),
-          )
-        : null,
-
-      Array.isArray(activity.byRecency) && activity.byRecency.length > 0
-        ? h(
-            'div',
-            null,
-            h('div', { style: { ...MUTED, marginBottom: '4px' } }, '最近改动'),
-            activity.byRecency
-              .filter((f) => f.verdict !== 'excluded')
-              .slice(0, 5)
-              .map((file) => fileListItem(file)),
-          )
-        : null,
-
-      Array.isArray(activity.authors) && activity.authors.length > 0
-        ? h(
-            'div',
-            null,
-            h('div', { style: { ...MUTED, marginBottom: '4px' } }, '提交者'),
-            activity.authors.slice(0, 6).map((author) =>
-              h(
-                'div',
-                { key: `${author.name}-${author.email}`, style: styles.fileRow },
-                h('span', { style: { minWidth: 0, flex: '1 1 auto' } }, author.name),
+    // Reference material, not the answer: the cross table restates the verdicts above,
+    // and authors matter once per session. One disclosure keeps both reachable without
+    // spending the card's height on them.
+    h(
+      'details',
+      { style: { marginTop: '2px' } },
+      h(
+        'summary',
+        { style: { ...INLINE_BUTTON, width: 'fit-content', listStyle: 'none' } },
+        '更多统计 · 活动 × 索引交叉对比、提交者',
+      ),
+      h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '6px' } },
+        activity.totals?.indexKnown === false
+          ? h(
+              'div',
+              { style: { ...MUTED } },
+              '项目尚未建立索引：无法把活动文件与图谱交叉，也没有索引基线可审查。',
+            )
+          : activity.cross !== undefined && activity.cross !== null
+            ? h(ActivityCrossTable, { cross: activity.cross })
+            : null,
+        Array.isArray(activity.authors) && activity.authors.length > 0
+          ? h(
+              'div',
+              null,
+              h('div', { style: { ...MUTED, marginBottom: '4px' } }, '提交者'),
+              activity.authors.slice(0, 6).map((author) =>
                 h(
-                  'span',
-                  { style: styles.fileMeta },
-                  author.bot ? h(Tag, { tone: 'neutral' }, 'bot') : null,
-                  h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${author.commits} 提交`),
-                  h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${author.files} 文件`),
-                ),
-              ),
-            ),
-          )
-        : null,
-
-      Array.isArray(activity.branches) && activity.branches.length > 0
-        ? h(
-            'div',
-            null,
-            h('div', { style: { ...MUTED, marginBottom: '4px' } }, `分支 · ${activity.branches.length}`),
-            activity.branches.slice(0, 6).map((branch) =>
-              h(
-                'div',
-                { key: branch.name, style: styles.fileRow },
-                h('span', { style: { minWidth: 0, flex: '1 1 auto', ...styles.mono } }, branch.name),
-                h(
-                  'span',
-                  { style: styles.fileMeta },
-                  branch.current ? h(Tag, { tone: 'solid' }, '当前') : null,
+                  'div',
+                  { key: `${author.name}-${author.email}`, style: styles.fileRow },
+                  h('span', { style: { minWidth: 0, flex: '1 1 auto' } }, author.name),
                   h(
                     'span',
-                    { style: { ...MUTED, whiteSpace: 'nowrap' } },
-                    branch.lastCommitDate ? branch.lastCommitDate.slice(0, 10) : '',
+                    { style: styles.fileMeta },
+                    author.bot ? h(Tag, { tone: 'neutral' }, 'bot') : null,
+                    h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${author.commits} 提交`),
+                    h('span', { style: { ...MUTED, whiteSpace: 'nowrap' } }, `${author.files} 文件`),
                   ),
                 ),
               ),
-            ),
-          )
-        : null,
+            )
+          : null,
+      ),
+    ),
   );
 }
 

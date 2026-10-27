@@ -2,7 +2,7 @@ import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
 import { useNow } from '../clock';
 import { runStateLabel, runStateTone } from '../format';
-import { Button, HAIRLINE, MUTED, SOFT_BG, StateDot, Tag, h, styles } from '../primitives';
+import { Button, HAIRLINE, INLINE_BUTTON, MUTED, SOFT_BG, StateDot, Tag, h, styles } from '../primitives';
 import { ClientAnalyzeRun, ClientDelta, ClientMaintenance, ClientMaintenanceCommand } from '../types';
 
 /**
@@ -224,14 +224,7 @@ export function MaintenanceSection({
                 { style: { marginTop: '2px' } },
                 h(
                   'summary',
-                  {
-                    style: {
-                      ...MUTED,
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      userSelect: 'none',
-                    },
-                  },
+                  { style: { ...INLINE_BUTTON } },
                   '查看原始输出',
                 ),
                 h(

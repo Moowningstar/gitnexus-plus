@@ -1,6 +1,6 @@
 {
   "name": "dsh-gitnexus-plus",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DSH plugin: hand the agent a GitNexus code graph (impact, context and query as model tools), anchor the index to the commit it describes after every refresh, and put GitNexus's own web UI (resizable 3D view, AI settings pre-filled from the environment) beside a sidebar panel for coverage, refresh gating, symbol and full-text search, file history and maintenance.",
   "type": "module",
   "license": "MIT",

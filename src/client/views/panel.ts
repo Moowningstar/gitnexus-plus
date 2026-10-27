@@ -140,8 +140,52 @@ export function CoveragePanel(props: SlotProps) {
   // repository produces a byte-identical panel, so the control looks inert even
   // when it did precisely what it was asked to do.
   const [readAt, setReadAt] = React.useState<string | null>(null);
+  /**
+   * The activity card's window selector, held here rather than in the view: the
+   * coverage request is what reads that window, and when the view owned the number the
+   * card printed "近 7 天" above a ninety-day report.
+   */
+  const [activityDays, setActivityDays] = React.useState(7);
+  /** The top-bar branch switch: a real `git checkout`, then a full reload. */
+  const [branchBusy, setBranchBusy] = React.useState(false);
+  const [branchError, setBranchError] = React.useState<string | null>(null);
   // Only a manual refresh bypasses the host's cache; the initial load does not.
   const wantsFresh = reloadToken > 0;
+
+  const switchBranch = React.useCallback(
+    async (branch: string): Promise<void> => {
+      if (projectPath === null) return;
+      setBranchBusy(true);
+      setBranchError(null);
+      try {
+        const res = await fetch(routeUrl(`/api/gitnexus/checkout?repo=${encodeURIComponent(projectPath)}`), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ branch }),
+        });
+        const body = (await res.json().catch(() => null)) as { ok?: boolean; message?: string } | null;
+        // A 404 from an unmounted route is the old host, not a branch that vanished.
+        if (res.status === 404) {
+          setBranchError('当前宿主没有切换分支的路由；重启 DSH 后再试。');
+          return;
+        }
+        if (!body?.ok) {
+          // git's refusal (usually a dirty tree) is the message a human needs; 409 is
+          // the route's "well-formed, working tree said no".
+          setBranchError(typeof body?.message === 'string' ? body.message : `切换分支失败 (${res.status})`);
+          return;
+        }
+        // The index still describes the old branch; the reloaded report says so. Rebuild
+        // stays a separate, explicit action — a switch must not start a long analyze.
+        setReloadToken((n) => n + 1);
+      } catch (cause) {
+        setBranchError(String((cause as Error)?.message ?? cause));
+      } finally {
+        setBranchBusy(false);
+      }
+    },
+    [projectPath],
+  );
 
   const search = useKeywordSearch({ projectPath, sessionId });
 
@@ -364,6 +408,7 @@ export function CoveragePanel(props: SlotProps) {
     const query =
       `/api/gitnexus/coverage?repo=${encodeURIComponent(activeProject)}` +
       (wantsFresh ? '&refresh=1' : '') +
+      `&days=${activityDays}` +
       '&stream=1';
 
     const load = async (): Promise<void> => {
@@ -469,7 +514,7 @@ export function CoveragePanel(props: SlotProps) {
 
     void load();
     return () => controller.abort();
-  }, [activeProject, projectListFor, workspacePath, loadToken, resolving]);
+  }, [activeProject, projectListFor, workspacePath, loadToken, resolving, activityDays]);
 
   /**
    * Read the Tier 0 verdict whenever the project or the index changes.
@@ -664,6 +709,7 @@ export function CoveragePanel(props: SlotProps) {
       if (workspacePath === null) return;
       setActiveProject(path);
       setProjectsError(null);
+      setBranchError(null);
       rememberProject(workspacePath, path);
     },
     [workspacePath],
@@ -687,6 +733,16 @@ export function CoveragePanel(props: SlotProps) {
     progress: resolving ? { percent: 0, label: '正在查找项目索引…' } : progress,
     error,
     readAt,
+    activityDays,
+    onActivityDaysChange: setActivityDays,
+    branches: (report?.activity?.branches ?? []).map((branch) => ({
+      name: branch.name,
+      current: branch.current === true,
+    })),
+    currentBranch: report?.activity?.currentBranch ?? null,
+    branchBusy,
+    branchError,
+    onSwitchBranch: (branch: string) => void switchBranch(branch),
     run: visibleRun,
     runError: visibleRunError,
     delta,

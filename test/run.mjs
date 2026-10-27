@@ -6,9 +6,11 @@
  */
 
 import { summary } from './harness.mjs';
-import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests } from './suites/coverage.mjs';
+import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests, graphQualityTests } from './suites/coverage.mjs';
+import { versionLinesTests } from './suites/version-lines.mjs';
 import { searchTests, ftsSearchTests, searchRouteTests } from './suites/search.mjs';
 import { routeTests, fileHistoryRouteTests } from './suites/routes.mjs';
+import { checkoutRouteTests } from './suites/checkout-route.mjs';
 import { analyzeTests, installTests } from './suites/runners.mjs';
 import { deltaTests } from './suites/delta.mjs';
 import { managedPathTests, anchorTests } from './suites/anchor.mjs';
@@ -34,11 +36,14 @@ await languageTests();
 await commandTests();
 await formatTests();
 await compatibilityTests();
+await versionLinesTests();
+await graphQualityTests();
 await searchTests();
 await ftsSearchTests();
 await searchRouteTests();
 await routeTests();
 await fileHistoryRouteTests();
+await checkoutRouteTests();
 await analyzeTests();
 await installTests();
 // `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the

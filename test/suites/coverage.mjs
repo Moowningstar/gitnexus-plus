@@ -8,10 +8,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { analyzeCoverage, judgeMinified, formatBytes, looksGenerated, readCompatibility } from '../../lib/gitnexus/coverage.js';
+import { analyzeCoverage, judgeMinified, formatBytes, looksGenerated, readCompatibility, judgeProcessCoverage } from '../../lib/gitnexus/coverage.js';
 import { scanRepository } from '../../lib/gitnexus/scan.js';
 import { loadScanPrimitives } from '../../lib/gitnexus/root.js';
-import { readRegistry, normalizePathKey } from '../../lib/gitnexus/index-meta.js';
+import { readRegistry, normalizePathKey, readIndexMeta } from '../../lib/gitnexus/index-meta.js';
+import { formatReport } from '../../lib/gitnexus/format.js';
 import { buildFixture, check, fixturePath, section } from '../harness.mjs';
 
 export async function fixtureTests() {
@@ -826,6 +827,30 @@ export async function compatibilityTests() {
     readCompatibility(null, '1.6.12').status === 'unknown' && readCompatibility('', '').status === 'unknown',
   );
 
+  // Status stays string equality — storage versions are not range-comparable. The
+  // relation is the extra fact: a stable index read by a candidate CLI is supported,
+  // so the copy must say 跨线 rather than implying the pair is wrong.
+  const crossing = readCompatibility('1.6.12', '1.6.13-rc.159');
+  check(
+    'a stable index under a candidate CLI is status mismatch but relation cross-line',
+    crossing.status === 'mismatch' && crossing.relation === 'cross-line',
+    JSON.stringify(crossing),
+  );
+  check(
+    'cross-line copy says 跨线 and the supported range, not an error',
+    crossing.message.includes('跨线') && crossing.message.includes('^1.6.12') && !crossing.message.includes('行为可能不一致'),
+    crossing.message,
+  );
+  check('the supported range travels with the verdict', crossing.supportedRange === '^1.6.12 || >=1.6.13-rc.0 <2.0.0');
+  const outOfRange = readCompatibility('1.6.12', '2.0.0');
+  check(
+    'an out-of-range CLI keeps the warning, not the cross-line copy',
+    outOfRange.status === 'mismatch' && outOfRange.relation === 'cli-out-of-range' && outOfRange.message.includes('范围'),
+    outOfRange.message,
+  );
+  check('matching versions carry relation same', readCompatibility('1.6.12', '1.6.12').relation === 'same');
+  check('a missing side carries relation unknown', readCompatibility(null, '1.6.12').relation === 'unknown');
+
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-compat-'));
   const repo = path.join(root, 'data-screen');
   await fs.mkdir(path.join(repo, '.gitnexus'), { recursive: true });
@@ -850,3 +875,121 @@ export async function compatibilityTests() {
     await fs.rm(root, { recursive: true, force: true });
   }
 }
+
+/**
+ * Graph quality: the flow count next to the budgets it was produced under.
+ *
+ * The three states must never collapse into "0 flows means no flows": a stable 1.6.12
+ * index has no `processDetection` block at all (unknown), a budget-limited index is not
+ * complete, and an index whose entry points never ranked in is not empty.
+ */
+export async function graphQualityTests() {
+  section('graph quality: flow count vs process budgets');
+  const detection = {
+    maxProcesses: null,
+    maxProcessBranching: 4,
+    maxProcessTraceDepth: 10,
+    maxEntryPointCandidates: 200,
+  };
+
+  const legacy = judgeProcessCoverage(0, null, 111);
+  check(
+    'a manifest without processDetection is unknown, not zero flows',
+    legacy.state === 'unknown' && legacy.note.includes('无法判断'),
+    JSON.stringify(legacy),
+  );
+  const budget = judgeProcessCoverage(315, detection, 111);
+  check(
+    'the recorded budgets are on the note',
+    budget.state === 'budget-limited' && budget.note.includes('分支 ≤4') && budget.note.includes('入口候选 ≤200'),
+    JSON.stringify(budget),
+  );
+  check(
+    'a null maxProcesses is not reported as a truncation',
+    !budget.note.includes('达到流程上限'),
+    budget.note,
+  );
+  const capped = judgeProcessCoverage(310, { ...detection, maxProcesses: 310 }, 111);
+  check(
+    'a hit process cap is reported as a truncation',
+    capped.state === 'budget-limited' && capped.note.includes('达到流程上限 310'),
+    JSON.stringify(capped),
+  );
+  const unseen = judgeProcessCoverage(0, detection, 111);
+  check(
+    'zero flows with entry candidates is unseen, not none',
+    unseen.state === 'unseen' && unseen.note.includes('不代表仓库里没有流程'),
+    JSON.stringify(unseen),
+  );
+  const none = judgeProcessCoverage(0, { maxProcesses: null, maxProcessBranching: null, maxProcessTraceDepth: null, maxEntryPointCandidates: null }, 0);
+  check('zero flows with no candidates is none', none.state === 'none', JSON.stringify(none));
+  const complete = judgeProcessCoverage(42, { maxProcesses: null, maxProcessBranching: null, maxProcessTraceDepth: null, maxEntryPointCandidates: null }, 10);
+  check('an explicit empty budget is complete', complete.state === 'complete', JSON.stringify(complete));
+
+  section('graph quality: the manifest is parsed, not invented');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-quality-'));
+  const repo = path.join(root, 'repo');
+  await fs.mkdir(path.join(repo, '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'index.ts'), 'export const answer = 42;\n');
+  await fs.writeFile(
+    path.join(repo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({
+      stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 3, embeddings: 0 },
+      branch: 'main',
+      runnerIdentity: { cliVersion: '1.6.13-rc.159' },
+      processDetection: detection,
+    }),
+  );
+  try {
+    const meta = await readIndexMeta(repo);
+    check(
+      'processDetection is read field by field',
+      meta !== null && meta.processDetection?.maxProcessBranching === 4 && meta.processDetection?.maxProcesses === null,
+      JSON.stringify(meta?.processDetection),
+    );
+    const report = await analyzeCoverage(repo, { includeActivity: false });
+    check(
+      'the report carries the verdict next to the count',
+      report.graph !== null &&
+        report.graph.processes === 3 &&
+        report.graph.processCoverage.state === 'budget-limited' &&
+        report.graph.processCoverage.note.includes('分支 ≤4'),
+      JSON.stringify(report.graph),
+    );
+    check(
+      'the text output survives the terminal scroll',
+      formatReport(report).includes('process budgets:'),
+      formatReport(report),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+
+  const legacyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-quality-legacy-'));
+  const legacyRepo = path.join(legacyRoot, 'repo');
+  await fs.mkdir(path.join(legacyRepo, '.gitnexus'), { recursive: true });
+  await fs.writeFile(path.join(legacyRepo, 'index.ts'), 'export const answer = 42;\n');
+  await fs.writeFile(
+    path.join(legacyRepo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({
+      stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0, embeddings: 0 },
+      branch: 'main',
+      runnerIdentity: { cliVersion: '1.6.12' },
+    }),
+  );
+  try {
+    const meta = await readIndexMeta(legacyRepo);
+    check('a 1.6.12 manifest has no processDetection block', meta !== null && meta.processDetection === null);
+    const report = await analyzeCoverage(legacyRepo, { includeActivity: false });
+    check(
+      'a legacy manifest reports unknown rather than "no flows"',
+      report.graph !== null &&
+        report.graph.processCoverage.state === 'unknown' &&
+        report.graph.processCoverage.note.includes('无法判断'),
+      JSON.stringify(report.graph?.processCoverage),
+    );
+  } finally {
+    await fs.rm(legacyRoot, { recursive: true, force: true });
+  }
+}
+
