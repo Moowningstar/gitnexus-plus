@@ -555,9 +555,16 @@ export function renderSuite(ctx) {
     onSwitchBranch: () => {},
   });
   check(
-    'the header offers the branch switch with the current marker',
-    branchView.text.includes('main（当前）') || branchView.text.includes('切换分支'),
+    'the header offers the branch switch with the current branch',
+    branchView.text.includes('main') && branchView.text.includes('▾'),
     branchView.text.slice(0, 240),
+  );
+  // The list is a popover, not a datalist: a datalist gets filtered by the text in
+  // its field, which made one pick look like the other branches had disappeared.
+  check(
+    'the branch list is not a datalist',
+    !branchView.tags.includes('datalist'),
+    branchView.tags.join(','),
   );
   check('renders the provenance block', view.text.includes('解析质量与溯源'));
   check('provenance surfaces the untyped receiver total', view.text.includes('435'), view.text.slice(-400));

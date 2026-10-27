@@ -233,24 +233,22 @@ export function CoverageView({
     if (onActivityDaysChange) onActivityDaysChange(days);
     else setOwnActivityDays(days);
   };
-  // The branch control is a text field with a datalist, not a select: a select truncates
-  // a long `feat/...` name in a narrow sidebar and cannot be searched. The draft clears
-  // whenever the branch changes, so the field always shows the branch that is checked out.
+  // The branch control is a button that opens a list, not a `<select>` and not a
+  // `<datalist>`. A select truncates a long `feat/...` name in a narrow sidebar; a
+  // datalist is worse than it looks — the browser filters its options by whatever
+  // text the field holds, so once a name is in the field the list appears to contain
+  // one branch and the reader believes the other branches vanished.
+  const [branchOpen, setBranchOpen] = React.useState(false);
   const [branchDraft, setBranchDraft] = React.useState('');
   React.useEffect(() => {
+    setBranchOpen(false);
     setBranchDraft('');
   }, [currentBranch]);
-  const branchNames = (branches ?? []).map((branch) => branch.name);
   const checkedOutBranch = currentBranch ?? branches?.find((branch) => branch.current)?.name ?? '';
-  const submitBranch = (): void => {
-    const wanted = branchDraft.trim();
-    if (wanted === '' || wanted === checkedOutBranch) return;
-    // Only a name the host listed is accepted: the field is for filtering a long list,
-    // not for inventing a ref that `git checkout` would then fail on.
-    if (!branchNames.includes(wanted)) return;
-    onSwitchBranch?.(wanted);
-    setBranchDraft('');
-  };
+  const branchFilter = branchDraft.trim().toLowerCase();
+  const visibleBranches = (branches ?? []).filter(
+    (branch) => branchFilter === '' || branch.name.toLowerCase().includes(branchFilter),
+  );
 
   /**
    * Tell the panel when the graph card is near the viewport.
@@ -369,44 +367,131 @@ export function CoverageView({
       // The branch switch sits in the top bar, next to the project. It is a real
       // checkout, not a view filter: the host runs `git checkout` and the panel reloads,
       // so the graph, the activity card and the file lists all describe one working tree.
+      //
+      // The list is rendered by us, not by a native `<datalist>`: the browser filters a
+      // datalist by the text already in the field, so after one pick the list looks like
+      // it holds a single branch. A popover always shows every branch.
       Array.isArray(branches) && branches.length > 1 && onSwitchBranch !== undefined
         ? h(
             'span',
-            { style: { display: 'flex', alignItems: 'center', gap: '3px', minWidth: 0 } },
-            h('span', { style: { ...MUTED, fontSize: '10px', whiteSpace: 'nowrap' } }, '分支'),
-            h('input', {
-              list: 'gnx-branch-options',
-              value: branchDraft,
-              placeholder: checkedOutBranch === '' ? '分支' : checkedOutBranch,
-              'aria-label': '切换分支',
-              disabled: branchBusy,
-              title: branchBusy
-                ? '正在切换分支…'
-                : `当前分支：${checkedOutBranch}（输入或从列表选择后回车，会对项目执行 git checkout）`,
-              onChange: (event: React.ChangeEvent<HTMLInputElement>) => setBranchDraft(event.target.value),
-              onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
-                if (event.key === 'Enter') submitBranch();
-                if (event.key === 'Escape') setBranchDraft('');
-              },
-              style: {
-                font: 'inherit',
-                fontSize: '11px',
-                padding: '1px 4px',
-                border: HAIRLINE,
-                borderRadius: '4px',
-                background: SOFT_BG,
-                color: 'inherit',
-                width: '120px',
-                minWidth: 0,
-              },
-            }),
+            { style: { position: 'relative', display: 'inline-flex', minWidth: 0 } },
             h(
-              'datalist',
-              { id: 'gnx-branch-options' },
-              branches.map((branch) =>
-                h('option', { key: branch.name, value: branch.name }, branch.current ? `${branch.name}（当前）` : branch.name),
+              'button',
+              {
+                type: 'button',
+                onClick: () => setBranchOpen((open) => !open),
+                disabled: branchBusy,
+                'aria-haspopup': 'listbox',
+                'aria-expanded': branchOpen,
+                'aria-label': `当前分支 ${checkedOutBranch}，切换分支`,
+                title: `当前分支：${checkedOutBranch}（点击列出本地分支；选择后对项目执行 git checkout）`,
+                style: {
+                  ...INLINE_BUTTON,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  minWidth: 0,
+                  maxWidth: '190px',
+                  fontSize: '11px',
+                },
+              },
+              h('span', { style: { ...MUTED, fontSize: '10px', whiteSpace: 'nowrap' } }, '分支'),
+              h(
+                'span',
+                { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                branchBusy ? '切换中…' : checkedOutBranch === '' ? '未知' : checkedOutBranch,
               ),
+              h('span', { style: { ...MUTED, fontSize: '9px' } }, '▾'),
             ),
+            branchOpen
+              ? [
+                  // Click-away surface: the popover is a menu, not a modal, and a menu
+                  // that only closes on a second click of its trigger feels stuck.
+                  h('div', {
+                    key: 'gnx-branch-backdrop',
+                    style: { position: 'fixed', inset: 0, zIndex: 40 },
+                    onMouseDown: () => setBranchOpen(false),
+                  }),
+                  h(
+                    'div',
+                    {
+                      key: 'gnx-branch-menu',
+                      role: 'listbox',
+                      'aria-label': '本地分支',
+                      onKeyDown: (event: React.KeyboardEvent) => {
+                        if (event.key === 'Escape') setBranchOpen(false);
+                      },
+                      style: {
+                        position: 'absolute',
+                        top: 'calc(100% + 4px)',
+                        right: 0,
+                        zIndex: 41,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '2px',
+                        minWidth: '180px',
+                        maxWidth: '260px',
+                        maxHeight: '260px',
+                        overflowY: 'auto',
+                        padding: '4px',
+                        border: HAIRLINE,
+                        borderRadius: '6px',
+                        background: BG_BASE,
+                        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.35)',
+                      },
+                    },
+                    h('input', {
+                      autoFocus: true,
+                      value: branchDraft,
+                      placeholder: '筛选分支…',
+                      'aria-label': '筛选分支',
+                      onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
+                        setBranchDraft(event.target.value),
+                      style: {
+                        font: 'inherit',
+                        fontSize: '11px',
+                        padding: '2px 4px',
+                        border: HAIRLINE,
+                        borderRadius: '4px',
+                        background: SOFT_BG,
+                        color: 'inherit',
+                      },
+                    }),
+                    visibleBranches.length === 0
+                      ? h('div', { style: { ...MUTED, fontSize: '11px', padding: '4px' } }, '没有匹配的分支')
+                      : null,
+                    visibleBranches.map((branch) =>
+                      h(
+                        'button',
+                        {
+                          key: branch.name,
+                          type: 'button',
+                          role: 'option',
+                          'aria-selected': branch.name === checkedOutBranch,
+                          disabled: branchBusy,
+                          onClick: () => {
+                            setBranchOpen(false);
+                            setBranchDraft('');
+                            if (branch.name !== checkedOutBranch) onSwitchBranch(branch.name);
+                          },
+                          style: {
+                            ...INLINE_BUTTON,
+                            display: 'flex',
+                            width: '100%',
+                            textAlign: 'left',
+                            border: branch.name === checkedOutBranch ? HAIRLINE : '1px solid transparent',
+                            background: branch.name === checkedOutBranch ? SOFT_BG : 'transparent',
+                          },
+                        },
+                        branch.name,
+                        branch.name === checkedOutBranch
+                          ? h('span', { style: { ...MUTED, fontSize: '10px' } }, '（当前）')
+                          : null,
+                      ),
+                    ),
+                  ),
+                ]
+              : null,
           )
         : null,
       // The label states the scope. "刷新" alone next to a staleness warning reads as
