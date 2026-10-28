@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.9](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.9)** ·
+**Current release: [0.1.10](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.10)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -222,7 +222,7 @@ nothing. Translate:
 | `impact({target, direction})` | `gitnexus_impact` | same argument names, plus `maxDepth`/`summaryOnly`/`limit`/`minConfidence` |
 | `context({name})` | `gitnexus_context` | `uid`/`file_path`/`kind` when a bare name is ambiguous |
 | `query({search_query})` | `gitnexus_query` | same argument name, plus `goal`/`task_context`/`limit`/`max_symbols` |
-| `detect_changes({scope})` | `gitnexus_delta` | answers "does the index need a refresh"; staged/compare scoping is 0.1.9 work |
+| `detect_changes({scope})` | `gitnexus_delta` | answers "does the index need a refresh"; staged/compare scoping is not wired yet |
 
 CLI:
 
@@ -238,9 +238,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.9 that is 1167
-checks (807 engine, 81 plugin, 279 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 804). Seven of those are an
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.10 that is 1254
+checks (852 engine, 81 plugin, 321 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 849). Seven of those are an
 encoding guard: it maps every
 GBK-encodable character back to its bytes and fails when a run of them decodes as UTF-8 again,
 which is what a double-decoded string looks like and what a character blocklist keeps missing.

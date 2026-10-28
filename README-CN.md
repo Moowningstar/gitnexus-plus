@@ -111,7 +111,7 @@ DSH 内暴露：
 | `impact({target, direction})` | `gitnexus_impact` | 同名参数，外加 `maxDepth`/`summaryOnly`/`limit`/`minConfidence` |
 | `context({name})` | `gitnexus_context` | 除 `name` 外可用 `uid`/`file_path`/`kind` |
 | `query({search_query})` | `gitnexus_query` | 同名参数，外加 `goal`/`task_context`/`limit`/`max_symbols` |
-| `detect_changes({scope})` | `gitnexus_delta` | 只回答「要不要刷新」；按 staged/compare 分范围的能力留待 0.1.9 |
+| `detect_changes({scope})` | `gitnexus_delta` | 只回答「要不要刷新」；按 staged/compare 分范围的能力尚未接入 |
 
 CLI：
 
@@ -127,8 +127,8 @@ npm run check
 npm test
 ```
 
-`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.8 时共 1028 项（引擎 710、插件 80、
-客户端 238）。其中 7 项是编解码护栏：它把 GBK 能编码的每个字符映回字节，一旦连续一段又能被
+`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.10 时共 1254 项（引擎 852、插件 81、
+客户端 321）。其中 7 项是编解码护栏：它把 GBK 能编码的每个字符映回字节，一旦连续一段又能被
 UTF-8 解码成正常文本就失败 —— 这正是双解码字符串的样子，而字符黑名单总是漏掉它。另有 6 项是
 发布卫生：`.npmrc` 与 `package-lock.json` 必须只指向 `registry.npmjs.org`（0.1.7 的 lockfile 全指
 镜像，一次 `npm install` 就会写回，只有断言能发现）；`LICENSE` 必须只有 MIT 正文、后面不能追加
