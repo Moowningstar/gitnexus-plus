@@ -298,7 +298,81 @@ export async function deltaTests() {
     check('an excluded-only change does not ask for a refresh', report.needsRefresh === false, JSON.stringify(report.counts));
   }
 
-  // --- no index at all ------------------------------------------------------------
+  // --- a file the index never records is not pending work -------------------------
+  // Measured on this repository: `.gitignore` exists in the indexed commit, yet the
+  // manifest has no hash for it (no extension → not a language the scanner parses).
+  // Calling it "added" kept the gate — and the freshness notice on every tool result —
+  // saying 索引落后 for a change the graph cannot see, until that edit was committed.
+  {
+    const fixture = await build('uncatalogued', {
+      'src/a.ts': 'export const a = 1;\n',
+      '.gitignore': 'node_modules/\n',
+    });
+    // The index recorded only what it parses; `.gitignore` was never in it.
+    await fixture.index({ 'src/a.ts': 'export const a = 1;\n' });
+    await fs.writeFile(path.join(fixture.root, '.gitignore'), 'node_modules/\n.tmp-probe/\n');
+    const report = await readDelta(fixture.root);
+    check(
+      'a modified file the index never records is excluded, not added',
+      report.entries[0]?.kind === 'excluded',
+      JSON.stringify(report.entries),
+    );
+    check(
+      'the exclusion names the reason, not the file size',
+      (report.entries[0]?.reason ?? '').includes('不收录'),
+      String(report.entries[0]?.reason),
+    );
+    check(
+      'it does not ask for a refresh on its own',
+      report.needsRefresh === false && report.counts.added === 0,
+      JSON.stringify(report.counts),
+    );
+    check('the one-line verdict says no refresh', describeDelta(report).includes('无需刷新'), describeDelta(report));
+  }
+
+  // --- but a file the repository just gained is still "added" ---------------------
+  // The status letter from `--name-status` is what makes this distinction possible: a
+  // new extension-less file (Makefile, LICENSE) is genuinely new, so a refresh would
+  // pick it up if the scanner covers it; only *modifications* of uncatalogued files are
+  // silent.
+  {
+    const fixture = await build('repo-new', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index();
+    await fs.writeFile(path.join(fixture.root, 'Makefile'), 'all:\n\ttrue\n');
+    await fixture.git([...fixture.identity, 'add', '-A']);
+    await fixture.git([...fixture.identity, 'commit', '-m', 'add makefile']);
+    const report = await readDelta(fixture.root);
+    check(
+      'a newly added extension-less file is still classified as added',
+      report.entries.some((entry) => entry.kind === 'added' && entry.path === 'Makefile'),
+      JSON.stringify(report.entries),
+    );
+    check('and it does ask for a refresh', report.needsRefresh === true, JSON.stringify(report.counts));
+  }
+
+  // --- a gap in a type the index does cover stays actionable ----------------------
+  // Same shape as the `.gitignore` case, opposite conclusion: the manifest has hashes
+  // for `.ts`, so a modified `.ts` it has never seen is a real gap, not noise.
+  {
+    const fixture = await build('covered-gap', {
+      'src/a.ts': 'export const a = 1;\n',
+      'src/b.ts': 'export const b = 2;\n',
+    });
+    await fixture.index({ 'src/a.ts': 'export const a = 1;\n' });
+    await fs.writeFile(path.join(fixture.root, 'src', 'b.ts'), 'export const b = 200;\n');
+    const report = await readDelta(fixture.root);
+    check(
+      'a file of an indexed type that the index never recorded is still added',
+      report.entries.some((entry) => entry.kind === 'added' && entry.path === 'src/b.ts'),
+      JSON.stringify(report.entries),
+    );
+    check(
+      'the verdict explains it is a same-type gap',
+      (report.entries.find((entry) => entry.path === 'src/b.ts')?.reason ?? '').includes('同类'),
+      String(report.entries.find((entry) => entry.path === 'src/b.ts')?.reason),
+    );
+  }
+
   {
     const root = fixturePath('delta-absent');
     await fs.rm(root, { recursive: true, force: true });
@@ -390,10 +464,14 @@ export async function deltaRouteTests() {
     await fs.mkdir(path.join(project, '.gitnexus'), { recursive: true });
     await fs.writeFile(path.join(project, '.gitnexus', 'gitnexus.json'), '{}');
     const reads = [];
+    // Mutable, so the same server can answer with a clean index and then a stale one: the
+    // notice is the host's sentence, and only the host can prove it is derived from the
+    // report rather than hard-coded on the client.
+    let stubReport = { comparable: true, needsRefresh: false, counts: { checked: 0 }, notes: [] };
     mountDeltaRoute(shimServer, {
       read: async (repoPath) => {
         reads.push(repoPath);
-        return { comparable: true, needsRefresh: false, counts: { checked: 0 }, notes: [] };
+        return stubReport;
       },
     });
     check('route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/delta');
@@ -418,6 +496,30 @@ export async function deltaRouteTests() {
     check('a project root is answered', ok.status === 200 && ok.body?.ok === true, `status=${ok.status}`);
     check('the payload carries the verdict', ok.body?.delta?.comparable === true && typeof ok.body?.readAt === 'string');
     check('the engine was asked once', reads.length === 1, JSON.stringify(reads));
+    check('a clean verdict carries no notice', ok.body?.notice === null, JSON.stringify(ok.body?.notice));
+
+    stubReport = {
+      indexed: true,
+      comparable: true,
+      basis: 'index',
+      indexedCommit: 'abcdef0123456789',
+      headCommit: 'fedcba9876543210',
+      counts: { checked: 3, modified: 2, added: 1, deleted: 0 },
+      needsRefresh: true,
+      certain: true,
+      truncated: false,
+      notes: [],
+      advice: { tier: 'incremental', label: '增量刷新', reason: '' },
+    };
+    const stale = await hit(`?repo=${encodeURIComponent(project)}`);
+    check(
+      'a stale verdict carries the sentence, not just the numbers',
+      stale.status === 200 &&
+        typeof stale.body?.notice === 'string' &&
+        stale.body.notice.includes('索引落后') &&
+        stale.body.notice.includes('3 个文件已改'),
+      JSON.stringify(stale.body?.notice),
+    );
 
     const missing = await hit('');
     check('a missing repo is a 400', missing.status === 400 && missing.body?.code === 'missing-repo', `status=${missing.status}`);

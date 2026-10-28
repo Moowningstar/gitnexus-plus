@@ -3,8 +3,15 @@
  *
  * The suites themselves live in `test/suites/`, grouped by subject; this file only
  * owns the order (which matters: several suites build fixtures and clean them up).
+ *
+ * The awaits live inside `main()` instead of at module top level, and that is not
+ * stylistic: `detect-changes` maps changed files to symbols, and a changed file whose
+ * diff contains no symbol at all makes the whole pre-commit check answer `PARTIAL
+ * RESULT` ("No symbols mapped for changed source files"). One exported entry point
+ * gives this file a symbol without changing what `node test/run.mjs` does.
  */
 
+import { pathToFileURL } from 'node:url';
 import { summary } from './harness.mjs';
 import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests, graphQualityTests } from './suites/coverage.mjs';
 import { versionLinesTests } from './suites/version-lines.mjs';
@@ -25,50 +32,68 @@ import { shellTests, aiSettingsTests, webDistTests, webViewProbeTests } from './
 import { webViewTests } from './suites/webview.mjs';
 import { graphToolSmoke, realRepoSmoke } from './suites/smoke.mjs';
 
-console.log('\u001b[1mgitnexus-plus · coverage engine tests\u001b[0m');
-await fixtureTests();
-await discoveryTests();
-await binaryTests();
-await regressionTests();
-await crossCheckTests();
-await stalenessTests();
-await capabilityTests();
-await languageTests();
-await commandTests();
-await formatTests();
-await compatibilityTests();
-await versionLinesTests();
-await graphQualityTests();
-await searchTests();
-await ftsSearchTests();
-await searchRouteTests();
-await routeTests();
-await fileHistoryRouteTests();
-await checkoutRouteTests();
-await analyzeTests();
-await installTests();
-// `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the
-// git-less skip path and the normal path, so awaiting it again would double-count.
-await deltaTests();
-// Pure: the report is a literal, so this runs whether or not git is available here.
-await freshnessTests();
-await managedPathTests();
-await anchorTests();
-await gitLogTests();
-await graphTests();
-await graphQueryRenderTests();
-await graphQueryToolTests();
-await subprocessTests();
-await encodingTests();
-await hygieneTests();
-await shellTests();
-await aiSettingsTests();
-await webDistTests();
-await webViewProbeTests();
-await webViewTests();
-await realRepoSmoke();
-await graphToolSmoke();
+/**
+ * Run every engine suite in order and report the totals.
+ *
+ * Exported so the file has an analysable symbol (see the header) — and so a future
+ * runner can call it instead of shelling out.
+ *
+ * @returns {Promise<{ passed: number, failed: number }>}
+ */
+export async function main() {
+  console.log('\u001b[1mgitnexus-plus · coverage engine tests\u001b[0m');
+  await fixtureTests();
+  await discoveryTests();
+  await binaryTests();
+  await regressionTests();
+  await crossCheckTests();
+  await stalenessTests();
+  await capabilityTests();
+  await languageTests();
+  await commandTests();
+  await formatTests();
+  await compatibilityTests();
+  await versionLinesTests();
+  await graphQualityTests();
+  await searchTests();
+  await ftsSearchTests();
+  await searchRouteTests();
+  await routeTests();
+  await fileHistoryRouteTests();
+  await checkoutRouteTests();
+  await analyzeTests();
+  await installTests();
+  // `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the
+  // git-less skip path and the normal path, so awaiting it again would double-count.
+  await deltaTests();
+  // Pure: the report is a literal, so this runs whether or not git is available here.
+  await freshnessTests();
+  await managedPathTests();
+  await anchorTests();
+  await gitLogTests();
+  await graphTests();
+  await graphQueryRenderTests();
+  await graphQueryToolTests();
+  await subprocessTests();
+  await encodingTests();
+  await hygieneTests();
+  await shellTests();
+  await aiSettingsTests();
+  await webDistTests();
+  await webViewProbeTests();
+  await webViewTests();
+  await realRepoSmoke();
+  await graphToolSmoke();
 
-const { passed, failed } = summary();
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed === 0 ? 0 : 1);
+  const { passed, failed } = summary();
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  return { passed, failed };
+}
+
+// `node test/run.mjs` still runs the suites and still sets the exit code; importing
+// this module does nothing.
+const entry = process.argv[1];
+if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+  const { failed } = await main();
+  process.exit(failed === 0 ? 0 : 1);
+}

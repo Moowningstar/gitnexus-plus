@@ -48,3 +48,16 @@ msg4.txt
 msg5.txt
 msg6.txt
 msg7.txt
+
+# Throwaway probe directories (`npm install` of a candidate library, one-off scripts).
+# They are real files with a real node_modules, and while they were untracked the
+# plugin's own delta engine reported them as "new files the index has not seen" —
+# 19 of them at one point — which is exactly the noise the freshness signal cannot
+# afford. The findings they produced live in `.docs/plan-0.1.10.md` §2.1.
+.tmp-probe/
+.tmp-npm-cache/
+
+# A redirected `GITNEXUS_HOME` for sandboxed index runs (`analyze` writes its registry
+# there). The registry is machine state, and while it was untracked the delta engine
+# counted it as a file the index should have seen.
+.tmp-gitnexus-home/

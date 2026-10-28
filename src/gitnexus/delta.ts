@@ -24,10 +24,16 @@
  *
  * The candidate set is therefore everything that differs from the *indexed commit*:
  *
- *   `git diff --no-renames --name-only <lastCommit>`  tracked files, working tree vs
+ *   `git diff --no-renames --name-status <lastCommit>` tracked files, working tree vs
  *                                                     that commit (staged and unstaged)
  *   `git ls-files --others --exclude-standard`        untracked files git would include
  *
+ * `--name-status` rather than `--name-only`: the status letter is what separates "the
+ * repository just gained this file" from "the repository always had it, the index never
+ * recorded it". A modified file that the manifest has no hash for is almost always a
+ * type the index does not cover (`.gitignore`, `Makefile`, a binary), and calling those
+ * "added" made the gate report 索引落后 for changes the graph cannot see — measured on
+ * this repository with `.gitignore`, which stays stale until the edit is committed.
  * `--no-renames` on purpose: with rename detection on, git reports only the new path,
  * so a rename looks like a pure addition and the index's old path silently disappears
  * from the comparison. Forcing add+delete pairs lets each side be classified on its
@@ -192,6 +198,34 @@ function splitNul(text: string): string[] {
 /** The key form `fileHashes` uses: forward slashes, no leading `./`. */
 function toKey(relativePath: string): string {
   return relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * Read `--name-status -z` output: alternating status and path tokens. Only the paths
+ * the *repository* considers new are kept — the rest is classified from the manifest
+ * plus the file itself.
+ */
+function splitNameStatus(text: string): { paths: string[]; repoNew: Set<string> } {
+  const tokens = text.split('\0');
+  const paths: string[] = [];
+  const repoNew = new Set<string>();
+  for (let index = 0; index + 1 < tokens.length; index += 2) {
+    const status = tokens[index] ?? '';
+    const candidate = tokens[index + 1] ?? '';
+    if (status === '' || candidate === '') continue;
+    paths.push(candidate);
+    // `A` is the only letter that means "this path did not exist in the indexed commit".
+    // Copies (`C`) keep their source, so they are additions too; renames are off.
+    if (status.startsWith('A') || status.startsWith('C')) repoNew.add(toKey(candidate));
+  }
+  return { paths, repoNew };
+}
+
+/** Lowercase extension with the dot, or `''` for extension-less and dotfiles. */
+function extensionOf(key: string): string {
+  const base = key.slice(key.lastIndexOf('/') + 1);
+  const dot = base.lastIndexOf('.');
+  return dot <= 0 ? '' : base.slice(dot).toLowerCase();
 }
 
 /** Stream one file through sha256. Returns null when it cannot be read. */
@@ -360,20 +394,30 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     });
   }
 
+  // Which file types the index demonstrably covers: every extension it has a hash for.
+  // Used to tell "the index is missing a file it would parse" from "the index does not
+  // parse this kind of file at all".
+  const indexedExtensions = new Set<string>();
+  for (const key of hashByKey.keys()) indexedExtensions.add(extensionOf(key));
+
   const headCommit = (await git(absRepo, ['rev-parse', 'HEAD'], gitTimeoutMs))?.trim() ?? null;
 
   let basis: DeltaBasis | null = null;
   let candidates: string[] = [];
+  /** Candidates the repository itself calls new (`A`) or copied (`C`). */
+  const repoNew = new Set<string>();
 
   if (indexedCommit !== null && headCommit !== null) {
     const diff = await git(
       absRepo,
-      ['diff', '--no-renames', '--name-only', '-z', indexedCommit, '--'],
+      ['diff', '--no-renames', '--name-status', '-z', indexedCommit, '--'],
       gitTimeoutMs,
     );
     if (diff !== null) {
+      const parsed = splitNameStatus(diff);
       basis = 'index';
-      candidates = splitNul(diff);
+      candidates = parsed.paths;
+      for (const fresh of parsed.repoNew) repoNew.add(fresh);
     }
   }
 
@@ -384,12 +428,14 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     // committed before the index was written. Say so rather than implying otherwise.
     const againstHead = await git(
       absRepo,
-      ['diff', '--no-renames', '--name-only', '-z', 'HEAD', '--'],
+      ['diff', '--no-renames', '--name-status', '-z', 'HEAD', '--'],
       gitTimeoutMs,
     );
     if (againstHead !== null) {
+      const parsed = splitNameStatus(againstHead);
       basis = 'worktree';
-      candidates = splitNul(againstHead);
+      candidates = parsed.paths;
+      for (const fresh of parsed.repoNew) repoNew.add(fresh);
     }
   }
 
@@ -416,7 +462,11 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     gitTimeoutMs,
   );
   if (untracked !== null) {
-    candidates.push(...splitNul(untracked));
+    for (const fresh of splitNul(untracked)) {
+      candidates.push(fresh);
+      // Untracked files are new to the repository by definition.
+      repoNew.add(toKey(fresh));
+    }
   }
 
   const seen = new Set<string>();
@@ -479,7 +529,20 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
               reason: `超过索引记录的大小上限（${formatBytes(cap)}），刷新也会被跳过`,
             };
           }
-          return { path: key, kind: 'added', reason: null };
+          if (repoNew.has(key)) return { path: key, kind: 'added', reason: null };
+          // Tracked and modified, yet the manifest has no hash: either the index knows
+          // this type and the file fell through (a real gap worth a refresh), or the
+          // index never covers this type at all (`.gitignore`, `Makefile`, a binary).
+          // Treating the second as "added" kept the gate saying 索引落后 for a file the
+          // graph cannot use, until the edit happened to be committed.
+          if (indexedExtensions.has(extensionOf(key))) {
+            return { path: key, kind: 'added', reason: '索引里没有这个文件，但索引收录同类文件' };
+          }
+          return {
+            path: key,
+            kind: 'excluded',
+            reason: '索引不收录该文件类型（索引里没有同类文件），刷新也不会收录',
+          };
         }
 
         counts.hashed += 1;
