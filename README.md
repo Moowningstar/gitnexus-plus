@@ -12,8 +12,9 @@
 [Upstream GitNexus docs](#upstream-gitnexus-documentation)
 
 A DeepSeek Harness plugin: see what a GitNexus index **covers and what it leaves out**,
-decide whether a refresh is worth running, browse the graph, open GitNexus's own 3D view
-for the full picture, refresh the index from the sidebar, and search its symbols — and the
+decide whether a refresh is worth running, browse the graph, read the repository's own
+commit graph — each commit's files and patches included — open GitNexus's own 3D view for
+the full picture, refresh the index from the sidebar, and search its symbols — and the
 source text the index recorded — by keyword.
 
 It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitnexus` is a
@@ -69,7 +70,9 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
 - **Index coverage** — lists the oversized files `gitnexus analyze` skipped, with size,
   language share, and generated/minified signals.
 - **Index freshness** — indexed commit vs `HEAD`, classified `current` / `behind` /
-  `diverged` / `unknown`, plus the uncommitted-change count.
+  `diverged` / `unknown`, plus the uncommitted-change count. The same verdict feeds the
+  panel sentence and the tool prefix described above, so there is one judgement, not three
+  that can disagree.
 - **Version consistency** — compares the GitNexus CLI that wrote the index
   (`runnerIdentity.cliVersion`) with the CLI installed now. A mismatch inside the
   supported range (`^1.6.12 || >=1.6.13-rc.0 <2.0.0`) is reported as a **cross-line**
@@ -92,10 +95,47 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   timeline, and a per-file commit timeline that opens under the row that was clicked
   (whichever of the three lists it came from). One list renders at a time — the segmented
   control switches between baseline, most-changed, most-recent and missing, with the
-  cross-tab and authors behind one disclosure. A commit expands into a framed patch with
-  old/new line numbers, background-tinted added/removed rows and a copy button. The
-  header's branch select runs a real `git checkout` and reloads the report against the
-  new branch; it never stashes and never guesses, and git's own refusal is shown as-is.
+  cross-tab and authors behind one disclosure. The header's branch select runs a real
+  `git checkout` and reloads the report against the new branch; it never stashes and never
+  guesses, and git's own refusal is shown as-is.
+
+- **Commit graph** — that timeline is drawn as lanes, not as a row of dots: one column per
+  concurrent line of history, a fixed colour per column, the index verdict as a thin ring
+  *around* the dot instead of the dot's fill, and the refs pointing at a commit (`main`,
+  `origin/main`, `tag: v0.1.9`) as chips in their column's colour. History is read with
+  `--all`, so a branch that is not merged yet gets its own column instead of being flattened
+  into one straight line; hovering a row thickens its lane and fades the ones it crosses;
+  past six columns the gutter counts the folded ones as `+N` on each row rather than
+  pretending the row is narrow. No drawing library is bundled: the curve is a cubic Bézier
+  that stops short of each dot, which is why lines finally stop running through them.
+
+- **A commit's own files** — clicking a commit expands the files it touched, with `+n` /
+  `−n`, in git's path order and capped at 40 per commit (the cap is stated on screen).
+  Clicking one of those files opens its patch inline: the same `file-diff` route and the
+  same renderer the per-file timeline already used, with old/new line numbers, tinted
+  added/removed rows and a copy button. The patch is read, never stored — nothing new
+  writes to the index.
+
+- **Paging, not "the first few"** — the four activity lists each keep their own page (25
+  more per click) and the commit timeline shows 15 at a time, with the remainder counted on
+  the button. Switching lists does not reset the others, and opening a commit's files does
+  not collapse the page you were on.
+
+- **Index staleness, said out loud** — when the gate's verdict is `behind`, the graph card
+  carries one sentence above the drawing (which commit it is behind from, how many files
+  changed, what to run), and `gitnexus_impact` / `gitnexus_context` / `gitnexus_query`
+  repeat the same sentence at the top of their answers. A tree that matches says nothing at
+  all, and a verdict that cannot be confirmed gets its own wording instead of borrowing
+  "stale" — a refresh prompt for an index that is merely unanchored would train people to
+  ignore both.
+
+- **CI gates** — `gitnexus-coverage` can fail a pipeline instead of waiting for someone to
+  read the panel: `--fail-on-uncovered` (the analyzer would index files the index does not
+  hold) and `--fail-on-missing` (no index, or an index describing files that are gone) exit
+  **3**; the older `--fail-on-large` keeps exit **2** for size skips. The two codes are
+  separate on purpose — one is a hole the index knows about, the other means index and
+  checkout have diverged — and the reasons go to **stderr**, so `--json` still parses and
+  the exit code stays the contract.
 
 - **Language distribution** — bytes split into languages GitNexus can parse, formats it
   only recognizes, and everything else. Without GitNexus, a built-in extension map keeps
@@ -202,6 +242,8 @@ Inside DSH:
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
 - route `GET /api/gitnexus/file-history?repo=<project>&path=<file>&days=7` — one file's
   bounded commit timeline
+- route `GET /api/gitnexus/file-diff?repo=<project>&path=<file>&sha=<commit>` — one file's
+  patch in one commit (7–40 hex sha, read-only, bounded); what a commit's file list opens
 - route `POST /api/gitnexus/checkout?repo=<project>` with body `{"branch": "<ref>"}` — the
   top bar's branch switch: runs `git checkout` in the project (the one route that writes
   to the working tree), then the panel reloads the report
@@ -298,6 +340,21 @@ in the index — refresh it and ask again".
 The lists themselves are bounded (12 callers, 6 processes, 12 definitions) but the counts
 are always real, and a cut list says how many entries it left out.
 
+**An answer from a stale index says so first.** Before rendering, the tool asks the same
+gate the panel uses; if the index is behind, one sentence is prepended:
+
+```text
+索引落后：自 99c1e78 起 16 个文件已改（14 改 / 2 增 / 0 删），以下结果可能过期；建议增量刷新。
+
+GitNexus impact · foo
+…
+```
+
+It is a sentence, not a flag, because `<prefix?>` in a text tool would be ignored. Three
+rules keep it useful: a clean tree adds nothing, an unconfirmable verdict uses its own
+wording (`索引新鲜度无法确认…`) instead of borrowing "stale", and `gitnexus_delta` does not
+prefix itself — it already is that answer.
+
 `graphTools: false` withdraws the three tools entirely and keeps `gitnexus_coverage` and
 `gitnexus_delta`, which spawn nothing.
 
@@ -341,6 +398,9 @@ GitNexus path owns the rest.
 | Windows search returns very few hits, or the panel warns FTS is unavailable | Read `capabilities.fts` in `.gitnexus/meta.json` first: `status: "unavailable"` is a record written when the index was built, and it can be **stale** — measured here, the record said unavailable while `gitnexus doctor` reported `Full-text search: available` and the extension files were present. **修复搜索索引（FTS）** (`analyze --repair-fts`) rewrites that record and the search indexes without touching the graph; the panel then reports what it actually searched instead of repeating the manifest. Other causes, in order: the index was built with `--skip-fts`; the repair could not run out of process because the sandbox refuses the spawn (`spawn EPERM` — run the copied command in a terminal); or the extension genuinely cannot load, which is a missing Windows runtime (VC++ 2015-2022 x64 and OpenSSL 3) — the rarest of the four, and worth confirming rather than assuming. | [`gitnexus/README.md` — Windows: full-text search unavailable](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#windows-full-text-search-unavailable), [Analyze warns about unavailable FTS](https://github.com/abhigyanpatwari/GitNexus/blob/main/gitnexus/README.md#analyze-warns-about-unavailable-fts-or-vector-extensions) |
 | The refresh button says 无需刷新 and is disabled | That is the Tier 0 verdict, not a failure: every file the index recorded still hashes the same, so re-running the analyzer would change nothing. **仍然刷新** forces it anyway (useful after a schema or GitNexus upgrade). If the index recorded no commit baseline, the panel does **not** claim 无需刷新 — it says it cannot confirm and leaves the button enabled. | This plugin's delta engine; no upstream GitNexus path. |
 | The gate says 无法确认 instead of 无需刷新 | The index recorded no commit. Since 0.1.8 the plugin writes the current commit back into the manifest's `lastCommit` (and the registry entry that run used) **after a refresh it started itself succeeds**, so a refresh under the sandbox ends up saying 已是最新 too. It does **not** write when the working tree is dirty — recording a commit that excludes those edits would make the gate claim 已是最新 falsely; the panel then says there are N uncommitted changes and to refresh after committing. Three cases still need a terminal: the index was built elsewhere, the directory is not a git repository, or the repository has no commits yet. The write-back only fills an empty field and never overwrites an existing baseline. | This plugin's delta engine plus the analyzer's git access; no upstream GitNexus path. |
+| The graph card, or a tool answer, opens with 索引落后 | That sentence is generated from the same gate the refresh button uses: the commit it names is the index's recorded baseline, the count is content hashes that no longer match, and the suggestion is the gate's own `none` / `incremental` / `reanalyze` / `rebuild` / `init`. Clear it by refreshing the index (panel or CLI) — committing alone does not make the index fresher, it only stops new files from being counted. Since 0.1.10 it is cached for 5 seconds, so a refresh is reflected almost immediately; an index that recorded no commit says 无法确认 and never borrows this sentence. | This plugin's delta engine and `freshness.ts`; no upstream GitNexus path. |
+| A coverage gate fails the pipeline with exit 3 | Read stderr: `未入索引` means the analyzer would index files the index does not hold (refresh it); `索引缺失` means the target has no `.gitnexus/gitnexus.json` (initialize it, or drop `--fail-on-missing` for a repository you only scan); `索引过陈旧` means the index describes paths that no longer exist (refresh or rebuild). Exit **2** is the older `--fail-on-large` (a file was skipped for size) and is a different problem. `--json` is unaffected because the reasons go to stderr. | This plugin's `coverage-gate.ts`; upstream owns which files get skipped. |
+| The commit timeline is one column although the repository has branches | The timeline reads `git log --all` but only within the window you picked (7/14/30 days, at most the 300 most recent commits), so a branch whose commits are all older contributes no column, and a branch that was merged may show only its merge point. One column is also the correct answer for linear history — the width is evidence about the window, not about the repository. Past six columns the folded ones are counted as `+N` on each row. | This plugin's git log reader; no upstream GitNexus path. |
 | The panel says git is unavailable, and the activity/file-history cards are empty | Up to 0.1.7 every git call captured output through a **pipe**, which a confined host (the DSH sandbox, a Windows service whose children run under a restricted token) refuses with `spawn EPERM` — read as "git is not installed". Since 0.1.8 every git call writes the child's output to a file and reads it back (`src/gitnexus/git-capture.ts`); stdout and stderr are captured separately so git's `LF will be replaced by CRLF` warning cannot leak into a list of file names. The capture tries the host's own spawner first and falls back to the file descriptor when that cannot reach git — and the scratch files live inside the workspace (`<repo>/.gitnexus/plugin-home/tmp`), because a host process is often the one component that may not write to the system temp directory. When all of it fails, the verdict now names the reason (`git rev-parse HEAD → EPERM`, `… → exit 128`): no git, no repository and a refused spawn are three different problems. | This plugin's subprocess capture; no upstream GitNexus path. |
 | The graph card is empty, or fails with 404 | A 404 means the host predates `/api/gitnexus/graph` — restart DSH, not just the page. An empty canvas with a message means the index has no communities yet (an old index), or the store is busy: refresh the index. Nodes are capped by design; the card states how much it left out. | This plugin's host route; graph data itself comes from the GitNexus index. |
 | The graph loads for some projects but spins or returns 504 for others | On Windows the ACL sandbox's first workspace grant propagates an inheritable ACE across the whole repository, which can exceed the 25 s helper timeout on a large tree; a project whose grant is already cached is fast. Since 0.1.5 the search/graph helpers root the policy at `<repo>/.gitnexus`, so the grant covers only the index; restart DSH. If it still fails, confirm `.gitnexus/lbug` exists and that no analyze is holding the index. | This plugin's sandbox policy root; graph data itself comes from the GitNexus index. |
@@ -447,6 +507,16 @@ the related features puts that use under it.**
 - The refresh gate compares content hashes of the files the index recorded. It cannot
   see a change the analyzer would make for its own reasons (a schema upgrade, a new
   feature mode); **仍然刷新** exists for exactly that case.
+- The commit graph is bounded on purpose: a 7/14/30-day window, at most the 300 most
+  recent commits across all refs, six drawn columns and 40 files per commit. `+N` and
+  「仅列出前 40 个文件」 name what was folded; a missing column or file is evidence about
+  the window, not proof that it never existed.
+- The staleness sentence is advisory. It never blocks a query, a refresh or a commit, and
+  it is cached for 5 seconds — so a refresh can be visible slightly before the sentence
+  disappears, and a just-committed change can still be reported for a moment.
+- A coverage gate judges only what the analyzer would include. A file it would never index
+  (no extension, generated, over the size cap) is reported as `excluded` and does **not**
+  trip `--fail-on-uncovered`; a gate that fired on those would be permanently red.
 - The graph view draws communities by default, not every symbol: the overview is the
   community graph, and a drill-down shows at most the configured node budget of one
   community's members. The **Symbol view** is a bounded all-symbol projection ordered by
