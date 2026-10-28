@@ -35,6 +35,7 @@ let failed = 0;
 /** @param {string} name @param {boolean} ok @param {string} [detail] */
 import { renderSuite } from './client/render.mjs';
 import { graphSuite } from './client/graph.mjs';
+import { interactionSuite } from './client/interaction.mjs';
 
 function check(name, ok, detail) {
   if (ok) {
@@ -1251,6 +1252,8 @@ graphSuite({
   render,
   withHookFrame,
 });
+
+await interactionSuite({ I, React: ReactFacade, check, section });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
