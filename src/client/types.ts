@@ -153,6 +153,13 @@ export interface ClientActivityFile {
   verdict: string;
 }
 
+/** One file inside a commit's file list, with the lines it gained and lost. */
+export interface ClientCommitFileDelta {
+  path: string;
+  insertions: number;
+  deletions: number;
+}
+
 /** One commit in the activity timeline. */
 export interface ClientActivityCommit {
   sha: string;
@@ -164,6 +171,14 @@ export interface ClientActivityCommit {
   insertions: number;
   deletions: number;
   verdict: string;
+  /** Parent SHAs, first parent first; empty for a root commit. */
+  parents?: string[];
+  /** Branches, remotes and tags pointing here (`main`, `origin/main`, `tag: v0.1.9`). */
+  refs?: string[];
+  /** The files the commit touched; capped by the host for a pathological commit. */
+  changed?: ClientCommitFileDelta[];
+  /** True when `changed` is shorter than the commit's real file count. */
+  filesTruncated?: boolean;
 }
 
 /** One activity × index cross-tab row. */
@@ -460,6 +475,19 @@ export interface GraphViewState {
    * the card sat on 读取中… forever, which reads as a hang rather than as "restart DSH".
    */
   routeState: 'unknown' | 'ready' | 'missing';
+  /**
+   * The host's sentence about index freshness, or null/absent when there is nothing to say.
+   *
+   * Carried on this card rather than in the gate's own card on purpose: the graph is the
+   * surface that silently answers from a snapshot, so it is the one that has to admit
+   * when the snapshot is behind. Null means "fresh, or not measured" — both render as no
+   * banner, and neither is a claim the client makes up on its own.
+   *
+   * Optional, and that is the compatible shape rather than an oversight: a host older than
+   * this batch simply omits the field, and "absent" has to mean the same thing as "null"
+   * (nothing known) instead of breaking the card.
+   */
+  staleNotice?: string | null;
   /** The community being drilled into, or null for the overview. */
   scope: string | null;
   onOpenCommunity: (id: string) => void;

@@ -18,6 +18,17 @@ export const LOG_FIELD_SEPARATOR = '\u001f';
 /** Record separator in front of every commit header in the log. */
 export const LOG_RECORD_SEPARATOR = '\u001e';
 
+/**
+ * Files one commit carries into the activity payload.
+ *
+ * A single commit can touch thousands of paths — a lockfile regeneration, a vendored
+ * drop — and the panel only ever shows a screenful of them. The cap is applied here,
+ * while the log is read, so the cost of a pathological commit is bounded at the
+ * source and the client never has to be defensive about it. `filesTruncated` on the
+ * commit says the list was cut, so a short list is never mistaken for a small commit.
+ */
+export const COMMIT_FILE_LIMIT = 40;
+
 /** One file's line deltas, as both numstat shapes express them. */
 export interface NumstatRow {
   path: string;
@@ -50,6 +61,27 @@ export function parseNumstatLines(text: string): NumstatRow[] {
     });
   }
   return rows;
+}
+
+/**
+ * A decorations string into branch names.
+ *
+ * `%D` prints `HEAD -> main, origin/main, tag: v0.1.9` — comma separated, with the
+ * symbolic HEAD peeled off so the row says which branch *is* checked out rather than
+ * repeating `HEAD`. Tags keep their `tag:` prefix on purpose: a tag is not a branch and
+ * colouring it like one would be a small lie about the shape of the history.
+ */
+export function parseDecorations(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  const refs: string[] = [];
+  for (const part of raw.split(',')) {
+    let name = part.trim();
+    if (name === '') continue;
+    if (name.startsWith('HEAD ->')) name = name.slice('HEAD ->'.length).trim();
+    if (name === '' || name === 'HEAD') continue;
+    refs.push(name);
+  }
+  return refs;
 }
 
 /** A file row before it is crossed with the index, so no verdict exists yet. */
@@ -106,7 +138,8 @@ export function parseLogWindow(raw: string, maxCommits: number): LogTally {
     const body = newline === -1 ? '' : chunk.slice(newline + 1);
     // `split` yields a plain array, so a short header really can leave these
     // undefined even though the declared element type says otherwise.
-    const [sha, author, email, date, subject]: (string | undefined)[] = header.split(LOG_FIELD_SEPARATOR);
+    const [sha, author, email, date, subject, parentsRaw, decorationsRaw]: (string | undefined)[] =
+      header.split(LOG_FIELD_SEPARATOR);
     if (sha === undefined || date === undefined) continue;
 
     if (commitCount >= maxCommits) {
@@ -122,6 +155,13 @@ export function parseLogWindow(raw: string, maxCommits: number): LogTally {
       insertions: 0,
       deletions: 0,
       fileSet: new Set(),
+      // `%P` is space separated, and a root commit has none at all — the empty
+      // string must become an empty list, not `['']`, or every root looks like it
+      // points at an unreadable parent.
+      parents: (parentsRaw ?? '').split(' ').filter((parent) => parent !== ''),
+      refs: parseDecorations(decorationsRaw),
+      changed: [],
+      filesTruncated: false,
     };
     if (newestCommit === '' || date > newestCommit) newestCommit = date;
     if (oldestCommit === '' || date < oldestCommit) oldestCommit = date;
@@ -158,6 +198,15 @@ export function parseLogWindow(raw: string, maxCommits: number): LogTally {
       commit.insertions += row.insertions;
       commit.deletions += row.deletions;
       commit.fileSet.add(row.path);
+      if (commit.changed.length < COMMIT_FILE_LIMIT) {
+        commit.changed.push({
+          path: row.path,
+          insertions: row.insertions,
+          deletions: row.deletions,
+        });
+      } else {
+        commit.filesTruncated = true;
+      }
 
       let file = files.get(row.path);
       if (file === undefined) {

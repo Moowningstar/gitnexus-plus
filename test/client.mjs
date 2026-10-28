@@ -93,14 +93,18 @@ const hooks = {
  *
  * `styles` collects every `style` object met on the way: a layout decision that only
  * exists in CSS (a sticky header, an opaque background) cannot be asserted from text.
+ * `nodes` keeps each host element with its props for the same reason one level down:
+ * an SVG line's `stroke` is the whole point of a lane colour and appears nowhere in
+ * the text.
  *
  * @param {any} node
- * @returns {{text: string, tags: string[], styles: any[]}}
+ * @returns {{text: string, tags: string[], styles: any[], nodes: Array<{type: string, props: any}>}}
  */
 function renderTree(node) {
   const text = [];
   const tags = [];
   const styles = [];
+  const nodes = [];
 
   const walk = (current) => {
     if (current === null || current === undefined || typeof current === 'boolean') return;
@@ -123,12 +127,13 @@ function renderTree(node) {
       return;
     }
     tags.push(String(current.type));
+    nodes.push({ type: String(current.type), props: current.props ?? {} });
     if (current.props?.style !== undefined) styles.push(current.props.style);
     walk(current.props?.children);
   };
 
   walk(node);
-  return { text: text.join(' '), tags, styles };
+  return { text: text.join(' '), tags, styles, nodes };
 }
 
 /** Render a component with the hook shim active. */
@@ -625,6 +630,19 @@ check(
   !activityTree.text.includes('活动分支') && !activityTree.text.includes('回到当前分支'),
   activityTree.text.slice(0, 160),
 );
+// The fold is a control, not a sentence: as a ghost button it read as prose on a card of
+// prose, and the reader had to hover to find out it opened anything.
+const foldButton = activityTree.nodes.find(
+  (node) => node.type === 'button' && String(node.props['aria-label'] ?? '').includes('提交时间线'),
+);
+check(
+  'the timeline fold is dressed as a button and reports its state',
+  foldButton !== undefined &&
+    foldButton.props['aria-expanded'] === false &&
+    String(foldButton.props.style?.border ?? '').length > 0 &&
+    String(foldButton.props.style?.cursor ?? '') === 'pointer',
+  JSON.stringify(foldButton?.props?.style ?? null),
+);
 const opened = render(I.GitActivitySection, {
   activity: activityFixture,
   projectPath: null,
@@ -697,6 +715,295 @@ check(
   baselineTree.text.slice(0, 200),
 );
 check('the baseline row marks itself open', baselineTree.text.includes('收起'), baselineTree.text.slice(0, 200));
+
+section('git activity: lanes, commit file lists, and the page that never ends at 8');
+
+// Lane geometry is a pure function over `parents`, so the shapes that actually occur in
+// history can be asserted without a repository: a trunk, a merge, many branches at
+// once, and the window edge where a commit's child is outside the range.
+const laneLinear = I.commitLanes([
+  { sha: 'c3', parents: ['c2'] },
+  { sha: 'c2', parents: ['c1'] },
+  { sha: 'c1', parents: [] },
+]);
+check(
+  'a linear history stays in one lane',
+  laneLinear.laneCount === 1 && laneLinear.cells.every((cell) => cell.lane === 0),
+  JSON.stringify(laneLinear),
+);
+check(
+  'only a commit that waits for a parent continues downwards',
+  laneLinear.cells[0].continuesDown === true && laneLinear.cells[2].continuesDown === false,
+  JSON.stringify(laneLinear.cells.map((cell) => cell.continuesDown)),
+);
+
+const laneMerge = I.commitLanes([
+  { sha: 'm', parents: ['p1', 'p2'] },
+  { sha: 'p1', parents: [] },
+  { sha: 'p2', parents: [] },
+]);
+check(
+  'a merge opens a second lane and curves into it',
+  laneMerge.laneCount === 2 && laneMerge.cells[0].merges.length === 1 && laneMerge.cells[0].merges[0].to === 1,
+  JSON.stringify(laneMerge.cells[0]),
+);
+check(
+  'the mainline keeps lane 0 while the side branch is still pending',
+  laneMerge.cells[1].lane === 0 && laneMerge.cells[1].passThrough.join(',') === '1' && laneMerge.cells[2].lane === 1,
+  JSON.stringify(laneMerge.cells.map((cell) => ({ lane: cell.lane, pass: cell.passThrough }))),
+);
+
+const laneWide = I.commitLanes(Array.from({ length: 10 }, (_, index) => ({ sha: `c${index}`, parents: [`p${index}`] })));
+check(
+  'ten pending branches get ten lanes instead of sharing one',
+  laneWide.laneCount === 10 && laneWide.cells[9].lane === 9,
+  JSON.stringify({ lanes: laneWide.laneCount, last: laneWide.cells[9].lane }),
+);
+
+check(
+  'a payload without parents still renders as one lane',
+  I.commitLanes([{ sha: 'a' }, { sha: 'b' }]).laneCount === 1,
+  JSON.stringify(I.commitLanes([{ sha: 'a' }, { sha: 'b' }])),
+);
+
+const orphan = I.commitLanes([{ sha: 'x', parents: ['outside'] }, { sha: 'y' }]);
+check(
+  'a commit whose child is outside the window starts its own lane',
+  orphan.laneCount === 2 && orphan.cells[1].lane === 1,
+  JSON.stringify(orphan.cells.map((cell) => cell.lane)),
+);
+
+const commitFiles = render(I.CommitFileList, {
+  commit: {
+    sha: 'deadbeef',
+    files: 5,
+    filesTruncated: true,
+    changed: [
+      { path: 'src/a.ts', insertions: 50, deletions: 5 },
+      { path: 'src/b.ts', insertions: 0, deletions: 12 },
+    ],
+  },
+  projectPath: null,
+  openPath: null,
+  diff: null,
+  busy: false,
+  error: null,
+  onOpenPath: () => {},
+});
+check(
+  'a commit lists its own files with both deltas',
+  commitFiles.text.includes('src/a.ts') && commitFiles.text.includes('+50') && commitFiles.text.includes('−12'),
+  commitFiles.text.slice(0, 240),
+);
+check(
+  'a capped file list says how many there really were',
+  commitFiles.text.includes('仅列出前 2 个文件（共 5 个）'),
+  commitFiles.text.slice(0, 240),
+);
+check(
+  'without a host route a file row is not offered as clickable',
+  commitFiles.text.includes('改动') === false,
+  commitFiles.text.slice(0, 240),
+);
+
+const commitNoFiles = render(I.CommitFileList, {
+  commit: { sha: 'feedface', files: 3, changed: [] },
+  projectPath: null,
+  openPath: null,
+  diff: null,
+  busy: false,
+  error: null,
+  onOpenPath: () => {},
+});
+check(
+  'a commit from an old host explains the missing file list',
+  commitNoFiles.text.includes('该提交的文件列表没有随活动数据下发。'),
+  commitNoFiles.text,
+);
+
+const timelineTree = render(I.ActivityTimeline, {
+  timeline: [
+    {
+      sha: 'aaa1111cccc',
+      shortSha: 'aaa1111',
+      date: '2026-10-27T10:00:00+08:00',
+      author: 'Ada',
+      subject: 'merge side branch',
+      files: 1,
+      insertions: 3,
+      deletions: 1,
+      verdict: 'indexed',
+      parents: ['bbb2222dddd', 'ccc3333'],
+      refs: ['main'],
+      changed: [],
+    },
+    {
+      sha: 'bbb2222dddd',
+      shortSha: 'bbb2222',
+      date: '2026-10-26T10:00:00+08:00',
+      author: 'Ada',
+      subject: 'mainline work',
+      files: 1,
+      insertions: 1,
+      deletions: 0,
+      verdict: 'missing',
+      parents: [],
+      refs: ['origin/main', 'tag: v0.1.9'],
+      changed: [],
+    },
+  ],
+  indexKnown: true,
+  projectPath: null,
+});
+check(
+  'each timeline row draws its lane gutter',
+  timelineTree.tags.filter((tag) => tag === 'svg').length === 2,
+  JSON.stringify(timelineTree.tags.filter((tag) => tag === 'svg').length),
+);
+check(
+  'the timeline names every visible commit subject',
+  timelineTree.text.includes('merge side branch') && timelineTree.text.includes('mainline work'),
+  timelineTree.text.slice(0, 240),
+);
+check(
+  'a commit labels the branches and tags that point at it',
+  timelineTree.text.includes('origin/main') && timelineTree.text.includes('tag: v0.1.9'),
+  timelineTree.text.slice(0, 320),
+);
+
+// A lane graph is only followable through colour: with one grey for every line the reader
+// has to trace pixels, which is exactly the complaint the first version earned.
+const laneStrokes = timelineTree.nodes
+  .filter((node) => node.type === 'line' || node.type === 'path')
+  .map((node) => node.props.stroke)
+  .filter((stroke) => typeof stroke === 'string');
+check(
+  'two lanes are drawn in two different colours',
+  new Set(laneStrokes).size >= 2,
+  JSON.stringify([...new Set(laneStrokes)]),
+);
+const dots = timelineTree.nodes.filter(
+  (node) => node.type === 'circle' && node.props.fill !== 'none',
+);
+const rings = timelineTree.nodes.filter((node) => node.type === 'circle' && node.props.fill === 'none');
+check(
+  'the merge commit keeps the trunk colour, and no verdict repaints it',
+  dots.length === 2 && dots[0].props.fill === '#4c8dff' && dots[1].props.fill === '#4c8dff',
+  JSON.stringify(dots.map((dot) => dot.props.fill)),
+);
+check(
+  'only the commit with missing files wears a verdict ring',
+  rings.length === 1 && String(rings[0].props.stroke).includes('state-warning'),
+  JSON.stringify(rings.map((ring) => ring.props.stroke ?? null)),
+);
+
+// The curve is a contract on numbers, so it is asserted without a renderer. Both control
+// points must sit at the midpoint of the run: a fixed inset doubles back on a short move
+// and reads as a kink, which is the difference between "merge" and "misplaced dash".
+const curve = I.laneCurve(10, 24, 23, 46);
+check('a merge curve is a vertical bezier between the two lanes', curve === 'M10 23 C 10 34.5, 24 34.5, 24 46', curve);
+const curveBack = I.laneCurve(24, 10, 23, 46);
+check(
+  'a lane closing back into the trunk curves the other way',
+  curveBack === 'M24 23 C 24 34.5, 10 34.5, 10 46',
+  curveBack,
+);
+const curveNumbers = curve.match(/-?\d+(?:\.\d+)?/g).map(Number);
+check(
+  'both control points sit halfway down the run, not at a fixed inset',
+  curveNumbers[3] === 34.5 && curveNumbers[5] === 34.5 && curveNumbers[1] === 23 && curveNumbers[7] === 46,
+  JSON.stringify(curveNumbers),
+);
+// And the row actually uses it, so the tests above cannot drift from the view. The run
+// starts at the dot's clearance (4.5 radius + 2 gap) rather than at the centre: a curve
+// that starts inside the dot shows a bright seam through it.
+const mergePaths = timelineTree.nodes
+  .filter((node) => node.type === 'path')
+  .map((node) => String(node.props.d ?? ''));
+check(
+  'the rendered merge uses the shared curve, starting at the dot clearance',
+  mergePaths.length === 1 && mergePaths[0] === I.laneCurve(10, 24, 29.5, 46),
+  JSON.stringify(mergePaths),
+);
+
+// Past six lanes the gutter cannot grow any wider without eating the commit text, so the
+// extras are counted rather than drawn. The count has to be per row: a row that only
+// crosses two of the clamped lanes should say "+2", not "+3".
+const gutterCell = (lane, passThrough, merges = []) => ({
+  lane,
+  passThrough,
+  merges,
+  continuesDown: false,
+});
+const wideGutter = renderTree(
+  React.createElement(I.LaneGutter, {
+    cell: gutterCell(2, [0, 1, 3, 4, 5, 6, 7, 8]),
+    laneCount: 9,
+    verdict: 'done',
+  }),
+);
+check(
+  'lanes past the width limit are counted at the right edge',
+  wideGutter.text.includes('+3'),
+  wideGutter.text,
+);
+check(
+  'the count explains itself on hover',
+  wideGutter.nodes.some(
+    (node) => node.type === 'title' && String(node.props.children).includes('共 9 条分支线'),
+  ),
+  JSON.stringify(wideGutter.nodes.filter((node) => node.type === 'title').map((node) => node.props.children)),
+);
+const narrowGutter = renderTree(
+  React.createElement(I.LaneGutter, { cell: gutterCell(0, [1]), laneCount: 2, verdict: 'done' }),
+);
+check(
+  'a graph that fits says nothing about hidden lanes',
+  !narrowGutter.text.includes('+'),
+  narrowGutter.text,
+);
+
+// Hover emphasis: the row's own lane thickens and everything it crosses fades, so the
+// line you are on is the only one at full weight.
+const hoveredGutter = renderTree(
+  React.createElement(I.LaneGutter, {
+    cell: gutterCell(1, [0, 2]),
+    laneCount: 3,
+    verdict: 'done',
+    emphasised: true,
+  }),
+);
+const calmGutter = narrowGutter;
+const ownStrokes = (tree) =>
+  tree.nodes
+    .filter((node) => node.type === 'line' && Number(node.props.strokeWidth) > 0)
+    .map((node) => Number(node.props.strokeWidth));
+check(
+  'hovering a row thickens its lane and thins the lanes it crosses',
+  ownStrokes(hoveredGutter).includes(2.8) &&
+    ownStrokes(calmGutter).every((width) => width <= 2) &&
+    hoveredGutter.nodes.some((node) => node.type === 'line' && node.props.opacity === 0.3),
+  JSON.stringify({ hovered: ownStrokes(hoveredGutter), calm: ownStrokes(calmGutter) }),
+);
+check(
+  'hovering also grows the dot, so the row reads as selected',
+  hoveredGutter.nodes.some((node) => node.type === 'circle' && Number(node.props.r) === 5.2) &&
+    calmGutter.nodes.some((node) => node.type === 'circle' && Number(node.props.r) === 4.5),
+  JSON.stringify(hoveredGutter.nodes.filter((node) => node.type === 'circle').map((node) => node.props.r)),
+);
+
+// The branch chips are tinted with their own lane's colour: a neutral chip on a coloured
+// graph is a legend the reader has to build in their head.
+const chip = timelineTree.nodes.find(
+  (node) => node.type === 'span' && String(node.props.title ?? '') === 'origin/main',
+);
+check(
+  'a branch chip is drawn in its lane colour',
+  chip !== undefined &&
+    String(chip.props.style?.border ?? '').includes('#4c8dff') &&
+    String(chip.props.style?.background ?? '').includes('#4c8dff'),
+  JSON.stringify(chip?.props?.style ?? null),
+);
 
 section('route URL resolution');
 // In Node there is no `document`, so each case is exercised with an explicit fake

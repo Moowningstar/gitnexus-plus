@@ -6,15 +6,23 @@
  * --numstat` and `git diff --numstat` output, including the `-` a binary file gets.
  */
 
-import { LOG_FIELD_SEPARATOR, LOG_RECORD_SEPARATOR, parseLogWindow, parseNumstatLines } from '../../lib/gitnexus/git-log.js';
+import {
+  COMMIT_FILE_LIMIT,
+  LOG_FIELD_SEPARATOR,
+  LOG_RECORD_SEPARATOR,
+  parseDecorations,
+  parseLogWindow,
+  parseNumstatLines,
+} from '../../lib/gitnexus/git-log.js';
 import { check, section } from '../harness.mjs';
 
 const US = LOG_FIELD_SEPARATOR;
 const RS = LOG_RECORD_SEPARATOR;
 
 /** One log record: header line, then its numstat body. */
-function record(sha, author, email, date, subject, rows) {
-  return `${RS}${sha}${US}${author}${US}${email}${US}${date}${US}${subject}\n${rows.map((r) => r.join('\t')).join('\n')}\n`;
+function record(sha, author, email, date, subject, rows, parents = '', decorations = '') {
+  const header = `${sha}${US}${author}${US}${email}${US}${date}${US}${subject}${US}${parents}${US}${decorations}`;
+  return `${RS}${header}\n${rows.map((r) => r.join('\t')).join('\n')}\n`;
 }
 
 export async function gitLogTests() {
@@ -109,6 +117,53 @@ export async function gitLogTests() {
     empty.commitCount === 0 && empty.files.size === 0 && empty.stamps.length === 0 && empty.capped === false,
   );
 
+  section('each commit carries its parents and its own file list');
+  const shaped = parseLogWindow(
+    `${record('c1', 'Ada', 'ada@example.com', '2026-10-03T10:00:00+08:00', 'merge', [['1', '0', 'src/a.ts']], 'p1 p2')}` +
+      `${record('p1', 'Ada', 'ada@example.com', '2026-10-02T10:00:00+08:00', 'root', [['2', '3', 'src/b.ts']])}`,
+    10,
+  );
+  check(
+    'a merge commit lists both parents in order',
+    JSON.stringify(shaped.commits[0].parents) === '["p1","p2"]',
+    JSON.stringify(shaped.commits[0].parents),
+  );
+  check(
+    'a root commit has no parents, not one empty string',
+    Array.isArray(shaped.commits[1].parents) && shaped.commits[1].parents.length === 0,
+    JSON.stringify(shaped.commits[1].parents),
+  );
+  check(
+    'each commit carries its own file deltas, not the window total',
+    shaped.commits[0].changed.length === 1 &&
+      shaped.commits[0].changed[0].path === 'src/a.ts' &&
+      shaped.commits[0].changed[0].insertions === 1 &&
+      shaped.commits[1].changed[0].path === 'src/b.ts' &&
+      shaped.commits[1].changed[0].deletions === 3,
+    JSON.stringify(shaped.commits.map((commit) => commit.changed)),
+  );
+  check(
+    'a commit under the file limit is not called truncated',
+    shaped.commits[0].filesTruncated === false,
+    JSON.stringify(shaped.commits[0].filesTruncated),
+  );
+
+  const manyRows = Array.from({ length: COMMIT_FILE_LIMIT + 5 }, (_, index) => ['1', '0', `src/f${index}.ts`]);
+  const wide = parseLogWindow(
+    `${record('w1', 'Ada', 'ada@example.com', '2026-10-04T10:00:00+08:00', 'sweep', manyRows)}`,
+    10,
+  );
+  check(
+    'the per-commit file list stops at the limit and says so',
+    wide.commits[0].changed.length === COMMIT_FILE_LIMIT && wide.commits[0].filesTruncated === true,
+    JSON.stringify({ kept: wide.commits[0].changed.length, truncated: wide.commits[0].filesTruncated }),
+  );
+  check(
+    'a commit with exactly the limit is not truncation',
+    parseLogWindow(`${record('w2', 'Ada', 'ada@example.com', '2026-10-04T10:00:00+08:00', 'exact', manyRows.slice(0, COMMIT_FILE_LIMIT))}`, 10)
+      .commits[0].filesTruncated === false,
+  );
+
   section('a branch reaches git log only as a plain ref');
   const { normalizeActivityRef } = await import('../../lib/gitnexus/git-activity.js');
   check(
@@ -125,4 +180,44 @@ export async function gitLogTests() {
   check('a ref containing whitespace is refused', normalizeActivityRef('a b') === null);
   check('a revision range is refused', normalizeActivityRef('main..other') === null);
   check('a non-string is refused', normalizeActivityRef(7) === null && normalizeActivityRef(undefined) === null);
+
+  section('git log parsing: decorations, the labels a lane needs');
+  // `%D` is the only place git names the branches a commit belongs to, and the graph
+  // cannot say which column is the trunk without it.
+  check(
+    'HEAD is peeled off so the row names the branch, not the symbolic ref',
+    JSON.stringify(parseDecorations('HEAD -> main, origin/main')) === JSON.stringify(['main', 'origin/main']),
+    JSON.stringify(parseDecorations('HEAD -> main, origin/main')),
+  );
+  check(
+    'a tag keeps its prefix, because a tag is not a branch',
+    JSON.stringify(parseDecorations('HEAD -> main, tag: v0.1.9, origin/main')) ===
+      JSON.stringify(['main', 'tag: v0.1.9', 'origin/main']),
+    JSON.stringify(parseDecorations('HEAD -> main, tag: v0.1.9, origin/main')),
+  );
+  check(
+    'no decorations is an empty list, not a list holding nothing',
+    parseDecorations('').length === 0 && parseDecorations(undefined).length === 0 && parseDecorations('HEAD').length === 0,
+    JSON.stringify([parseDecorations(''), parseDecorations(undefined), parseDecorations('HEAD')]),
+  );
+  check(
+    'a detached HEAD does not turn into a label',
+    JSON.stringify(parseDecorations('HEAD, tag: v0.1.9')) === JSON.stringify(['tag: v0.1.9']),
+    JSON.stringify(parseDecorations('HEAD, tag: v0.1.9')),
+  );
+  check(
+    'a commit parsed from a log carries its refs',
+    JSON.stringify(
+      parseLogWindow(
+        `${record('r1', 'Ada', 'ada@example.com', '2026-10-04T10:00:00+08:00', 'tagged', [['1', '0', 'src/a.ts']], '', 'HEAD -> main, tag: v0.1.9')}`,
+        10,
+      ).commits[0].refs,
+    ) === JSON.stringify(['main', 'tag: v0.1.9']),
+    JSON.stringify(
+      parseLogWindow(
+        `${record('r1', 'Ada', 'ada@example.com', '2026-10-04T10:00:00+08:00', 'tagged', [['1', '0', 'src/a.ts']], '', 'HEAD -> main, tag: v0.1.9')}`,
+        10,
+      ).commits[0].refs,
+    ),
+  );
 }

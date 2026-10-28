@@ -388,7 +388,9 @@ export function renderSuite(ctx) {
   );
   check(
     'the commit timeline starts folded and keeps its count visible',
-    view.text.includes('提交时间线 · 近 7 天') &&
+    // The parts are separate spans now (caret / label / count), so the joined text carries
+    // a space between them instead of the interpunct it used to carry inside one string.
+    view.text.includes('提交时间线 近 7 天') &&
       // The fold is a real button now: the caret is the collapsed marker, and the label
       // carries the count instead of a second "展开" word.
       view.text.includes('▸') &&

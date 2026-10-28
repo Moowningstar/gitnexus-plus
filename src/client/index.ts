@@ -72,7 +72,18 @@ import {
   Section,
   classifyFileType,
 } from './primitives';
-import { GitActivitySection, ActivityBaseline, activityView, listedActivityFiles, activityBlockHost } from './sections/activity';
+import {
+    GitActivitySection,
+    ActivityBaseline,
+    ActivityTimeline,
+    CommitFileList,
+    LaneGutter,
+    activityView,
+    commitLanes,
+    laneCurve,
+    listedActivityFiles,
+    activityBlockHost,
+} from './sections/activity';
 import { highlightLine, languageOf } from './highlight';
 import { communityColors } from './sections/graph';
 import {
@@ -291,6 +302,11 @@ export const __internals = {
     Histogram,
     GitActivitySection,
     ActivityBaseline,
+    ActivityTimeline,
+    CommitFileList,
+    LaneGutter,
+    commitLanes,
+    laneCurve,
     FileHistorySection,
     DiffView,
     ProvenanceBlock,

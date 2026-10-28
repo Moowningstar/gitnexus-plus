@@ -107,6 +107,20 @@ export interface ActivityBranch {
   current: boolean;
 }
 
+/**
+ * Files one commit touched, with the line deltas the log reported for each.
+ *
+ * The list is capped (`filesTruncated` says so) because a single commit can touch
+ * thousands of paths — a lockfile regeneration or a vendored drop — and the panel
+ * only ever shows the first screenful. The cap is applied where the log is parsed,
+ * so the payload to the client is bounded rather than the rendering.
+ */
+export interface CommitFileDelta {
+  path: string;
+  insertions: number;
+  deletions: number;
+}
+
 /** One commit in the activity window, with the index verdict of its touched files. */
 export interface ActivityCommit {
   sha: string;
@@ -118,6 +132,26 @@ export interface ActivityCommit {
   insertions: number;
   deletions: number;
   verdict: FileVerdict;
+  /**
+   * Parent SHAs, first parent first; empty for a root commit.
+   *
+   * Carried for one reason: the panel draws the commit graph as lanes, and a lane
+   * is exactly "this commit's parent is another row". Without it the timeline is a
+   * list that silently flattens merges — the reader cannot see that two rows are
+   * one branch.
+   */
+  parents: string[];
+  /**
+   * Branches, remotes and tags pointing at this commit (`%D`), e.g. `['main', 'origin/main']`.
+   *
+   * The graph needs names for the columns the way a map needs labels: a reader can see
+   * three lines, but without a label there is no way to know which one is the trunk.
+   */
+  refs: string[];
+  /** The files this commit touched, capped at `COMMIT_FILE_LIMIT` (40). */
+  changed: CommitFileDelta[];
+  /** True when the commit touched more files than `changed` carries. */
+  filesTruncated: boolean;
 }
 
 /** One row of the activity × index cross-tab. */
@@ -490,7 +524,17 @@ export async function readGitActivity(
     `--max-count=${maxCommits + 1}`,
     '--numstat',
     '--no-renames',
-    `--format=${RS}%H${US}%an${US}%ae${US}%aI${US}%s`,
+    // Every ref, not just the checked-out line of history.
+    //
+    // A graph of one branch is a straight line whatever it is drawn with: the panel's
+    // lanes only become meaning when unmerged branches and their forks are in the
+    // window, which is why VS Code's history view reads all refs too. The consequence
+    // is honest rather than hidden — the aggregates below ("改动最频繁", authors) now
+    // count unmerged work as well, because that is what the window contains.
+    '--all',
+    // `%P` and `%D` last: the fields before them are the ones a shorter header must
+    // still fill, and a parent list may be empty (root commit) while the rest never is.
+    `--format=${RS}%H${US}%an${US}%ae${US}%aI${US}%s${US}%P${US}%D`,
   ]);
   if (log === null) return null;
 
@@ -717,6 +761,13 @@ export async function readGitActivity(
       insertions: commit.insertions,
       deletions: commit.deletions,
       verdict: anyMissing ? 'missing' : anyIndexed ? 'indexed' : 'excluded',
+      parents: commit.parents,
+      refs: commit.refs,
+      // Only the commits that reach the panel carry their file list: the window holds
+      // up to 300 commits and only the newest 100 are ever rendered, so shipping the
+      // other 200 file lists would be payload nobody can open.
+      changed: commit.changed,
+      filesTruncated: commit.filesTruncated,
     };
   });
 
