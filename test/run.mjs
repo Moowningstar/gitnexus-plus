@@ -13,6 +13,7 @@ import { routeTests, fileHistoryRouteTests } from './suites/routes.mjs';
 import { checkoutRouteTests } from './suites/checkout-route.mjs';
 import { analyzeTests, installTests } from './suites/runners.mjs';
 import { deltaTests } from './suites/delta.mjs';
+import { freshnessTests } from './suites/freshness.mjs';
 import { managedPathTests, anchorTests } from './suites/anchor.mjs';
 import { gitLogTests } from './suites/git-log.mjs';
 import { graphTests } from './suites/graphs.mjs';
@@ -49,6 +50,8 @@ await installTests();
 // `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the
 // git-less skip path and the normal path, so awaiting it again would double-count.
 await deltaTests();
+// Pure: the report is a literal, so this runs whether or not git is available here.
+await freshnessTests();
 await managedPathTests();
 await anchorTests();
 await gitLogTests();

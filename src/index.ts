@@ -44,6 +44,7 @@ import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
 import { checkoutBranch, readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
+import { describeStaleness } from './gitnexus/freshness.js';
 import { provideGitSeams } from './gitnexus/git-capture.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { runGraphTool, type GraphToolName } from './gitnexus/graph-query.js';
@@ -497,6 +498,41 @@ export function apply(ctx: Context, config: PluginConfig): void {
   };
 
   /**
+   * The freshness line the graph tools prepend to their answers.
+   *
+   * Separate from `coverageFor` and much cheaper: the delta gate is a `rev-parse` plus a
+   * `diff --name-only` on a clean tree, so it runs per tool call rather than per report.
+   * The TTL is short on purpose — a turn that asks three questions in a row has no reason
+   * to pay for the same gate three times, while a turn that starts a minute later may be
+   * looking at a repository that has moved.
+   *
+   * A failure here never fails the tool: an unreadable repository is a state the tool's
+   * own answer already describes, and losing the whole answer over a cosmetic prefix
+   * would be the worse trade.
+   */
+  const freshnessCache = new Map<string, { at: number; notice: string | null }>();
+  const FRESHNESS_TTL_MS = 5_000;
+  const freshnessFor = async (repoPath: string): Promise<string | null> => {
+    const key = String(repoPath);
+    const hit = freshnessCache.get(key);
+    if (hit !== undefined && Date.now() - hit.at < FRESHNESS_TTL_MS) return hit.notice;
+    let notice: string | null = null;
+    try {
+      notice = describeStaleness(await readDelta(key));
+    } catch {
+      // Deliberately silent: the tool below will report whatever is actually wrong with
+      // the repository, in its own words, and a second competing message helps nobody.
+      return null;
+    }
+    const now = Date.now();
+    for (const [other, entry] of freshnessCache) {
+      if (now - entry.at >= FRESHNESS_TTL_MS) freshnessCache.delete(other);
+    }
+    freshnessCache.set(key, { at: now, notice });
+    return notice;
+  };
+
+  /**
    * The maintenance commands, resolved at the boundary rather than inside
    * `analyzeCoverage`: they depend on this plugin's config, and the report is a
    * pure function of the repository.
@@ -705,7 +741,16 @@ export function apply(ctx: Context, config: PluginConfig): void {
         outcome.result,
         tool === 'query' ? String(params.search_query ?? '') : '',
       );
-      return { text: rendered.text, ok: true, result: rendered.result };
+      // Prepend the freshness line, once, for all three tools: the answer is built from
+      // a snapshot, and a model that does not know the snapshot has moved will act on a
+      // stale "no callers" as if it were a fact. Failures above are left alone — they
+      // already say what went wrong, and two competing sentences read as noise.
+      const notice = await freshnessFor(repo);
+      return {
+        text: notice === null ? rendered.text : `${notice}\n\n${rendered.text}`,
+        ok: true,
+        result: rendered.result,
+      };
     };
 
     ctx.tools.register(
@@ -1060,6 +1105,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         // outlives an idle panel by design, so it must be stopped explicitly here.
         webView.dispose();
         cache.clear();
+        freshnessCache.clear();
       }, 'gitnexus-plus: HTTP routes');
     });
   }

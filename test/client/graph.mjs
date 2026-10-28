@@ -262,6 +262,7 @@ export function graphSuite(ctx) {
     error: null,
     routeState: 'ready',
     scope: null,
+    staleNotice: null,
     onOpenCommunity: () => {},
     onOpenSymbols: () => {},
     onBack: () => {},
@@ -297,6 +298,38 @@ export function graphSuite(ctx) {
       overview.text.includes('点一个社区看它的成员符号') &&
       !overview.text.includes('拖拽旋转'),
     overview.text.slice(-700),
+  );
+  // The card's own texts are matched with their colon: the maintenance section below
+  // already prints "索引落后或有文件改动时使用", so a bare substring test would pass on a
+  // page that never drew a banner at all.
+  check(
+    'a fresh index draws no banner at all',
+    !overview.text.includes('索引落后：') && !overview.text.includes('索引新鲜度无法确认：'),
+    overview.text.slice(-700),
+  );
+
+  const staleGraph = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    graph: graphState({ staleNotice: '索引落后：自 abc1234 起 3 个文件已改（2 改 / 1 增 / 0 删），以下结果可能过期；建议增量刷新。' }),
+  });
+  check(
+    'a stale index says so above the drawing',
+    staleGraph.text.includes('索引落后：') &&
+      staleGraph.text.includes('abc1234') &&
+      staleGraph.text.includes('建议增量刷新'),
+    staleGraph.text.slice(-900),
+  );
+
+  const unknownGraph = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    graph: graphState({ staleNotice: '索引新鲜度无法确认：检查提前中止；以下结果可能过期。' }),
+  });
+  check(
+    'an unverifiable index is not described as stale',
+    unknownGraph.text.includes('索引新鲜度无法确认：') && !unknownGraph.text.includes('索引落后：'),
+    unknownGraph.text.slice(-900),
   );
 
   const symbolsGraph = render(I.CoverageView, {

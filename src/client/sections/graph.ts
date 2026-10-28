@@ -196,7 +196,7 @@ function fitTransform(points: Map<string, Point>): { x: number; y: number; k: nu
 }
 
 export function GraphSection({ state }: { state: GraphViewState }) {
-  const { projection, loading, error, routeState, scope, onOpenCommunity, onOpenSymbols, onBack, onReload, onOpenSymbol } = state;
+  const { projection, loading, error, routeState, scope, staleNotice, onOpenCommunity, onOpenSymbols, onBack, onReload, onOpenSymbol } = state;
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const transform = React.useRef<{ x: number; y: number; k: number }>({ x: 0, y: 0, k: 1 });
   const drag = React.useRef<{ x: number; y: number; moved: boolean; active: boolean }>({
@@ -478,6 +478,27 @@ export function GraphSection({ state }: { state: GraphViewState }) {
       scope === null ? null : h(Button, { variant: 'ghost', onClick: onBack }, '← 全部社区'),
       h(Button, { variant: 'ghost', onClick: onReload, disabled: loading }, loading ? '读取中…' : '重读图'),
     ),
+
+    // The card's own admission that it may be drawing an old repository. It sits above the
+    // canvas rather than in the gate card because this is the surface that renders a
+    // snapshot as if it were the tree — and it stays visible while a scope is open, since
+    // drilling into a community does not make its members fresher.
+    // Absent (`undefined`) and `null` mean the same thing here: nothing known, no banner.
+    staleNotice == null
+      ? null
+      : h(
+          'div',
+          {
+            style: {
+              padding: '6px 8px',
+              border: HAIRLINE,
+              borderLeft: '3px solid var(--dsw-alias-state-warning-primary, #d29922)',
+              borderRadius: '4px',
+              background: SOFT_BG,
+            },
+          },
+          staleNotice,
+        ),
 
     error === null
       ? null

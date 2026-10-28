@@ -16,6 +16,7 @@ import { isExistingDirectory, isFilesystemRoot } from '../gitnexus/index-meta.js
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { DeltaReport } from '../gitnexus/delta.js';
+import { describeStaleness } from '../gitnexus/freshness.js';
 
 const DELTA_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
@@ -54,7 +55,15 @@ export function mountDeltaRoute(webServer: WebServerService, deps: DeltaRouteDep
     if (answerHead(req, res)) return;
 
     const report = await deps.read(absRepo);
-    sendJson(res, 200, { ok: true, delta: report, readAt: new Date().toISOString() });
+    // The verdict and the sentence about it ship together: a client that has to rebuild the
+    // wording from the counts would end up with a second, drifting copy of it — and the
+    // count alone does not say whether the gap means "refresh" or "cannot tell".
+    sendJson(res, 200, {
+      ok: true,
+      delta: report,
+      notice: describeStaleness(report),
+      readAt: new Date().toISOString(),
+    });
   });
 
   return webServer.register({ kind: 'prefix', path: '/api/gitnexus/delta', handler });

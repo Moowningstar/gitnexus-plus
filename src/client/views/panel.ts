@@ -200,6 +200,14 @@ export function CoveragePanel(props: SlotProps) {
   const [delta, setDelta] = React.useState<ClientDelta | null>(null);
   const [deltaError, setDeltaError] = React.useState<string | null>(null);
   /**
+   * The host's own sentence about the gate, shown on the graph card.
+   *
+   * Read from the delta response rather than rebuilt here: the wording depends on the
+   * verdict (`stale` and `unknown` must not read alike), and a client-side copy of that
+   * rule is a second implementation that drifts the first time the engine adds a tier.
+   */
+  const [deltaNotice, setDeltaNotice] = React.useState<string | null>(null);
+  /**
    * Whether the host serves `/api/gitnexus/delta`.
    *
    * A 404 here used to be silently swallowed, so an operator on an older host saw no
@@ -534,6 +542,7 @@ export function CoveragePanel(props: SlotProps) {
       deltaRepoRef.current = projectPath;
       setDelta(null);
       setDeltaError(null);
+      setDeltaNotice(null);
       setDeltaRoute('unknown');
     }
     if (projectPath === null) {
@@ -549,25 +558,31 @@ export function CoveragePanel(props: SlotProps) {
           if (!controller.signal.aborted) {
             setDelta(null);
             setDeltaError(null);
+            setDeltaNotice(null);
             setDeltaRoute('missing');
           }
           return;
         }
         setDeltaRoute('ready');
         const body = (await res.json().catch(() => null)) as
-          | { ok?: boolean; delta?: ClientDelta; message?: string }
+          | { ok?: boolean; delta?: ClientDelta; notice?: string | null; message?: string }
           | null;
         if (controller.signal.aborted) return;
         if (!body?.ok || body.delta === undefined) {
           setDelta(null);
+          setDeltaNotice(null);
           setDeltaError(typeof body?.message === 'string' ? body.message : `差量检查失败 (${res.status})`);
           return;
         }
         setDelta(body.delta);
+        // `null` is the normal case for a fresh index: silence is the signal, and the
+        // graph card then renders without a banner at all.
+        setDeltaNotice(typeof body.notice === 'string' ? body.notice : null);
         setDeltaError(null);
       } catch (cause) {
         if (controller.signal.aborted) return;
         setDelta(null);
+        setDeltaNotice(null);
         setDeltaError(String((cause as Error)?.message ?? cause));
       }
     })();
@@ -765,6 +780,7 @@ export function CoveragePanel(props: SlotProps) {
       error: graphError,
       routeState: graphRoute,
       scope: graphScope,
+      staleNotice: deltaNotice,
       onOpenCommunity: (id: string) => {
         setGraphScope(id);
         setGraphMode('communities');
