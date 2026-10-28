@@ -7,12 +7,25 @@
  *   dsh-gitnexus-coverage --all       # every registered repository
  *
  * Exit code is 0 even when files were skipped: a skipped bundle is a fact about
- * the repository, not a failure of this tool. Pass `--fail-on-large` to make it a
- * CI gate instead.
+ * the repository, not a failure of this tool. Three gates turn that fact into a build
+ * result, each off by default:
+ *
+ *   --fail-on-large      exit 2, a file was skipped for exceeding the size cap
+ *   --fail-on-uncovered  exit 3, the scanner selected files the index does not contain
+ *   --fail-on-missing    exit 3, the index is absent, unreadable, or describes deleted files
+ *
+ * The two exit codes are different on purpose: `2` means "the index has a documented
+ * hole", `3` means "the index is behind the checkout", and a CI job that alerts on one
+ * should not necessarily alert on the other.
  */
 
 import path from 'node:path';
 import { analyzeCoverage, formatBytes, type CoverageReport } from '../gitnexus/coverage.js';
+import {
+  coverageGateVerdict,
+  isCoverageFailure,
+  type CoverageFailure,
+} from '../gitnexus/coverage-gate.js';
 import { readRegistry } from '../gitnexus/index-meta.js';
 
 const argv = process.argv.slice(2);
@@ -35,6 +48,8 @@ function takeOption(name: string): string | undefined {
 const asJson = takeFlag('--json');
 const all = takeFlag('--all');
 const failOnLarge = takeFlag('--fail-on-large');
+const failOnUncovered = takeFlag('--fail-on-uncovered');
+const failOnMissing = takeFlag('--fail-on-missing');
 const noLanguages = takeFlag('--no-languages');
 const repoAlias = takeOption('-r') ?? takeOption('--repo');
 const positional = argv.filter((a) => !a.startsWith('-'));
@@ -49,19 +64,15 @@ const red = (t: string): string => paint('31', t);
 
 /**
  * A repository that could not be analysed, kept in the JSON output so a batch run
- * reports every target rather than stopping at the first failure. It is a distinct
- * shape, not a half-built report: the previous version pushed a fake `CoverageReport`
- * and silenced the type error with a cast, which meant every downstream `.totals`
- * read was a potential crash.
+ * reports every target rather than stopping at the first failure.
+ *
+ * The shape and its guard used to live here; they moved to `coverage-gate.ts` because
+ * the CI gate needs the same distinction, and a gate that cannot be imported cannot be
+ * tested. These two aliases keep the rest of this file reading unchanged.
  */
-interface FailedReport {
-  repo: { path: string };
-  error: string;
-}
+type FailedReport = CoverageFailure;
 
-function isFailure(entry: CoverageReport | FailedReport): entry is FailedReport {
-  return 'error' in entry;
-}
+const isFailure = isCoverageFailure;
 
 function renderHuman(report: CoverageReport): string {
   const out: string[] = [];
@@ -197,6 +208,17 @@ async function main(): Promise<void> {
   }
 
   if (failOnLarge && reports.some((r) => !isFailure(r) && r.totals.large > 0)) process.exit(2);
+
+  // Exit 2 keeps its old meaning (a documented hole in the index). The checkout-drift
+  // gates answer a different question, so they get their own code: a job that alerts on
+  // "you skipped a bundle" should not be woken up by "your index is behind".
+  const gate = coverageGateVerdict(reports, { uncovered: failOnUncovered, missing: failOnMissing });
+  if (gate.failed) {
+    // stderr, so `--json` stays parseable: the exit code is the contract, the reasons
+    // are for the human reading the failed job.
+    for (const reason of gate.reasons) console.error(`${red('✗')} ${reason}`);
+    process.exit(3);
+  }
 }
 
 await main();

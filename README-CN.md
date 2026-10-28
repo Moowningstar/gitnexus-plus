@@ -120,7 +120,9 @@ npm run build
 node lib/bin/gitnexus-coverage.js <repo-path>
 node lib/bin/gitnexus-coverage.js -r material-ui        # 按注册表别名
 node lib/bin/gitnexus-coverage.js --all --json          # 所有已索引仓库
-node lib/bin/gitnexus-coverage.js <repo> --fail-on-large # CI 门禁，exit 2
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-large # CI 门禁，exit 2：有文件因体积被跳过
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-uncovered # CI 门禁，exit 3：索引漏掉了该收录的文件
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-missing   # CI 门禁，exit 3：没有索引，或索引指向已删除的文件
 npm run check
 npm test
 ```

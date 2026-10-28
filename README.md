@@ -231,7 +231,9 @@ npm run build
 node lib/bin/gitnexus-coverage.js <repo-path>
 node lib/bin/gitnexus-coverage.js -r material-ui         # by registry alias
 node lib/bin/gitnexus-coverage.js --all --json           # every indexed repository
-node lib/bin/gitnexus-coverage.js <repo> --fail-on-large # CI gate, exit 2
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-large # CI gate, exit 2: a file was skipped for size
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-uncovered # CI gate, exit 3: the index is missing files it should hold
+node lib/bin/gitnexus-coverage.js <repo> --fail-on-missing   # CI gate, exit 3: no index, or one describing deleted files
 npm run check
 npm test
 ```
