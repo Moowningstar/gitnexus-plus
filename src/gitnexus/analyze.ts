@@ -51,7 +51,7 @@ import {
 } from '../shell.js';
 import { anchorIndex, type AnchorReport } from './anchor.js';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
-import { hasGitMarker, readIndexMeta } from './index-meta.js';
+import { hasGitMarker, indexIsOwned, readIndexMeta } from './index-meta.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
 
 /** Where a run got to. `unavailable` is decided before anything is spawned. */
@@ -415,9 +415,22 @@ const ANALYZE_CACHE_DIRS = ['parsedfile-cache', 'parse-cache'] as const;
  */
 const RUN_SCOPED_STORE = 'parsedfile-store';
 
+/**
+ * Make the durable caches exist before the worker needs them, for a repo that already
+ * has an index.
+ *
+ * Only an index that carries an ownership manifest qualifies. GitNexus 1.6.13 inspects
+ * `.gitnexus` before the write: anything beside its own lock artifacts, with no
+ * `gitnexus.json`/`meta.json`, is the "unowned" state, and `analyze` then refuses to
+ * start. Pre-creating a cache in a fresh checkout would therefore turn a working first
+ * run into a permanent refusal — the directory GitNexus would have created itself is
+ * exactly the one it now treats as evidence of a foreign store. So a fresh checkout is
+ * left alone, and the EPERM this pre-creation was added for can only happen on a
+ * re-analyze, which is the case handled here.
+ */
 function prepareAnalyzeCacheDirs(repoPath: string): string | null {
+  if (!indexIsOwned(repoPath)) return null;
   const indexDir = path.join(repoPath, '.gitnexus');
-  if (!existsSync(indexDir)) return null;
 
   // Best effort. If this cannot be removed, GitNexus's own clear gets the next attempt;
   // failing the run here would only replace one EPERM with a less accurate one.
@@ -485,6 +498,25 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
     anchor: null,
   };
 
+  /**
+   * Leave an un-owned `.gitnexus` no worse than we found it.
+   *
+   * The redirect this plugin sets (`GITNEXUS_HOME=<repo>/.gitnexus/plugin-home`) makes
+   * GitNexus write its registry inside the storage directory. When a run then fails
+   * before writing a manifest, that leftover is what turns "no index here" into the
+   * "unowned" state, and every later `gitnexus analyze` in that checkout — the plugin's
+   * or the operator's own terminal — refuses to start. Removing it after a failed run
+   * returns the directory to `missing`, which GitNexus accepts.
+   */
+  const forgetUnownedLeftovers = (repoPath: string): void => {
+    if (indexIsOwned(repoPath)) return;
+    try {
+      rmSync(path.join(repoPath, '.gitnexus', 'plugin-home'), { recursive: true, force: true });
+    } catch {
+      /* the next run reports the same state; there is nothing better to do here */
+    }
+  };
+
   const finish = (repoPath: string, patch: Partial<AnalyzeStatus>): AnalyzeStatus => {
     const next: AnalyzeStatus = {
       repoPath,
@@ -496,6 +528,20 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
       // silent no-op. The spread above cannot express that.
       finishedAt: patch.finishedAt ?? now(),
     };
+    if (next.state === 'failed') {
+      forgetUnownedLeftovers(repoPath);
+      // Upstream's own sentence for this state names the directory but no remedy. Say
+      // the one thing that works: `--force` is the only operation 1.6.13 allows against
+      // an un-owned store, and it rebuilds the graph whether or not one existed. The
+      // sentence arrives on stderr, which is `output`, not the one-line `message`.
+      const seen = `${next.message ?? ''}\n${next.output}`;
+      if (/"unowned"/i.test(seen)) {
+        next.message =
+          `${next.message ?? ''}\n` +
+          'GitNexus 认为 .gitnexus 里有数据但没有归属元数据（unowned）。' +
+          '强制重建（--force）是上游唯一允许清除这种状态的入口：它会重建索引。';
+      }
+    }
     rememberRun(repoPath, next);
     inFlight.delete(repoPath);
     return next;

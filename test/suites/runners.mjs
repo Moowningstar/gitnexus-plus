@@ -241,8 +241,16 @@ export async function analyzeTests() {
   // directory at the start of every parse, so a pre-created one turns each run into an
   // rmdir on a host-owned directory — the `EPERM … rmdir parsedfile-store` that 0.1.3's
   // users hit. The runner now removes a leftover and creates only the durable caches.
+  //
+  // The manifest is what makes this an *existing* index: 1.6.13 refuses to write a
+  // `.gitnexus` that holds anything but its own lock artifacts and no manifest, so the
+  // caches must not appear in a checkout that has never been indexed.
   const cacheRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-cache-'));
   await fs.mkdir(path.join(cacheRepo, '.gitnexus', 'parsedfile-store'), { recursive: true });
+  await fs.writeFile(
+    path.join(cacheRepo, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ indexedAt: new Date().toISOString(), lastCommit: '' }),
+  );
   const cacheRun = createAnalyzeRunner(stubShell({ exitCode: 0 }));
   cacheRun.start(cacheRepo);
   await settle();
@@ -261,6 +269,63 @@ export async function analyzeTests() {
   );
   check('analyze pre-creates the durable caches before spawning', durable.every(Boolean), JSON.stringify(durable));
   await fs.rm(cacheRepo, { recursive: true, force: true });
+
+  // The other half of that decision, and the reason GEOInflow could not be indexed at
+  // all: a `.gitnexus` with no manifest is "unowned" to 1.6.13, and pre-creating a cache
+  // there would take a checkout that analyzes fine and make it refuse forever.
+  const freshRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-fresh-'));
+  await fs.mkdir(path.join(freshRepo, '.gitnexus'), { recursive: true });
+  const freshRun = createAnalyzeRunner(stubShell({ exitCode: 0 }));
+  freshRun.start(freshRepo);
+  await settle();
+  const invented = await Promise.all(
+    ['parsedfile-cache', 'parse-cache', 'plugin-home'].map((name) =>
+      fs
+        .access(path.join(freshRepo, '.gitnexus', name))
+        .then(() => true)
+        .catch(() => false),
+    ),
+  );
+  check(
+    'a checkout with no manifest gets no directories invented in .gitnexus',
+    invented.every((present) => !present),
+    JSON.stringify(invented),
+  );
+  await fs.rm(freshRepo, { recursive: true, force: true });
+
+  // …and a failed run must not leave the redirect behind either: `plugin-home` alone is
+  // enough to turn the next plain `gitnexus analyze` into the same refusal.
+  const leftOverRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-leftover-'));
+  await fs.mkdir(path.join(leftOverRepo, '.gitnexus', 'plugin-home'), { recursive: true });
+  const leftOverRun = createAnalyzeRunner(stubShell({ exitCode: 1, stderr: { text: 'boom' } }));
+  leftOverRun.start(leftOverRepo);
+  await settle();
+  const leftoverHome = await fs
+    .access(path.join(leftOverRepo, '.gitnexus', 'plugin-home'))
+    .then(() => true)
+    .catch(() => false);
+  check('a failed run removes the redirected home it left in an un-owned .gitnexus', !leftoverHome);
+  await fs.rm(leftOverRepo, { recursive: true, force: true });
+
+  // Upstream names the state but not the way out. `--force` is the only write 1.6.13
+  // allows against an un-owned store, so a failure that mentions it has to say so.
+  const unownedRepo = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-unowned-'));
+  const unownedRun = createAnalyzeRunner(
+    stubShell({
+      exitCode: 1,
+      stderr: {
+        text: 'Analysis failed: Storage path is in state "unowned" but requires one of: missing, empty, owned.',
+      },
+    }),
+  );
+  unownedRun.start(unownedRepo);
+  await settle();
+  check(
+    'an unowned-storage failure names the one operation that can clear it',
+    unownedRun.status(unownedRepo)?.message?.includes('强制重建') === true,
+    unownedRun.status(unownedRepo)?.message ?? 'no message',
+  );
+  await fs.rm(unownedRepo, { recursive: true, force: true });
 
   const denied = createAnalyzeRunner(
     stubShell({ exitCode: 1, stderr: { text: '[sandbox: file access denied under workspace-write mode]' } }),

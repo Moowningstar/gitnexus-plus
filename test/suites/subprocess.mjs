@@ -331,6 +331,11 @@ export async function subprocessTests() {
     });
     try {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-plus-seam-'));
+      // A manifest, because the scratch directory is only put inside `.gitnexus` for a
+      // checkout that already has an index: creating it anywhere else would make the
+      // directory look "unowned" to GitNexus 1.6.13 and stop `analyze` from ever starting.
+      await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
+      await fs.writeFile(path.join(root, '.gitnexus', 'gitnexus.json'), JSON.stringify({ lastCommit: '' }));
       const first = await captureGit(root, ['rev-parse', 'HEAD']);
       check('git runs through the host spawner', subprocess.specs.length === 1);
       check('git arrives as argv, with git in command position', (
@@ -378,6 +383,10 @@ export async function subprocessTests() {
     provideGitSeams(() => null);
     const inited = await captureGit(root, ['init', '-q']);
     const gitWorks = inited.ok;
+    // An indexed checkout, because that is the only kind that gets a scratch directory
+    // inside `.gitnexus` (see the un-owned case asserted below).
+    await fs.mkdir(path.join(root, '.gitnexus'), { recursive: true });
+    await fs.writeFile(path.join(root, '.gitnexus', 'gitnexus.json'), JSON.stringify({ lastCommit: '' }));
     try {
       if (gitWorks) {
         await captureGit(root, ['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-q', '--allow-empty', '-m', 'one']);
@@ -422,6 +431,17 @@ export async function subprocessTests() {
         check('no scratch file survives the call', (
           Array.isArray(entries) && entries.every((name) => !name.startsWith('git-'))
         ), JSON.stringify(entries));
+
+        // The exception that keeps a checkout analyzable: with no manifest, `.gitnexus`
+        // must not be created at all — not even a directory the plugin would have used.
+        const bare = await fs.mkdtemp(path.join(os.tmpdir(), 'gitnexus-plus-unowned-'));
+        await captureGit(bare, ['rev-parse', 'HEAD'], { timeoutMs: 10_000 });
+        const invented = await fs
+          .access(path.join(bare, '.gitnexus'))
+          .then(() => true)
+          .catch(() => false);
+        check('a checkout with no manifest gets no .gitnexus from a git capture', !invented, String(bare));
+        await fs.rm(bare, { recursive: true, force: true });
         await fs.rm(root, { recursive: true, force: true });
       } else {
         // Without a spawnable git there is no truth to fall back to; the retry and the

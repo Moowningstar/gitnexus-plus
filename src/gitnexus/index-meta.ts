@@ -19,6 +19,21 @@ export function globalDir(env: NodeJS.ProcessEnv = process.env): string {
     : path.join(os.homedir(), '.gitnexus');
 }
 
+/**
+ * Does this checkout's `.gitnexus` carry an ownership manifest?
+ *
+ * GitNexus 1.6.13 inspects that directory before every write and refuses one that holds
+ * anything besides its own lock artifacts and no manifest: it calls the state "unowned"
+ * and `analyze` stops with a message that names no remedy. Both metadata names count —
+ * `gitnexus.json` is current, `meta.json` is what older builds wrote, and the resolver
+ * accepts either as the ownership proof.
+ */
+export function indexIsOwned(repoPath: string): boolean {
+  return ['gitnexus.json', 'meta.json'].some((name) =>
+    existsSync(path.join(repoPath, '.gitnexus', name)),
+  );
+}
+
 /** The environment a caller may thread through instead of the real one. */
 export interface RegistryOptions {
   env?: NodeJS.ProcessEnv;

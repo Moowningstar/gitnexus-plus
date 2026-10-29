@@ -30,6 +30,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRunner, isSandboxLike, isSubprocessLike, type Runner } from '../subprocess.js';
+import { indexIsOwned } from './index-meta.js';
 
 export interface GitCaptureOptions {
   /** Kill the child after this long. Defaults to `DEFAULT_GIT_TIMEOUT_MS`. */
@@ -156,8 +157,15 @@ let counter = 0;
  * the repository's own `.gitignore` covers. `os.tmpdir()` stays as the fallback for a
  * repo that is read-only — a capture against it will fail anyway, but the failure
  * should be git's, not the scratch directory's.
+ *
+ * Never create that directory in a checkout GitNexus has no manifest for, though: 1.6.13
+ * inspects `.gitnexus` before every write and calls anything beside its own lock
+ * artifacts, with no manifest, the "unowned" state — then refuses to analyze the repo at
+ * all. A git capture is not worth breaking a later `gitnexus analyze` over, so an
+ * un-owned checkout gets the system temp directory.
  */
 function scratchDirFor(repoPath: string): string {
+  if (!indexIsOwned(repoPath)) return os.tmpdir();
   const inside = path.join(repoPath, '.gitnexus', 'plugin-home', 'tmp');
   try {
     mkdirSync(inside, { recursive: true });
