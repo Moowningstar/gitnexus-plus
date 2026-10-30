@@ -12,7 +12,8 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import { summary } from './harness.mjs';
+import { check, summary } from './harness.mjs';
+import { checkAdvertisedCount } from './claims.mjs';
 import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests, graphQualityTests } from './suites/coverage.mjs';
 import { versionLinesTests } from './suites/version-lines.mjs';
 import { searchTests, ftsSearchTests, searchRouteTests } from './suites/search.mjs';
@@ -30,6 +31,7 @@ import { graphQueryRenderTests, graphQueryToolTests } from './suites/graph-query
 import { subprocessTests } from './suites/subprocess.mjs';
 import { encodingTests } from './suites/encoding.mjs';
 import { hygieneTests } from './suites/hygiene.mjs';
+import { claimsTests } from './suites/claims.mjs';
 import { shellTests, aiSettingsTests, webDistTests, webViewProbeTests } from './suites/webview-setup.mjs';
 import { webViewTests } from './suites/webview.mjs';
 import { graphToolSmoke, realRepoSmoke } from './suites/smoke.mjs';
@@ -83,6 +85,7 @@ export async function main() {
   await subprocessTests();
   await encodingTests();
   await hygieneTests();
+  await claimsTests();
   await shellTests();
   await aiSettingsTests();
   await webDistTests();
@@ -90,6 +93,12 @@ export async function main() {
   await webViewTests();
   await realRepoSmoke();
   await graphToolSmoke();
+
+  // Last, because it compares the README's advertised number with what this run counted.
+  // The check counts itself — `summary().passed + 1` — and the helper knows both READMEs
+  // must agree, so one stale language fails here rather than in a reader's head.
+  const claim = checkAdvertisedCount({ suite: 'engine', counted: summary().passed + 1 });
+  check("the READMEs advertise this run's check count", claim.ok, claim.detail);
 
   const { passed, failed } = summary();
   console.log(`\n${passed} passed, ${failed} failed\n`);

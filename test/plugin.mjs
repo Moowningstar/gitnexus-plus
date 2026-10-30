@@ -18,6 +18,7 @@ import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { checkAdvertisedCount } from './claims.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -721,6 +722,11 @@ try {
   rejected = true;
 }
 check('missing required arg is rejected', rejected === true);
+
+// Last: the plugin half of the count the READMEs advertise. The check counts itself, so
+// `passed + 1` is what the total must come to (see test/claims.mjs).
+const claim = checkAdvertisedCount({ suite: 'plugin', counted: passed + 1 });
+check("the READMEs advertise this run's plugin count", claim.ok, claim.detail);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -36,6 +36,7 @@ let failed = 0;
 import { renderSuite } from './client/render.mjs';
 import { graphSuite } from './client/graph.mjs';
 import { interactionSuite } from './client/interaction.mjs';
+import { checkAdvertisedCount } from './claims.mjs';
 
 function check(name, ok, detail) {
   if (ok) {
@@ -1280,6 +1281,11 @@ graphSuite({
 });
 
 await interactionSuite({ I, React: ReactFacade, check, section });
+
+// Last: the client half of the count the READMEs advertise. The check counts itself, so
+// `passed + 1` is what the total must come to (see test/claims.mjs).
+const claim = checkAdvertisedCount({ suite: 'client', counted: passed + 1 });
+check("the READMEs advertise this run's client count", claim.ok, claim.detail);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
