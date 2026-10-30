@@ -25,6 +25,7 @@ import {
   type IndexStats,
   type ProcessDetection,
 } from './index-meta.js';
+import { readStorageState, type StorageStateReport } from './storage-state.js';
 import { scanRepository, type CapSource } from './scan.js';
 import {
   aggregateLanguages,
@@ -75,6 +76,7 @@ import {
   indexDriftWarnings,
   largeFileDominanceWarnings,
   largeFileSkipWarnings,
+  storageWarnings,
 } from './coverage-rules.js';
 
 /**
@@ -105,8 +107,24 @@ export interface RepoInfo {
   name: string;
   /** Where `.gitnexus` lives. */
   storagePath: string;
-  /** Whether a manifest was found. */
+  /**
+   * Whether a manifest was found **and** it belongs to this checkout.
+   *
+   * Not the same as "a `gitnexus.json` exists": a store left behind by a moved
+   * checkout, or one whose manifest cannot be parsed, holds a file nobody here wrote.
+   * `storage.state` says which case it is; `indexed` is only true for `owned`, because
+   * that is the only state GitNexus will build on.
+   */
   indexed: boolean;
+  /**
+   * What state `.gitnexus` is in, in GitNexus's own vocabulary plus `unknown`.
+   *
+   * A directory with data but no manifest is `unowned` and a manifest written for
+   * another path is `foreign`; both used to read as "no index" and "healthy index"
+   * respectively, which is the difference between offering 「初始化索引」 (refused) and
+   * 「全量重建」 (allowed).
+   */
+  storage: StorageStateReport;
   /**
    * Whether the directory carries a `.git` marker.
    *
@@ -599,6 +617,11 @@ export async function analyzeCoverage(
     loadLanguageDetector({ env, managedPrefix }),
   ]);
   emit({ phase: 'manifest', percent: 10, label: '索引清单已读取' });
+  // Synchronous and cheap: one directory listing plus the manifest parse. It is read
+  // separately from `readIndexMeta` because the two answer different questions — that
+  // one returns null for an unparseable manifest, which is exactly the state we must be
+  // able to name.
+  const storage = readStorageState(absRepo);
 
   // Read after the manifest, because classifying staleness needs the indexed commit.
   emit({ phase: 'git', percent: 12, label: '读取 Git 状态…' });
@@ -688,6 +711,7 @@ export async function analyzeCoverage(
   // because that is the order the panel shows: what was skipped, what that distortion
   // means, how the cap was chosen, and whether the index is behind.
   const warnings: ReportWarning[] = [
+    ...storageWarnings(storage),
     ...largeFileSkipWarnings(scan, largeFiles, volume),
     ...largeFileDominanceWarnings(largeFiles),
     ...capWarnings(scan, meta, env, absRepo, hasGit),
@@ -701,7 +725,8 @@ export async function analyzeCoverage(
       path: absRepo,
       name: registryEntry?.name ?? path.basename(absRepo),
       storagePath: meta?.storagePath ?? path.join(absRepo, '.gitnexus'),
-      indexed: meta !== null,
+      indexed: storage.usable,
+      storage,
       hasGit,
       registered: registryEntry !== null,
       // Which manifest the index was read from — `gitnexus.json` (current) or

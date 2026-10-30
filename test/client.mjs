@@ -1217,6 +1217,32 @@ check(
   liveView.text.slice(0, 240),
 );
 
+// A store GitNexus will not accept cannot be initialized. The card must withhold the
+// incremental command rather than render a button that upstream stops immediately, and
+// it must mark the full rebuild as what applies.
+const blockedView = render(I.MaintenanceSection, {
+  ...runProps,
+  indexed: false,
+  storageState: 'unowned',
+  run: null,
+});
+check(
+  'a blocked store withholds the initialize command',
+  !blockedView.text.includes('初始化索引') && !blockedView.text.includes('该项目还没有 .gitnexus 索引时使用。'),
+  blockedView.text.slice(0, 400),
+);
+check(
+  'a blocked store marks the full rebuild as applicable',
+  blockedView.text.includes('强制全量重构') && blockedView.text.includes('当前适用'),
+  blockedView.text.slice(0, 400),
+);
+const unblockedView = render(I.MaintenanceSection, { ...runProps, indexed: false, run: null });
+check(
+  'without a storage state the old initialize action is unchanged',
+  unblockedView.text.includes('初始化索引'),
+  unblockedView.text.slice(0, 300),
+);
+
 const renderOut = renderSuite({
   I,
   viewProps,

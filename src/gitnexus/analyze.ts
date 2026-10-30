@@ -51,7 +51,8 @@ import {
 } from '../shell.js';
 import { anchorIndex, type AnchorReport } from './anchor.js';
 import { defaultGitnexusHome, effectiveSkipFts } from './commands.js';
-import { hasGitMarker, indexIsOwned, readIndexMeta } from './index-meta.js';
+import { hasGitMarker, readIndexMeta } from './index-meta.js';
+import { readStorageState, storageIsUsable } from './storage-state.js';
 import { findGitnexusCli, type ToolchainOptions } from './toolchain.js';
 
 /** Where a run got to. `unavailable` is decided before anything is spawned. */
@@ -429,7 +430,7 @@ const RUN_SCOPED_STORE = 'parsedfile-store';
  * re-analyze, which is the case handled here.
  */
 function prepareAnalyzeCacheDirs(repoPath: string): string | null {
-  if (!indexIsOwned(repoPath)) return null;
+  if (!storageIsUsable(repoPath)) return null;
   const indexDir = path.join(repoPath, '.gitnexus');
 
   // Best effort. If this cannot be removed, GitNexus's own clear gets the next attempt;
@@ -509,7 +510,7 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
    * returns the directory to `missing`, which GitNexus accepts.
    */
   const forgetUnownedLeftovers = (repoPath: string): void => {
-    if (indexIsOwned(repoPath)) return;
+    if (storageIsUsable(repoPath)) return;
     try {
       rmSync(path.join(repoPath, '.gitnexus', 'plugin-home'), { recursive: true, force: true });
     } catch {
@@ -540,6 +541,22 @@ export function createAnalyzeRunner(options: AnalyzeRunnerOptions): AnalyzeRunne
           `${next.message ?? ''}\n` +
           'GitNexus 认为 .gitnexus 里有数据但没有归属元数据（unowned）。' +
           '强制重建（--force）是上游唯一允许清除这种状态的入口：它会重建索引。';
+      } else {
+        // The stderr sentence is not the only blocked state, and upstream's wording is
+        // English-only. Name the other two from what the directory actually says, so a
+        // failed run is followed by an operation that can work rather than by a repeat.
+        const storage = readStorageState(repoPath);
+        if (storage.state === 'foreign') {
+          next.message =
+            `${next.message ?? ''}\n` +
+            `这个 .gitnexus 属于另一个检出（${storage.foreignRepoPath ?? '清单里记录的是别的路径'}）。` +
+            '强制重建（--force）会按当前检出重建索引。';
+        } else if (storage.state === 'invalid_storage') {
+          next.message =
+            `${next.message ?? ''}\n` +
+            `这个 .gitnexus 的归属元数据无法解析（${storage.reason ?? '内容无效'}）。` +
+            '强制重建（--force）会按当前检出重建索引。';
+        }
       }
     }
     rememberRun(repoPath, next);

@@ -624,6 +624,69 @@ export function renderSuite(ctx) {
     noGitNoIndex.text.includes('扫描概览') && noGitNoIndex.text.includes('初始化索引'),
   );
 
+  // A `.gitnexus` that holds data without an acceptable manifest is a third state, not
+  // "no index": `analyze` refuses to run there, so the initialize action would recommend
+  // the one command that cannot work. The panel must name the state and offer the only
+  // command upstream allows — the full rebuild.
+  const blockedReport = (storage) => ({
+    ...noIndexReport,
+    repo: { indexed: false, path: 'D:\\demo', storage },
+  });
+  const unowned = render(I.CoverageView, {
+    report: blockedReport({
+      state: 'unowned',
+      usable: false,
+      hasCodeIndexDB: true,
+      manifest: null,
+      reason: 'Storage directory contains data but no valid ownership metadata.',
+    }),
+    ...viewProps,
+  });
+  check(
+    'a store GitNexus will not accept is not called uninitialized',
+    unowned.text.includes('无法使用（unowned）') && !unowned.text.includes('还没有 GitNexus 索引'),
+    unowned.text.slice(0, 400),
+  );
+  check(
+    'a blocked store withholds the initialize command and keeps the rebuild',
+    !unowned.text.includes('该项目还没有 .gitnexus 索引时使用。') && unowned.text.includes('当前适用'),
+    unowned.text.slice(0, 700),
+  );
+  check(
+    'a blocked store does not dress the scan up as an index',
+    !unowned.text.includes('扫描概览') && unowned.text.includes('存储状态'),
+    unowned.text.slice(0, 400),
+  );
+
+  const foreign = render(I.CoverageView, {
+    report: blockedReport({
+      state: 'foreign',
+      usable: false,
+      foreignRepoPath: 'D:\\other',
+      foreignStoragePath: 'D:\\other\\.gitnexus',
+    }),
+    ...viewProps,
+  });
+  check(
+    'a foreign store names the checkout it actually belongs to',
+    foreign.text.includes('属于另一个检出') &&
+      foreign.text.includes('D:\\other') &&
+      !foreign.text.includes('该项目还没有 GitNexus 索引'),
+    foreign.text.slice(0, 500),
+  );
+
+  // The state the host cannot read is still a state. Saying "no index" would invite a
+  // full rebuild of a store that may be perfectly fine and merely unreadable.
+  const unreadable = render(I.CoverageView, {
+    report: blockedReport({ state: 'unknown', usable: false, reason: 'EACCES: permission denied' }),
+    ...viewProps,
+  });
+  check(
+    'an unreadable store says so instead of guessing',
+    unreadable.text.includes('无法读取该项目的 .gitnexus') && unreadable.text.includes('EACCES'),
+    unreadable.text.slice(0, 500),
+  );
+
   // An index built with `--skip-git`: there is no incremental mode, so the normal
   // action must not be labelled "增量刷新".
   const gitless = render(I.CoverageView, {

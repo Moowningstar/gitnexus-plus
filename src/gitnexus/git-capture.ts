@@ -30,7 +30,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRunner, isSandboxLike, isSubprocessLike, type Runner } from '../subprocess.js';
-import { indexIsOwned } from './index-meta.js';
+import { storageIsUsable } from './storage-state.js';
 
 export interface GitCaptureOptions {
   /** Kill the child after this long. Defaults to `DEFAULT_GIT_TIMEOUT_MS`. */
@@ -165,7 +165,7 @@ let counter = 0;
  * un-owned checkout gets the system temp directory.
  */
 function scratchDirFor(repoPath: string): string {
-  if (!indexIsOwned(repoPath)) return os.tmpdir();
+  if (!storageIsUsable(repoPath)) return os.tmpdir();
   const inside = path.join(repoPath, '.gitnexus', 'plugin-home', 'tmp');
   try {
     mkdirSync(inside, { recursive: true });

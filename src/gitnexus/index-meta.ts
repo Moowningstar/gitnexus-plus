@@ -20,19 +20,13 @@ export function globalDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * Does this checkout's `.gitnexus` carry an ownership manifest?
+ * The ownership question lives in `storage-state.ts`.
  *
- * GitNexus 1.6.13 inspects that directory before every write and refuses one that holds
- * anything besides its own lock artifacts and no manifest: it calls the state "unowned"
- * and `analyze` stops with a message that names no remedy. Both metadata names count —
- * `gitnexus.json` is current, `meta.json` is what older builds wrote, and the resolver
- * accepts either as the ownership proof.
+ * It used to be answered here as "is there a `gitnexus.json` or `meta.json`?", which
+ * treated a manifest belonging to another checkout (`foreign`) as owned. The guards
+ * that decide whether a write may touch `.gitnexus` now ask `storageIsUsable`, which
+ * only accepts `owned`.
  */
-export function indexIsOwned(repoPath: string): boolean {
-  return ['gitnexus.json', 'meta.json'].some((name) =>
-    existsSync(path.join(repoPath, '.gitnexus', name)),
-  );
-}
 
 /** The environment a caller may thread through instead of the real one. */
 export interface RegistryOptions {

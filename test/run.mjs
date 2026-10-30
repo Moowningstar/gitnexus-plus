@@ -22,6 +22,7 @@ import { analyzeTests, installTests } from './suites/runners.mjs';
 import { deltaTests } from './suites/delta.mjs';
 import { freshnessTests } from './suites/freshness.mjs';
 import { coverageGateTests } from './suites/coverage-gate.mjs';
+import { storageStateTests } from './suites/storage-state.mjs';
 import { managedPathTests, anchorTests } from './suites/anchor.mjs';
 import { gitLogTests } from './suites/git-log.mjs';
 import { graphTests } from './suites/graphs.mjs';
@@ -71,6 +72,8 @@ export async function main() {
   await freshnessTests();
   // Same reason: the gate turns literal reports into a verdict, no index involved.
   await coverageGateTests();
+  // The storage decision is a pure table plus a few real directories; no git, no index.
+  await storageStateTests();
   await managedPathTests();
   await anchorTests();
   await gitLogTests();

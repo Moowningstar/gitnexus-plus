@@ -252,12 +252,35 @@ export interface ClientIndexInfo {
   dirtyPaths?: string[];
 }
 
-/** The subset of the host report this half renders. */
-export interface ClientReport {
+/**
+ * The state of a project's `.gitnexus`, as the host decided it.
+ *
+ * `owned` is the only state in which GitNexus will build anything; `unowned`, `foreign`
+ * and `invalid_storage` are the blocked states whose only remedy is a full rebuild, and
+ * `unknown` means the directory could not be read at all.
+ */
+export interface ClientStorageState {
+  state: 'missing' | 'empty' | 'owned' | 'unowned' | 'foreign' | 'invalid_storage' | 'unknown';
+  manifest?: 'gitnexus.json' | 'meta.json' | null;
+  usable?: boolean;
+  hasCodeIndexDB?: boolean;
+  foreignRepoPath?: string | null;
+  foreignStoragePath?: string | null;
+  reason?: string | null;
+}
+
+/** The subset of the host report this half renders. */export interface ClientReport {
   repo?: {
     path?: string;
     name?: string;
     indexed?: boolean;
+    /**
+     * What state `.gitnexus` is in, in GitNexus's own vocabulary plus `unknown`.
+     *
+     * Absent on a host that predates 0.1.11 and on reports the client seeds for a
+     * project with no index; treat absence as `missing`.
+     */
+    storage?: ClientStorageState;
     /** `false` for a folder with no `.git`; such a directory can still be indexed with `--skip-git`. */
     hasGit?: boolean;
     indexedAt?: string | null;

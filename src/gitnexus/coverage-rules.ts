@@ -18,6 +18,7 @@ import type { ActivityInfo } from './git-activity.js';
 import type { CompatibilityInfo, CoverageProgress, LargeFile, ReportWarning } from './coverage.js';
 import { aggregateLanguages, classifyFile, type LanguageDetector } from './languages.js';
 import type { IndexMeta } from './index-meta.js';
+import type { StorageStateReport } from './storage-state.js';
 import type { ScanReport, ScannedFile } from './scan.js';
 import { formatBytes, judgeMinified, looksGenerated } from './file-shape.js';
 
@@ -322,6 +323,60 @@ export function indexDriftWarnings(
   }
 
   return warnings;
+}
+
+/**
+ * What is visibly wrong with the storage directory itself.
+ *
+ * A checkout whose `.gitnexus` holds data but no manifest (`unowned`) or a manifest
+ * written for another path (`foreign`) is not "an unindexed repository": the directory
+ * exists, `gitnexus analyze` will refuse it, and only `--force` gets out. Leaving this
+ * to the generic "no index" branch is what made the panel offer the one action that
+ * cannot work. `unknown` — a directory we could not read — stays silent here: there is
+ * no claim to make, and the state still blocks writes.
+ */
+export function storageWarnings(storage: StorageStateReport): ReportWarning[] {
+  if (storage.state === 'unowned') {
+    return [
+      {
+        level: 'warn',
+        code: 'storage-unowned',
+        message:
+          '存储目录 .gitnexus 里有数据但没有归属元数据（unowned），GitNexus 会拒绝任何写入；只有全量重建（--force）能恢复',
+        evidence: { state: storage.state, hasCodeIndexDB: storage.hasCodeIndexDB },
+      },
+    ];
+  }
+
+  if (storage.state === 'foreign') {
+    return [
+      {
+        level: 'warn',
+        code: 'storage-foreign',
+        message:
+          `存储目录 .gitnexus 的归属元数据记录的是另一个检出` +
+          `${storage.foreignRepoPath ? `（${storage.foreignRepoPath}）` : ''}；按当前检出使用前需要全量重建（--force）`,
+        evidence: {
+          state: storage.state,
+          recordedRepoPath: storage.foreignRepoPath,
+          recordedStoragePath: storage.foreignStoragePath,
+        },
+      },
+    ];
+  }
+
+  if (storage.state === 'invalid_storage') {
+    return [
+      {
+        level: 'warn',
+        code: 'storage-invalid',
+        message: `存储目录 .gitnexus 的归属元数据无法解析（${storage.reason ?? '内容无效'}）；需要全量重建（--force）`,
+        evidence: { state: storage.state, reason: storage.reason },
+      },
+    ];
+  }
+
+  return [];
 }
 
 /**

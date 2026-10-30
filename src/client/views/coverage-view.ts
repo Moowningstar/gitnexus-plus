@@ -220,6 +220,18 @@ export function CoverageView({
   // the project could not even be identified there is nothing to claim, so it is
   // false rather than assumed.
   const indexed = report?.repo?.indexed === true;
+  // Which screen this is depends on more than "does an index exist". A `.gitnexus` that
+  // holds data without an acceptable manifest is *blocked*: GitNexus refuses to write
+  // there, so `analyze` (the initialize command) stops before touching anything. The
+  // panel used to render that state as "没有索引" and offer exactly that command, which
+  // is the one operation the store rejects. Hosts before 0.1.11 send no `storage`, so
+  // the fallback keeps the old two-screen behaviour rather than inventing a state.
+  const storageState = report?.repo?.storage?.state ?? (indexed ? 'owned' : 'missing');
+  const storageBlocked =
+    storageState === 'unowned' ||
+    storageState === 'foreign' ||
+    storageState === 'invalid_storage' ||
+    storageState === 'unknown';
   const graphCardRef = React.useRef<HTMLDivElement | null>(null);
   // Hooks must stay above every early return below: the panel renders once with
   // `report === null` while the first request is in flight, then again with the
@@ -706,6 +718,98 @@ export function CoverageView({
     onSelectProject,
   });
 
+  // A store GitNexus will not accept is not an uninitialized one. Rendering it as
+  // "尚未索引" with an initialize button offered the operator the single command that
+  // cannot run here, and said nothing about why. This screen exists so the state and
+  // the one working remedy are both visible before the operator copies anything.
+  if (storageBlocked) {
+    const storage = report?.repo?.storage;
+    const state = storageState;
+    const detail =
+      state === 'foreign'
+        ? [
+            storage?.foreignRepoPath
+              ? `元数据记录的仓库路径：${storage.foreignRepoPath}`
+              : null,
+            storage?.foreignStoragePath
+              ? `元数据记录的存储路径：${storage.foreignStoragePath}`
+              : null,
+            report?.repo?.path ? `当前项目路径：${report.repo.path}` : null,
+          ].filter((line): line is string => line !== null && line !== undefined)
+        : [];
+    const headline =
+      state === 'unowned'
+        ? '该项目的 .gitnexus 无法使用（unowned）'
+        : state === 'foreign'
+          ? '该项目的 .gitnexus 属于另一个检出（foreign）'
+          : state === 'invalid_storage'
+            ? '该项目的 .gitnexus 归属元数据无法解析（invalid_storage）'
+            : '无法读取该项目的 .gitnexus（unknown）';
+    const body =
+      state === 'unowned'
+        ? '目录里已经有 GitNexus 的数据，但没有可接受的归属元数据。GitNexus 拒绝在这个目录里写入，所以「初始化索引」会直接停下，不会重建任何东西。'
+        : state === 'foreign'
+          ? '这个 .gitnexus 记录的是另一个仓库/存储目录。在这里读图会读到别的项目的索引，写入则会被拒绝。'
+          : state === 'invalid_storage'
+            ? `归属元数据读得出来但解析不了，因此无法判断它属于谁。${storage?.reason ? `原因：${storage.reason}` : ''}`
+            : `这个 .gitnexus 读不出来，所以无法判断它是什么状态。${storage?.reason ? `原因：${storage.reason}` : ''}`;
+    return h(
+      'div',
+      { style: styles.root },
+      stickyHeader,
+      progressBar,
+      h(ToolchainNotice, {
+        toolchain: report.toolchain,
+        run: installRun,
+        runError: installError,
+        onInstall,
+        onCancelInstall,
+      }),
+      h(
+        'div',
+        { style: { gridColumn: '1 / -1', display: 'flex', gap: '8px', alignItems: 'flex-start' } },
+        h(StateDot, { state: 'warning' }),
+        h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 } },
+          h('span', null, headline),
+          h(
+            'span',
+            { style: { ...MUTED, fontSize: '11px' } },
+            '这一状态来自上游的存储检查（GitNexus 的 storage resolver），不是本插件的推断。',
+          ),
+        ),
+      ),
+      h(
+        Section,
+        { wide: true, title: '存储状态' },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } }, h('span', null, body)),
+        detail.length > 0
+          ? h(
+              'div',
+              { style: { ...MUTED, marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px' } },
+              ...detail.map((line) => h('span', { key: line }, line)),
+            )
+          : null,
+      ),
+      maintenanceSection !== null
+        ? h(
+            Section,
+            {
+              wide: true,
+              title: '全量重建',
+              meta: h(
+                'span',
+                { style: { ...MUTED, fontSize: '11px' } },
+                '这是上游唯一允许清除该状态的入口；它按当前项目重建索引',
+              ),
+            },
+            h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, storageState, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+          )
+        : null,
+    );
+  }
+
   // No index yet. This is the state the initialize command exists for, but it is
   // also a state in which the working tree is still readable: file counts, bytes,
   // the cap and the language split do not need GitNexus. The panel used to show
@@ -785,7 +889,7 @@ export function CoverageView({
                   : '重启 DSH 后可执行；当前仅可复制（沙箱与提权由 DSH 处理）',
               ),
             },
-            h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+            h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, storageState, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
           )
         : null,
     );
@@ -1126,7 +1230,7 @@ export function CoverageView({
             ),
             scroll: 360,
           },
-          h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
+          h(MaintenanceSection, { maintenance: maintenanceSection, projectPath, indexed, storageState, run, runError, delta, deltaError, deltaRoute, onStartRun, onCancelRun }),
         )
       : null,
   );

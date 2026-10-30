@@ -24,10 +24,34 @@ export function formatReport(report: CoverageReport, withLanguages = true): stri
   const lines: string[] = [];
   const { repo, cap, totals } = report;
 
+  // A missing manifest and a store GitNexus refuses are two different answers, and
+  // they have two different remedies. Collapsing them into "NOT FOUND, run analyze"
+  // told an unowned or foreign store to run the one operation upstream declines.
+  // Reports assembled before `storage` existed still say `indexed: true`; that is the
+  // one legacy shape that must keep rendering as an index.
+  const storageState = repo.storage?.state ?? (repo.indexed ? 'owned' : 'missing');
+
   if (!repo.indexed) {
+    if (storageState === 'missing' || storageState === 'empty') {
+      return (
+        `GitNexus index: NOT FOUND\n${repo.path}\n` +
+        'No .gitnexus/gitnexus.json or .gitnexus/meta.json — run `gitnexus analyze` first.'
+      );
+    }
+
+    const detail =
+      storageState === 'foreign'
+        ? `归属元数据记录的是另一个检出：${repo.storage?.foreignRepoPath ?? '(未记录)'}`
+        : storageState === 'unowned'
+          ? '.gitnexus 里有数据但没有归属元数据，GitNexus 会拒绝写入'
+          : storageState === 'invalid_storage'
+            ? `归属元数据无法解析：${repo.storage?.reason ?? '内容无效'}`
+            : `无法读取 .gitnexus：${repo.storage?.reason ?? '权限或 IO 失败'}；状态未知，写操作不会执行`;
+
     return (
-      `GitNexus index: NOT FOUND\n${repo.path}\n` +
-      'No .gitnexus/gitnexus.json or .gitnexus/meta.json — run `gitnexus analyze` first.'
+      `GitNexus index: BLOCKED (${storageState})\n${repo.path}\n` +
+      `${detail}\n` +
+      '唯一可用的操作是全量重建：`gitnexus analyze --force`（面板里是「全量重建」）。'
     );
   }
 

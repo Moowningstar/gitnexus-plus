@@ -32,6 +32,7 @@ export function MaintenanceSection({
   maintenance,
   projectPath,
   indexed,
+  storageState,
   run,
   runError,
   delta,
@@ -43,6 +44,13 @@ export function MaintenanceSection({
   maintenance: ClientMaintenance;
   projectPath: string | null;
   indexed: boolean;
+  /**
+   * The storage state the host decided. A store that is `unowned`, `foreign`,
+   * `invalid_storage` or `unknown` cannot be initialized — GitNexus refuses the write —
+   * so the incremental command is withheld and the full rebuild becomes the applicable
+   * one. Absent on hosts before 0.1.11, which is the old behaviour.
+   */
+  storageState?: 'missing' | 'empty' | 'owned' | 'unowned' | 'foreign' | 'invalid_storage' | 'unknown' | null;
   run: ClientAnalyzeRun | null;
   runError: string | null;
   /**
@@ -65,20 +73,35 @@ export function MaintenanceSection({
   // `RiskConfirmation`'s checkbox is controlled, so the tick has to live here. Without
   // this the box renders but never moves, which is how it looked the first time.
   const [acknowledged, setAcknowledged] = React.useState(false);
+  // A blocked store is not an uninitialized one: the directory already holds data whose
+  // ownership GitNexus will not accept, so `analyze` without `--force` stops before it
+  // writes anything. Offering the incremental command here is offering a button that
+  // cannot work, which is exactly what the panel did before the state was known.
+  const blocked =
+    storageState === 'unowned' ||
+    storageState === 'foreign' ||
+    storageState === 'invalid_storage' ||
+    storageState === 'unknown';
+
   const commands = (Array.isArray(maintenance?.commands) ? maintenance.commands : []).filter(
-    // The host only sends the repair command when the index says FTS is missing, but a
-    // client that hot-reloaded ahead of the host could still receive it from a host
-    // whose route does not understand the mode. Do not offer a control that would
-    // silently run a plain refresh under a "repair" label.
-    (command) => command.mode !== 'repair-fts' || maintenance.supportsRepair === true,
+    (command) =>
+      // The host only sends the repair command when the index says FTS is missing, but a
+      // client that hot-reloaded ahead of the host could still receive it from a host
+      // whose route does not understand the mode. Do not offer a control that would
+      // silently run a plain refresh under a "repair" label.
+      (command.mode !== 'repair-fts' || maintenance.supportsRepair === true) &&
+      // Same reasoning for the blocked store: the command text would still be valid to
+      // copy, but the button next to it promises an operation upstream refuses.
+      (!blocked || command.mode !== 'init'),
   );
   if (commands.length === 0) return null;
 
   // The incremental command is the normal action on both states: it initialises a
   // missing index and refreshes a present one. The full rebuild is an escape hatch
   // for a hung refresh, never "what applies" — marking it applicable on every
-  // indexed repository recommended the destructive path by default.
-  const applicable = 'init';
+  // indexed repository recommended the destructive path by default. The one exception
+  // is a blocked store, where the full rebuild is the only command left that can work.
+  const applicable = blocked ? 'full' : 'init';
   const fullConfirm = confirming === 'full';
   const repairConfirm = confirming === 'repair-fts';
   const confirmCommand = commands.find((c) => c.mode === (confirming ?? 'init'));

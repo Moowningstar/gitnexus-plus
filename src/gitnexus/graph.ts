@@ -28,6 +28,7 @@
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
+import { describeBlockedStorage, readStorageState } from './storage-state.js';
 import { isOrphanShadowError, quarantineOrphanShadow } from './lbug-heal.js';
 import { loadAdapter } from './search.js';
 import type { ShellLike } from '../shell.js';
@@ -106,6 +107,7 @@ export type GraphErrorCode =
   | 'not-a-project'
   | 'no-index'
   | 'no-index-store'
+  | 'index-not-usable'
   | 'graph-unavailable'
   | 'index-busy'
   | 'graph-cancelled'
@@ -174,6 +176,21 @@ function countOf(value: unknown): number {
 }
 
 /**
+ * Refuse to read a store that is not this checkout's own.
+ *
+ * The graph file itself is readable whatever the manifest says, so without this gate a
+ * moved checkout would happily project the previous checkout's graph while the panel
+ * reports the store as blocked. `no-index-store` stays what it was — a missing `lbug`;
+ * this is the other case: an `lbug` nobody here can claim.
+ */
+function assertUsableStorage(absRepo: string): void {
+  const storage = readStorageState(absRepo);
+  if (storage.usable) return;
+  const code: GraphErrorCode = storage.state === 'missing' || storage.state === 'empty' ? 'no-index' : 'index-not-usable';
+  throw new GraphError(code, 409, describeBlockedStorage(storage));
+}
+
+/**
  * Read one projection.
  *
  * @param repoPath absolute repository root
@@ -190,6 +207,7 @@ export async function projectGraph(repoPath: string, options: GraphOptions = {})
   if (!(await isProjectRoot(absRepo))) {
     throw new GraphError('not-a-project', 404, '目录不是 GitNexus 索引，也不是 git 项目根。');
   }
+  assertUsableStorage(absRepo);
   const meta = await readIndexMeta(absRepo);
   if (meta === null) {
     throw new GraphError('no-index', 409, '该项目还没有 GitNexus 索引；初始化后才能看图。');
@@ -496,6 +514,7 @@ function graphErrorCode(value: unknown): GraphErrorCode {
     case 'not-a-project':
     case 'no-index':
     case 'no-index-store':
+    case 'index-not-usable':
     case 'graph-unavailable':
     case 'index-busy':
     case 'graph-cancelled':
@@ -571,6 +590,7 @@ export async function projectViaHelper(
   if (!(await isProjectRoot(absRepo))) {
     throw new GraphError('not-a-project', 404, '目录不是 GitNexus 索引，也不是 git 项目根。');
   }
+  assertUsableStorage(absRepo);
   const meta = await readIndexMeta(absRepo);
   if (meta === null) {
     throw new GraphError('no-index', 409, '该项目还没有 GitNexus 索引；初始化后才能看图。');
