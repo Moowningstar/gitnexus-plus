@@ -953,6 +953,111 @@ export function renderSuite(ctx) {
   );
 
   // ---------------------------------------------------------------------------
+  // The dependency-risk card. What must be true here is not "the numbers are
+  // pretty" but the two promises the design made: a broken reference names the
+  // file and the caller that still points at it, and no state ever reads as
+  // "everything is fine" when nothing was evaluated.
+
+  const hit = (name, filePath, fromName, crossCommunity = false) => ({
+    symbol: { id: `${filePath}:${name}`, kind: 'Function', name, filePath, startLine: 12, community: null },
+    incoming: crossCommunity ? 4 : 1,
+    callers: [{ type: 'CALLS', fromFile: 'src/app/entry.ts', fromName }],
+    crossCommunity,
+  });
+  const riskProps = (risk) => ({ report, ...viewProps, risk, riskError: null, riskRoute: 'ready' });
+
+  const brokenRisk = render(
+    I.CoverageView,
+    riskProps({
+      risk: {
+        evaluated: true,
+        verdict: 'broken',
+        reason: null,
+        counts: { broken: 1, exposed: 1, blind: 1, crossCommunity: 1 },
+        broken: [hit('movedAway', 'src/dep/gone.ts', 'entryPoint', true)],
+        exposed: [hit('touched', 'src/dep/kept.ts', 'otherCaller')],
+        blind: [{ path: 'src/new/file.ts', kind: 'added', reason: 'not-in-index' }],
+        truncated: false,
+        notes: [],
+      },
+      text: '依赖风险：1 处确定断裂、1 处暴露（改动后结构上的引用，不是编译结论）。',
+      line: '依赖风险：1 处确定断裂、1 处暴露（改动后结构上的引用，不是编译结论）。',
+      watching: true,
+      live: true,
+      degraded: null,
+      busy: false,
+      delta: { comparable: true, certain: true, needsRefresh: false, counts: { modified: 1, added: 0, deleted: 1, excluded: 0 } },
+      version: 4,
+    }),
+  );
+  check(
+    'a broken reference names the file and the caller that still points at it',
+    brokenRisk.text.includes('确定断裂') &&
+      brokenRisk.text.includes('src/dep/gone.ts') &&
+      brokenRisk.text.includes('entryPoint'),
+    brokenRisk.text.slice(0, 900),
+  );
+  check(
+    'the card says the verdict is structural, not a compile result',
+    brokenRisk.text.includes('不是编译结论') && brokenRisk.text.includes('不代表测试通过或失败'),
+    brokenRisk.text.slice(-500),
+  );
+  check(
+    'the card reports the blind spot and the tracked change set',
+    brokenRisk.text.includes('盲区') && brokenRisk.text.includes('不在索引里') && brokenRisk.text.includes('改动 +0'),
+    brokenRisk.text.slice(0, 1200),
+  );
+  check(
+    'a live tracker is labelled as listening',
+    brokenRisk.text.includes('监听中'),
+    brokenRisk.text.slice(0, 400),
+  );
+
+  const unknownRiskCard = render(
+    I.CoverageView,
+    riskProps({
+      risk: {
+        evaluated: false,
+        verdict: 'unknown',
+        reason: '图查询失败：boom',
+        counts: { broken: 0, exposed: 0, blind: 0, crossCommunity: 0 },
+        broken: [],
+        exposed: [],
+        blind: [],
+        truncated: false,
+        notes: [],
+      },
+      text: '依赖风险：无法评估（图查询失败：boom）\n这不是“没有风险”，而是这次没能算出来。',
+      line: '依赖风险：无法评估（图查询失败：boom）。',
+      watching: false,
+      live: false,
+      degraded: null,
+      busy: false,
+      delta: null,
+      version: 1,
+    }),
+  );
+  check(
+    'an unevaluated risk never reads as a clean bill of health',
+    unknownRiskCard.text.includes('无法评估') &&
+      unknownRiskCard.text.includes('没有风险') &&
+      !unknownRiskCard.text.includes('没有发现'),
+    unknownRiskCard.text.slice(0, 700),
+  );
+
+  const oldHostRisk = render(I.CoverageView, { report, ...viewProps, riskRoute: 'missing' });
+  check(
+    'a host without the risk route says so instead of showing an empty card',
+    oldHostRisk.text.includes('宿主未挂载追踪路由'),
+    oldHostRisk.text.slice(0, 500),
+  );
+  check(
+    'a host without the risk route renders no counts row at all',
+    !oldHostRisk.text.includes('确定断裂'),
+    oldHostRisk.text.slice(0, 500),
+  );
+
+  // ---------------------------------------------------------------------------
 
   return { report, project, view, empty };
 }

@@ -17,11 +17,12 @@ import { ToolchainNotice } from '../sections/install';
 import { MemoizedLanguageSection } from '../sections/languages';
 import { LargeFileList } from '../sections/large-files';
 import { MaintenanceSection, type MaintenanceStartMode } from '../sections/maintenance';
+import { RiskSection } from '../sections/risk-card';
 import { WorkspaceOverview } from '../sections/workspace';
 import { SearchSection } from '../sections/search';
 import { GraphSection } from '../sections/graph';
 import { WebViewSection } from '../sections/webview';
-import { ClientAnalyzeRun, ClientDelta, ClientInstallRun, ClientMaintenance, ClientProject, ClientReport, ContextDiagnostic, GraphViewState, SearchViewState } from '../types';
+import { ClientAnalyzeRun, ClientDelta, ClientInstallRun, ClientMaintenance, ClientProject, ClientReport, ClientRisk, ContextDiagnostic, GraphViewState, SearchViewState } from '../types';
 export interface CoverageViewProps {
   report: ClientReport | null;
   maintenance: ClientMaintenance | null | undefined;
@@ -76,6 +77,17 @@ export interface CoverageViewProps {
   deltaError?: string | null;
   /** Whether the host mounted the delta route; `missing` is named, not swallowed. */
   deltaRoute?: 'unknown' | 'ready' | 'missing';
+  /**
+   * The resident tracker's verdict about the change set.
+   *
+   * Optional for the same reason as `delta`: a view rendered without the route — an older
+   * host, or a test fixture — must not demand a prop it cannot be given, and the card is
+   * absent rather than empty in that case.
+   */
+  risk?: ClientRisk | null;
+  riskError?: string | null;
+  /** Whether the host mounted the risk route; `missing` is named, not swallowed. */
+  riskRoute?: 'unknown' | 'ready' | 'missing';
   onRefresh: () => void;
   onStartRun: (mode?: MaintenanceStartMode) => void;
   onCancelRun: () => void;
@@ -204,6 +216,9 @@ export function CoverageView({
   delta,
   deltaError,
   deltaRoute,
+  risk = null,
+  riskError = null,
+  riskRoute = 'unknown',
   onRefresh,
   onStartRun,
   onCancelRun,
@@ -1070,6 +1085,31 @@ export function CoverageView({
             h(GraphSection, { state: graph }),
           ),
         ),
+
+    // The alarm, immediately after the graph it is about: "what did my edit do to the call
+    // graph" is the question the graph card provokes, and answering it one card later keeps
+    // the two readings next to each other.
+    indexed && (risk !== null || riskRoute !== 'unknown')
+      ? h(
+          Section,
+          {
+            wide: true,
+            title: '依赖风险',
+            meta: h(
+              'span',
+              { style: { ...MUTED, fontSize: '11px' } },
+              riskRoute === 'missing'
+                ? '宿主未挂载追踪路由'
+                : risk === null
+                  ? '读取中…'
+                  : risk.watching
+                    ? '驻守进程正在监听改动'
+                    : '未在监听',
+            ),
+          },
+          h(RiskSection, { risk, route: riskRoute, error: riskError }),
+        )
+      : null,
 
     // Caveats, in one card, sharing a row with the provenance card.
     //

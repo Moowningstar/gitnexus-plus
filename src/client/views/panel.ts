@@ -3,7 +3,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
 import { contextDiagnostic, fileResourceAddress, openResource, openResourceIn, routeUrl, useProjectPath } from '../navigation';
 import { h } from '../primitives';
 import { type MaintenanceStartMode } from '../sections/maintenance';
-import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, SlotProps } from '../types';
+import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, ClientRisk, SlotProps } from '../types';
 import { CoverageView } from './coverage-view';
 import { useGitnexusInstall } from './panel-install';
 import { useKeywordSearch } from './panel-search';
@@ -216,6 +216,25 @@ export function CoveragePanel(props: SlotProps) {
   const [deltaRoute, setDeltaRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   /** Which project the current gate reading belongs to, so a switch can clear it. */
   const deltaRepoRef = React.useRef<string | null>(null);
+  /**
+   * The resident tracker's verdict about the current change set.
+   *
+   * Read on an interval rather than only on load: the tracker itself notices file and commit
+   * movement, and the whole point of the card is that it updates without a button. The poll is
+   * cheap by construction — the route answers from the tracker's snapshot and never starts a
+   * query on its own.
+   */
+  const [risk, setRisk] = React.useState<ClientRisk | null>(null);
+  const [riskError, setRiskError] = React.useState<string | null>(null);
+  /**
+   * Whether the host serves `/api/gitnexus/risk`.
+   *
+   * Same lesson as the delta and graph routes: a 404 from an older host is a state to name,
+   * not a fetch error to swallow.
+   */
+  const [riskRoute, setRiskRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
+  /** Which project the current risk reading belongs to, so a switch can clear it. */
+  const riskRepoRef = React.useRef<string | null>(null);
   /** The bounded graph projection, its scope, and the load state around it. */
   const [graphProjection, setGraphProjection] = React.useState<ClientGraphProjection | null>(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
@@ -590,6 +609,79 @@ export function CoveragePanel(props: SlotProps) {
   }, [projectPath, reloadToken]);
 
   /**
+   * Poll the tracker's verdict.
+   *
+   * Four seconds: the tracker's own debounce is 800 ms and its minimum gap 5 s, so a faster
+   * poll would only re-read the same version. The interval stops for good on a 404 — an older
+   * host is not going to grow the route while the panel is open, and a request every four
+   * seconds to be told that is noise in someone's log.
+   */
+  React.useEffect(() => {
+    if (projectPath === null) return undefined;
+    if (riskRoute === 'missing') return undefined;
+    if (riskRepoRef.current !== projectPath) {
+      riskRepoRef.current = projectPath;
+      setRisk(null);
+      setRiskError(null);
+    }
+    const controller = new AbortController();
+    const read = async (): Promise<void> => {
+      try {
+        const res = await fetch(routeUrl(`/api/gitnexus/risk?repo=${encodeURIComponent(projectPath)}`), {
+          signal: controller.signal,
+        });
+        if (res.status === 404) {
+          if (!controller.signal.aborted) {
+            setRisk(null);
+            setRiskError(null);
+            setRiskRoute('missing');
+          }
+          return;
+        }
+        setRiskRoute('ready');
+        const body = (await res.json().catch(() => null)) as
+          | ({ ok?: boolean; message?: string } & Partial<ClientRisk>)
+          | null;
+        if (controller.signal.aborted) return;
+        if (!body?.ok || body.version === undefined) {
+          setRiskError(typeof body?.message === 'string' ? body.message : `改动追踪读取失败 (${res.status})`);
+          return;
+        }
+        const next: ClientRisk = {
+          risk: body.risk ?? null,
+          text: body.text ?? null,
+          line: body.line ?? null,
+          watching: body.watching === true,
+          live: body.live === true,
+          degraded: body.degraded ?? null,
+          busy: body.busy === true,
+          delta: body.delta ?? null,
+          version: body.version,
+        };
+        // The route answers every four seconds; only a moved version, a moved sentence or a
+        // change in the busy flag is worth a re-render.
+        setRisk((previous) =>
+          previous !== null && previous.version === next.version && previous.line === next.line && previous.busy === next.busy
+            ? previous
+            : next,
+        );
+        setRiskError(null);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setRiskError(String((cause as Error)?.message ?? cause));
+      }
+    };
+    void read();
+    const id = setInterval(() => {
+      void read();
+    }, 4000);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, [projectPath, riskRoute]);
+
+  /**
    * Read the graph projection for the current scope.
    *
    * Two views, one endpoint: the overview is the default, and a scope switches to the
@@ -763,6 +855,9 @@ export function CoveragePanel(props: SlotProps) {
     delta,
     deltaError,
     deltaRoute,
+    risk,
+    riskError,
+    riskRoute,
     // `tick` is read here rather than inside the card, so elapsed seconds re-render
     // even when the host reports nothing new — a run with no output for a minute
     // otherwise looks frozen.

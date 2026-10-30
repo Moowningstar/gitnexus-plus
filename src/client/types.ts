@@ -446,6 +446,64 @@ export interface ClientDelta {
   readAt: string;
 }
 
+/**
+ * One symbol the change set put at risk, and the references still pointing at it.
+ *
+ * `filePath` and `startLine` are where the symbol was *when the index was built* — for a
+ * deleted file that location no longer exists, which is exactly what the bucket means.
+ */
+export interface ClientRiskHit {
+  symbol: {
+    id: string;
+    kind: string;
+    name: string;
+    filePath: string | null;
+    startLine: number | null;
+    community: string | null;
+  };
+  incoming: number;
+  callers: Array<{ type: string; fromFile: string | null; fromName: string | null }>;
+  crossCommunity: boolean;
+}
+
+/**
+ * The tracker's verdict about the current change set.
+ *
+ * `evaluated: false` is not a failure and not a clean result: it means the index could not be
+ * asked (unusable store, timeout, incomplete change set). The panel says so in those words.
+ */
+export interface ClientRiskReport {
+  evaluated: boolean;
+  verdict: 'broken' | 'exposed' | 'clear' | 'unknown';
+  reason: string | null;
+  counts: { broken: number; exposed: number; blind: number; crossCommunity: number };
+  broken: ClientRiskHit[];
+  exposed: ClientRiskHit[];
+  blind: Array<{ path: string; kind: string; reason: 'no-symbols' | 'not-in-index' }>;
+  truncated: boolean;
+  notes: string[];
+}
+
+/** What `GET /api/gitnexus/risk` returns: the report, the host's sentence, and liveness. */
+export interface ClientRisk {
+  risk: ClientRiskReport | null;
+  /** `formatRisk` output, rendered as the body so the wording lives in one place. */
+  text: string | null;
+  /** The one-line form a graph tool appends. */
+  line: string | null;
+  watching: boolean;
+  live: boolean;
+  degraded: string | null;
+  busy: boolean;
+  delta: {
+    comparable: boolean;
+    certain: boolean;
+    needsRefresh: boolean;
+    counts: { modified: number; added: number; deleted: number; excluded: number };
+  } | null;
+  version: number;
+}
+
 /** A drawn node: a community in the overview, a symbol in a drill-down. */
 export interface ClientGraphNode {
   id: string;

@@ -121,6 +121,17 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   the button. Switching lists does not reset the others, and opening a commit's files does
   not collapse the page you were on.
 
+- **Dependency risk, tracked while you edit** — a resident watcher (per project, in-process,
+  at most three projects at a time) notices working-tree and commit movement and asks one
+  question: what did this change set break? It answers from the last analysis, so it costs
+  no re-index: a file that was deleted while other files still reference its symbols is
+  reported as **确定断裂** (with the caller that still points at it); a modified file whose
+  symbols are still referenced elsewhere is reported as **暴露**; files the index never
+  recorded are **盲区**. The panel card updates itself, every graph-tool answer carries one
+  line of the verdict, and `gitnexus_risk` answers directly. It is a structural reading of
+  the call graph, not a compiler: the card says so, and an evaluation that did not happen
+  says "无法评估" rather than "no risk".
+
 - **Index staleness, said out loud** — when the gate's verdict is `behind`, the graph card
   carries one sentence above the drawing (which commit it is behind from, how many files
   changed, what to run), and `gitnexus_impact` / `gitnexus_context` / `gitnexus_query`
@@ -237,6 +248,9 @@ Inside DSH:
 - tool `gitnexus_query`: `{ repo, search_query, goal?, task_context?, limit?, max_symbols? }` — ask
   the graph where a concept lives; returns processes, the symbols inside them, and
   name-matching definitions
+- tool `gitnexus_risk`: `{ repo, refresh?, limit? }` — what the current change set breaks:
+  symbols whose file was deleted but still has callers, and modified symbols other files
+  still reach; a structural answer from the last analysis, not a compile verdict
 - route `GET /api/gitnexus/projects?root=<workspace>` — the workspace's projects (indexed and unindexed git)
 - route `GET /api/gitnexus/coverage?repo=<project>`
 - route `GET /api/gitnexus/search?repo=<project>&q=<keyword>&limit=20`
@@ -250,6 +264,8 @@ Inside DSH:
 - route `GET /api/gitnexus/delta?repo=<project>` — Tier 0 comparison against the index
 - route `GET /api/gitnexus/graph?repo=<project>&view=communities|community&id=<community>`
   — a bounded graph projection
+- route `GET /api/gitnexus/risk?repo=<project>` — the resident tracker's current verdict;
+  answers from its snapshot and never starts a query on its own
 - route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index;
   `force=1` for a full rebuild, `mode=repair-fts` for the search indexes only)
 - right-sidebar tab `gitnexus`
@@ -280,9 +296,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1306
-checks (894 engine, 82 plugin, 330 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1303). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1392
+checks (969 engine, 86 plugin, 337 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1389). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every

@@ -24,6 +24,10 @@ import { deltaTests } from './suites/delta.mjs';
 import { freshnessTests } from './suites/freshness.mjs';
 import { coverageGateTests } from './suites/coverage-gate.mjs';
 import { storageStateTests } from './suites/storage-state.mjs';
+import { signalsTests } from './suites/signals.mjs';
+import { riskFormatTests } from './suites/risk-format.mjs';
+import { riskQueryTests } from './suites/risk-query.mjs';
+import { watchTests } from './suites/watch.mjs';
 import { managedPathTests, anchorTests } from './suites/anchor.mjs';
 import { gitLogTests } from './suites/git-log.mjs';
 import { graphTests } from './suites/graphs.mjs';
@@ -76,6 +80,10 @@ export async function main() {
   await coverageGateTests();
   // The storage decision is a pure table plus a few real directories; no git, no index.
   await storageStateTests();
+await signalsTests();
+await riskFormatTests();
+await riskQueryTests();
+await watchTests();
   await managedPathTests();
   await anchorTests();
   await gitLogTests();

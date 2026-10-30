@@ -40,12 +40,15 @@ import { mountCheckoutRoute } from './routes/checkout.js';
 import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
+import { mountRiskRoute, type RiskRoutePayload } from './routes/risk.js';
 import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
 import { checkoutBranch, readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { describeStaleness } from './gitnexus/freshness.js';
 import { provideGitSeams } from './gitnexus/git-capture.js';
+import { formatRisk, unknownRisk, type RiskReport } from './gitnexus/risk.js';
+import { RepoTracker, TrackerRegistry } from './gitnexus/watch/registry.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { runGraphTool, type GraphToolName } from './gitnexus/graph-query.js';
 import { renderTool } from './gitnexus/graph-query-render.js';
@@ -287,6 +290,32 @@ interface QueryToolArgs {
   max_symbols?: number;
 }
 
+/** Arguments the model supplies to `gitnexus_risk`. */
+interface RiskToolArgs {
+  repo: string;
+  /** Re-run the graph query even when the change set has not moved since the last answer. */
+  refresh?: boolean;
+  limit?: number;
+}
+
+/**
+ * What the `gitnexus_risk` tool returns to the model.
+ *
+ * `evaluated` is separate from `verdict` on purpose: `unknown` with `evaluated: false` means
+ * the index could not be asked, which a model must not read as "no dependency risk".
+ */
+interface RiskToolResult {
+  text: string;
+  evaluated: boolean;
+  verdict: 'broken' | 'exposed' | 'clear' | 'unknown';
+  reason: string | null;
+  broken: number;
+  exposed: number;
+  blind: number;
+  crossCommunity: number;
+  truncated: boolean;
+}
+
 /**
  * What all three graph tools return.
  *
@@ -368,6 +397,99 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // questions (`impact`, `context`, `query`) through GitNexus's own MCP backend
   // instead of a projection. See `./gitnexus/graph-query.ts` for why.
   const graphQueryHelperPath = fileURLToPath(new URL('./bin/graph-query-helper.js', import.meta.url));
+
+  /**
+   * The dependency-risk helper, and the resident trackers that call it.
+   *
+   * A tracker is started lazily — the first time something asks about a repository (a graph
+   * tool, `gitnexus_risk`, or the panel) — and never at plugin boot: watching three
+   * repositories nobody has opened is exactly the "why is this editor using a core" bug this
+   * design is trying to avoid. The registry caps how many can be attached at once and the
+   * `ctx.effect` below is the only owner.
+   */
+  const riskHelperPath = fileURLToPath(new URL('./bin/risk-helper.js', import.meta.url));
+  const trackerRegistry = new TrackerRegistry({
+    runner: null,
+    helperPath: riskHelperPath,
+  });
+  ctx.effect(
+    () => () => {
+      trackerRegistry.dispose();
+    },
+    'gitnexus-plus: change tracker',
+  );
+
+  /**
+   * The tracker for one repository, with the seams this process can resolve right now.
+   *
+   * The runner is rebuilt per call for the same reason every other spawn does it: `subprocess`
+   * and `sandbox` are optional services and a profile may mount them after this plugin
+   * applies.
+   */
+  const trackerFor = (repoPath: string): RepoTracker => {
+    const shell = shellFor();
+    return trackerRegistry.get(repoPath, {
+      runner: runnerFor(shell),
+      helperPath: riskHelperPath,
+      managedPrefix: installPrefix,
+      sandboxPolicy: sandboxPolicyForRoot,
+      ...(config.graphTools ? {} : { limit: 10 }),
+    });
+  };
+
+  /**
+   * The risk sentence a graph tool answer may append.
+   *
+   * Reads only what the tracker already computed. A tool answer is built from a snapshot and
+   * must not block on a child process to say something honest about the tree, so an
+   * unevaluated change set is said as such rather than waited for.
+   */
+  const riskLineFor = (repoPath: string): string | null => {
+    try {
+      const tracker = trackerFor(repoPath);
+      tracker.ensureStarted();
+      return tracker.line();
+    } catch {
+      // A tracker is an addition to an answer that already succeeded; losing it must not lose
+      // the answer.
+      return null;
+    }
+  };
+
+  /** What `GET /api/gitnexus/risk` returns for one repository. */
+  const riskPayloadFor = (repoPath: string): RiskRoutePayload => {
+    const tracker = trackerFor(repoPath);
+    tracker.ensureStarted();
+    // Kick an evaluation if the tracker has none in flight, then answer from what is known:
+    // the panel polls, so a slow first pass shows as `busy` instead of a stalled request.
+    void tracker.settle().catch(() => undefined);
+    const snapshot = tracker.snapshot();
+    const risk = snapshot.risk;
+    return {
+      risk,
+      text: risk === null ? null : formatRisk(risk),
+      line: risk === null ? null : tracker.line(),
+      watching: snapshot.watching,
+      live: snapshot.live,
+      degraded: snapshot.degraded,
+      busy: snapshot.busy,
+      delta:
+        snapshot.delta === null
+          ? null
+          : {
+              comparable: snapshot.delta.comparable,
+              certain: snapshot.delta.certain,
+              needsRefresh: snapshot.delta.needsRefresh,
+              counts: {
+                modified: snapshot.delta.counts.modified,
+                added: snapshot.delta.counts.added,
+                deleted: snapshot.delta.counts.deleted,
+                excluded: snapshot.delta.counts.excluded,
+              },
+            },
+      version: snapshot.version,
+    };
+  };
 
   /**
    * The shell executor, resolved per call rather than at boot.
@@ -746,8 +868,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
       // stale "no callers" as if it were a fact. Failures above are left alone — they
       // already say what went wrong, and two competing sentences read as noise.
       const notice = await freshnessFor(repo);
+      // The risk line is read from the tracker's snapshot, never computed here: an answer
+      // built from an index snapshot may say the snapshot is stale, but it must not wait on a
+      // child process to say it. `null` means either nothing to say or no tracker yet.
+      const risk = riskLineFor(repo);
+      const prefix = [notice, risk].filter((line): line is string => line !== null && line !== '').join('\n');
       return {
-        text: notice === null ? rendered.text : `${notice}\n\n${rendered.text}`,
+        text: prefix === '' ? rendered.text : `${prefix}\n\n${rendered.text}`,
         ok: true,
         result: rendered.result,
       };
@@ -975,6 +1102,89 @@ export function apply(ctx: Context, config: PluginConfig): void {
         }),
       }),
     );
+
+    /**
+     * The dependency-risk alarm, as a tool.
+     *
+     * It answers the question the other five cannot: the change set is already in the working
+     * tree, and the question is what it did to the call graph. The answer is deliberately
+     * weaker than a build — see `gitnexus/risk.ts` — but it is the only one available before
+     * the compiler runs, and it is the one that can say a deleted file still has callers.
+     */
+    ctx.tools.register(
+      defineTool<RiskToolArgs, RiskToolResult>({
+        name: 'gitnexus_risk',
+        description:
+          'What the current changes did to the dependency graph: symbols that live in modified or ' +
+          'deleted files and still have callers elsewhere in the index. Deleted files with live ' +
+          'callers are reported as 确定断裂 (broken references); modified files as 暴露 (exposed). ' +
+          'This is a structural answer from the last GitNexus analysis, NOT a compile verdict — do ' +
+          'not read it as “the build fails” or “the build passes”. `evaluated: false` means the ' +
+          'index could not be queried, which is not the same as no risk. Read-only; no analyzer run.',
+        parameters: {
+          repo: {
+            type: 'string',
+            required: true,
+            description: 'Absolute path to the repository root (the directory containing .gitnexus).',
+          },
+          refresh: {
+            type: 'boolean',
+            description:
+              'Re-run the graph query even when the change set is unchanged. Defaults to false: ' +
+              'the resident tracker already re-evaluates when files, the commit or the index move.',
+          },
+          limit: {
+            type: 'integer',
+            description: 'Maximum symbols listed per bucket. Defaults to 10, capped at 50.',
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              text: { type: 'string', required: true },
+              evaluated: { type: 'boolean', required: true },
+              verdict: { type: 'string', required: true },
+              reason: { type: 'string' },
+              broken: { type: 'integer', required: true },
+              exposed: { type: 'integer', required: true },
+              blind: { type: 'integer', required: true },
+              crossCommunity: { type: 'integer', required: true },
+              truncated: { type: 'boolean', required: true },
+            },
+          },
+          render: (_args, value) => [{ type: 'text', text: value.text }],
+        },
+        // The tracker serializes evaluations per repository and the helper owns a 20 s
+        // deadline; the host-side budget only backstops a helper that never settles.
+        isConcurrencySafe: () => true,
+        timeoutMs: config.graphToolTimeoutMs + 25_000,
+        async execute(args) {
+          const tracker = trackerFor(args.repo);
+          tracker.ensureStarted();
+          if (args.refresh === true) await tracker.refreshRisk();
+          else await tracker.settle();
+          const report: RiskReport = tracker.snapshot().risk ?? unknownRisk('尚未评估。', null);
+          return {
+            text: formatRisk(report),
+            evaluated: report.evaluated,
+            verdict: report.verdict,
+            reason: report.reason,
+            broken: report.counts.broken,
+            exposed: report.counts.exposed,
+            blind: report.counts.blind,
+            crossCommunity: report.counts.crossCommunity,
+            truncated: report.truncated || report.filesTruncated,
+          };
+        },
+        presentCall: (args) => ({
+          card: 'generic',
+          title: `GitNexus risk · ${String(args.repo).split(/[\\/]/).pop()}`,
+          kind: 'read',
+        }),
+      }),
+    );
   }
 
   if (config.serveRoutes) {
@@ -1052,6 +1262,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
         }),
         mountDeltaRoute(svcCtx.webServer, {
           read: (repoPath) => readDelta(repoPath),
+        }),
+        // The tracker's own snapshot, so the panel can show the alarm without going through
+        // a graph tool. Read-only: the route reports `busy` rather than starting a query the
+        // caller then waits on.
+        mountRiskRoute(svcCtx.webServer, {
+          read: (repoPath) => riskPayloadFor(repoPath),
         }),
         mountAnalyzeRoute(svcCtx.webServer, {
           start: (repoPath, options) => analyze.start(repoPath, options),

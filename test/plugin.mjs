@@ -156,13 +156,15 @@ section('apply() registers the tools');
 const stub = makeStubContext();
 plugin.apply(stub.ctx, defaults);
 
-// Five tools: coverage (walks the working tree), delta (hashes only what git says
-// differs), and the three graph tools over one out-of-process helper — impact,
-// context, query. The first two describe the index; the last three answer about the
-// code, which is what a coding session actually acts on.
-check('exactly five tools registered', stub.registered.length === 5, `got ${stub.registered.length}`);
+// Six tools: coverage (walks the working tree), delta (hashes only what git says
+// differs), the three graph tools over one out-of-process helper — impact, context,
+// query — and risk, which reads the resident tracker's verdict about the current
+// change set. The first two describe the index; the graph tools answer about symbols;
+// risk is the only one that answers about the edit in progress.
+check('exactly six tools registered', stub.registered.length === 6, `got ${stub.registered.length}`);
 const tool = stub.registered.find((entry) => entry.name === 'gitnexus_coverage');
 const deltaTool = stub.registered.find((entry) => entry.name === 'gitnexus_delta');
+const riskTool = stub.registered.find((entry) => entry.name === 'gitnexus_risk');
 check('tool name is gitnexus_coverage', tool !== undefined, JSON.stringify(stub.registered.map((t) => t.name)));
 check(
   'delta tool is registered',
@@ -228,6 +230,37 @@ check(
   queryTool?.parameters?.required?.includes('repo') === true &&
     queryTool?.parameters?.required?.includes('search_query') === true,
   JSON.stringify(queryTool?.parameters?.required),
+);
+
+section('the risk tool');
+check(
+  'risk tool is registered',
+  riskTool !== undefined,
+  JSON.stringify(stub.registered.map((t) => t.name)),
+);
+check(
+  'risk requires only repo',
+  riskTool?.parameters?.required?.includes('repo') === true &&
+    Object.keys(riskTool?.parameters?.properties ?? {}).join(',') === 'repo,refresh,limit',
+  JSON.stringify(riskTool?.parameters),
+);
+check(
+  'risk reports the verdict and its counts',
+  // `evaluated` is separate from `verdict` for the same reason `certain` is separate from
+  // `needsRefresh` in delta: "we could not ask" and "the answer is no" are different facts.
+  riskTool?.output?.schema?.properties?.evaluated !== undefined &&
+    riskTool?.output?.schema?.properties?.verdict !== undefined &&
+    riskTool?.output?.schema?.properties?.broken !== undefined &&
+    riskTool?.output?.schema?.properties?.exposed !== undefined,
+  JSON.stringify(riskTool?.output?.schema)?.slice(0, 240),
+);
+check(
+  'risk reads the tracker only, never a caller-supplied target',
+  // There is deliberately no `target`/`symbol`/`file` parameter: the question is about the
+  // change set, and letting a caller name a symbol would turn this into a second `impact`.
+  riskTool?.parameters?.properties?.target === undefined &&
+    riskTool?.parameters?.properties?.symbol === undefined,
+  JSON.stringify(riskTool?.parameters?.properties),
 );
 
 // `kind` and `include_content` describe *how* to answer, not *what* is being asked. A call
@@ -409,7 +442,7 @@ check('webServer was injected', stub.injected.includes('webServer'), JSON.string
 // history/patch/delta/graph are unprivileged, refreshing writes inside the workspace,
 // installing runs the dependency tree's build scripts, the branch switch writes to the
 // project's working tree, and the web view owns a child process that outlives the request.
-check('exactly eleven routes mounted', stub.routes.length === 11, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
+check('exactly twelve routes mounted', stub.routes.length === 12, `got ${stub.routes.length} (${stub.routes.map((r) => r.path).join(', ')})`);
 check(
   'the branch switch is mounted',
   stub.routes.some((r) => r.path === '/api/gitnexus/checkout'),
@@ -680,7 +713,7 @@ section('serveRoutes=false suppresses the routes');
 const off = makeStubContext();
 plugin.apply(off.ctx, { ...defaults, serveRoutes: false });
 check('no routes when disabled', off.routes.length === 0, `got ${off.routes.length}`);
-check('tool still registered when disabled', off.registered.length === 5, `got ${off.registered.length}`);
+check('tool still registered when disabled', off.registered.length === 6, `got ${off.registered.length}`);
 
 section('tool execution against a real repository');
 const repo = 'D:\\project\\data-screen';
