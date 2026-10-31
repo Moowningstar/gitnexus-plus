@@ -300,6 +300,16 @@ export function renderSuite(ctx) {
     view.text.slice(0, 400),
   );
   check(
+    'the caveats render inside the git activity card',
+    // The caveats have no card of their own: "what this reading does not cover" is the
+    // statement the activity card already makes about its window, so folding them in
+    // keeps one card per question. Pinned by render order, because a stray reorder
+    // would silently put them back in a card of their own.
+    view.text.indexOf('需要注意 · 3') > view.text.indexOf('Git 活动 · 近') &&
+      view.text.indexOf('需要注意 · 3') < view.text.indexOf('维护命令'),
+    view.text.indexOf('需要注意 · 3') + ' vs ' + view.text.indexOf('Git 活动 · 近'),
+  );
+  check(
     'every section is expanded — nothing is hidden behind a click',
     // Three sections used to be folded away behind a disclosure row. Inside a card
     // the click bought nothing, so every section now renders its body unconditionally.
