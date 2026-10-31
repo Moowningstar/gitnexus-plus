@@ -37,14 +37,15 @@ export function RiskSection({
           ? 'warning'
           : 'done';
 
+  // A known verdict outranks a running refresh. `busy` is transient — an edit a few hundred
+  // milliseconds ago starts one — and letting it replace the sentence meant a card that had
+  // an answer spent its life saying 评估中… while the answer sat right below it.
   const headline =
     route === 'missing'
       ? '宿主未挂载追踪路由'
       : risk === null
         ? '读取中…'
-        : risk.busy
-          ? '评估中…'
-          : risk.line ?? '暂无改动';
+        : risk.line ?? (risk.busy ? '评估中…' : '暂无改动');
 
   return h(
     'div',

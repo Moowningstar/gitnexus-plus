@@ -135,6 +135,18 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   the call graph, not a compiler: the card says so, and an evaluation that did not happen
   says "无法评估" rather than "no risk".
 
+- **The same question, before the edit** — the card can only report after the bytes are
+  written, which is one step too late for the thing a developer actually decides: whether to
+  touch this file at all. So the same measurement also runs in front of `edit`/`write`. When
+  the file's symbols are referenced from many files, from another community, or from forty-odd
+  places in total, the host asks for a confirmation naming the counts and the heaviest symbols,
+  and a declined confirmation reaches the model as the reason. Alongside that, one line about
+  the current change set rides in the system prompt, so the model knows the blast radius before
+  it chooses what to edit rather than only when it calls a tool. Both channels are bounded — a
+  four-second query ceiling and a one-minute cache — because a gate that adds twenty seconds to
+  every edit gets switched off within a day and then protects nothing. It stands down on its
+  own where no approval service is mounted (an `ask` there would be a denial).
+
 - **Index staleness, said out loud** — when the gate's verdict is `behind`, the graph card
   carries one sentence above the drawing (which commit it is behind from, how many files
   changed, what to run), and `gitnexus_impact` / `gitnexus_context` / `gitnexus_query`
@@ -299,9 +311,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1400
-checks (974 engine, 86 plugin, 340 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1397). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1425
+checks (994 engine, 90 plugin, 341 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1422). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every
@@ -375,6 +387,14 @@ It is a sentence, not a flag, because `<prefix?>` in a text tool would be ignore
 rules keep it useful: a clean tree adds nothing, an unconfirmable verdict uses its own
 wording (`索引新鲜度无法确认…`) instead of borrowing "stale", and `gitnexus_delta` does not
 prefix itself — it already is that answer.
+
+**The gate in front of a write is a separate switch.** `precheck: false` turns off both halves
+of it — the confirmation before a wide `edit`/`write` and the change-set line in the system
+prompt — and leaves the panel, the risk line and `gitnexus_risk` alone. The thresholds are
+comparisons, not magic numbers: five or more caller files, two or more cross-community
+references, or more than forty references in total, any one of which is enough. They are
+deliberately loose. A gate that fires on a one-caller private helper teaches people to click
+through confirmations, and a confirmation habit is worse than no gate.
 
 `graphTools: false` withdraws the three tools entirely and keeps `gitnexus_coverage` and
 `gitnexus_delta`, which spawn nothing.

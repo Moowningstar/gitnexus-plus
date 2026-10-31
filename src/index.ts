@@ -1,8 +1,10 @@
 /**
  * dsh-gitnexus-plus — host half.
  *
- * Registers five read-only tools and ten loopback HTTP routes over the index in
- * `./gitnexus/`. The tools answer what a model would otherwise grep for — "what did
+ * Registers six read-only tools and twelve loopback HTTP routes over the index in
+ * `./gitnexus/`, plus two advisory hooks that never touch the index themselves: a
+ * confirmation before an `edit`/`write` that reaches far, and one line about the change set
+ * in the system prompt. The tools answer what a model would otherwise grep for — "what did
  * this index leave out?", "what breaks if I change this symbol?", "which flow
  * implements this concept?" — and the routes render the same answers for the
  * browser half, plus the handful of operations the panel performs itself.
@@ -47,7 +49,17 @@ import { checkoutBranch, readCommitDiff, readFileActivity } from './gitnexus/git
 import { describeDelta, readDelta } from './gitnexus/delta.js';
 import { describeStaleness } from './gitnexus/freshness.js';
 import { provideGitSeams } from './gitnexus/git-capture.js';
-import { formatRisk, unknownRisk, type RiskReport } from './gitnexus/risk.js';
+import { formatRisk, unknownRisk, evaluateRisk, type RiskReport } from './gitnexus/risk.js';
+import {
+  describeImpact,
+  editedFiles,
+  impactVerdict,
+  indexPathFor,
+  repoForFile,
+  summarizeImpact,
+  type ImpactSummary,
+} from './gitnexus/precheck.js';
+import { readIndexStamp } from './gitnexus/watch/stamps.js';
 import { RepoTracker, TrackerRegistry } from './gitnexus/watch/registry.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { runGraphTool, type GraphToolName } from './gitnexus/graph-query.js';
@@ -154,6 +166,16 @@ export interface PluginConfig {
    * stopped answering, not a budget the normal path spends.
    */
   graphToolTimeoutMs: number;
+  /**
+   * Whether the pre-change gate runs: a confirmation before an edit that reaches far,
+   * plus one line in the system prompt describing the change set.
+   *
+   * On by default, because this is the half of the feature that arrives *before* the
+   * bytes are written — the panel can only report afterwards. Off is for a deployment
+   * where an extra confirmation per edit is unwelcome, or where the approval service
+   * is not mounted (the gate stands down on its own there, so both are consistent).
+   */
+  precheck: boolean;
 }
 
 export const Config = Schema.object({
@@ -170,6 +192,7 @@ export const Config = Schema.object({
   gitnexusHome: Schema.string().default(''),
   graphTools: Schema.boolean().default(true),
   graphToolTimeoutMs: Schema.natural().default(20000),
+  precheck: Schema.boolean().default(true),
 });
 
 /**
@@ -460,12 +483,18 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const riskPayloadFor = (repoPath: string): RiskRoutePayload => {
     const tracker = trackerFor(repoPath);
     tracker.ensureStarted();
-    // Kick an evaluation if the tracker has none in flight, then answer from what is known:
-    // the panel polls, so a slow first pass shows as `busy` instead of a stalled request.
-    void tracker.settle().catch(() => undefined);
+    // Describe first, refresh after.
+    //
+    // The other order looks equivalent and is not: `settle()` sets `busy` before its first
+    // await, so a snapshot taken right after starting one always reports `busy: true`. The
+    // panel polls every four seconds and would then *never* observe a finished evaluation —
+    // that is exactly the "评估中… forever" state this used to get stuck in. Reading the
+    // settled state and asking for the next one afterwards keeps the poll honest: each
+    // request shows the last completed answer, and the work for the next one is already
+    // running when it returns.
     const snapshot = tracker.snapshot();
     const risk = snapshot.risk;
-    return {
+    const payload: RiskRoutePayload = {
       risk,
       text: risk === null ? null : formatRisk(risk),
       line: risk === null ? null : tracker.line(),
@@ -493,7 +522,161 @@ export function apply(ctx: Context, config: PluginConfig): void {
       lastChangeAt: snapshot.lastChangeAt,
       version: snapshot.version,
     };
+    void tracker.settle().catch(() => undefined);
+    return payload;
   };
+
+  /**
+   * The pre-change gate: how far does the file the agent is about to edit reach?
+   *
+   * WHY THIS EXISTS, AND WHY IT SITS HERE
+   * Everything else in this plugin describes the tree *after* the fact — the risk card, the
+   * graph tools, the line appended to their answers. That is the wrong moment for the one
+   * question a developer actually asks before an edit: "what does this file touch?". By the
+   * time the summary is on screen the bytes are written, and no human remembers which of two
+   * hundred files called `readIndexMeta`. So the same measurement runs *before* a write, where
+   * it can be put in front of both the operator and the model.
+   *
+   * TWO CHANNELS, ONE MEASUREMENT
+   * - a `tools/pre-execute` decision of `ask` when the file qualifies, which the operator sees
+   *   as a confirmation and the model sees as a denial reason if declined;
+   * - a dynamic system-prompt context line, so the model knows the change set before it decides
+   *   what to edit, not only when it feels like calling a tool.
+   *
+   * Both are deliberately bounded: a 4 s query ceiling and a one-minute cache, because a gate
+   * that adds twenty seconds to every edit would be turned off within a day, and then it would
+   * protect nothing.
+   */
+  const IMPACT_CACHE_MAX = 32;
+  const IMPACT_CACHE_TTL_MS = 60_000;
+  const IMPACT_QUERY_TIMEOUT_MS = 4_000;
+  const impactCache = new Map<string, { at: number; summary: ImpactSummary }>();
+  const impactInFlight = new Map<string, Promise<ImpactSummary | null>>();
+
+  /**
+   * What one file reaches, or `null` when it cannot be measured.
+   *
+   * Keyed by the index stamp as well as the path: a refreshed index changes the answer, and a
+   * stale cache would keep warning about callers that no longer exist.
+   */
+  const impactSummaryFor = async (repoPath: string, relPath: string): Promise<ImpactSummary | null> => {
+    const key = `${repoPath}\u0000${relPath}\u0000${readIndexStamp(repoPath)}`;
+    const cached = impactCache.get(key);
+    if (cached !== undefined && Date.now() - cached.at < IMPACT_CACHE_TTL_MS) return cached.summary;
+    const running = impactInFlight.get(key);
+    if (running !== undefined) return running;
+    const job = (async (): Promise<ImpactSummary | null> => {
+      try {
+        const report = await evaluateRisk({
+          repoPath,
+          files: [{ path: relPath, kind: 'modified' }],
+          runner: runnerFor(shellFor()),
+          helperPath: riskHelperPath,
+          managedPrefix: installPrefix,
+          sandboxPolicy: sandboxPolicyForRoot,
+          timeoutMs: IMPACT_QUERY_TIMEOUT_MS,
+        });
+        const summary = summarizeImpact(repoPath, path.join(repoPath, relPath), report);
+        if (impactCache.size >= IMPACT_CACHE_MAX) {
+          const oldest = impactCache.keys().next();
+          if (oldest.done !== true) impactCache.delete(oldest.value);
+        }
+        impactCache.set(key, { at: Date.now(), summary });
+        return summary;
+      } catch {
+        // A gate that cannot measure must not become a gate that blocks: silence keeps the
+        // edit on its normal path, and the panel/tool surfaces still report the gap.
+        return null;
+      } finally {
+        impactInFlight.delete(key);
+      }
+    })();
+    impactInFlight.set(key, job);
+    return job;
+  };
+
+  /**
+   * The sentence the system prompt carries about the change set.
+   *
+   * Written as one line and `''` when there is nothing to say, following the same doctrine as
+   * the freshness line: a prompt that repeats "no changes" on every turn trains the model to
+   * ignore it.
+   */
+  const changeScopeContext = (): string => {
+    try {
+      for (const tracker of trackerRegistry.list()) {
+        const snapshot = tracker.snapshot();
+        const delta = snapshot.delta;
+        if (delta === null || delta.comparable !== true) continue;
+        const counts = delta.counts;
+        if (counts.modified + counts.added + counts.deleted === 0) continue;
+        const risk = snapshot.risk;
+        const tail =
+          risk !== null && risk.evaluated
+            ? `；结构上 ${risk.counts.broken} 处确定断裂、${risk.counts.exposed} 处暴露（不是编译结论）`
+            : '；依赖影响还没有评估';
+        return (
+          `改动集：${counts.modified} 改、${counts.added} 增、${counts.deleted} 删${tail}。` +
+          '改被多处引用的文件之前，先用 gitnexus_risk 看辐射范围。'
+        );
+      }
+    } catch {
+      // Assembling a prompt must not fail because a tracker is mid-teardown.
+    }
+    return '';
+  };
+
+  if (config.precheck) {
+    // `on` is core cordis, but this plugin is also loaded by harnesses that stub a partial
+    // context (the plugin suite is one). Registering nothing there is correct: a gate with no
+    // event bus to sit on does not exist, and refusing to load would be worse.
+    if (typeof ctx.on === 'function') {
+      ctx.on('tools/pre-execute', async (rawExec: unknown, rawNext: unknown) => {
+        const exec = rawExec as { name?: unknown; arguments?: unknown };
+        const next = rawNext as () => Promise<{ kind: string }>;
+        const decision = await next();
+        // Only a call that would otherwise proceed is worth interrupting; a deny or a cancel
+        // already carries a reason, and asking on top of it would be noise.
+        if (decision.kind !== 'allow') return decision;
+        const files = editedFiles(typeof exec.name === 'string' ? exec.name : '', exec.arguments);
+        if (files.length === 0) return decision;
+        const file = files[0]!;
+        const repoPath = repoForFile(file);
+        if (repoPath === null) return decision;
+        // `ask` without an approval service is a denial, not a question. A headless deployment
+        // must keep editing files, so the gate simply stands down there.
+        if (ctx.get('approval') === undefined) return decision;
+        const summary = await impactSummaryFor(repoPath, indexPathFor(repoPath, file));
+        if (summary === null) return decision;
+        const verdict = impactVerdict(summary);
+        if (!verdict.large) return decision;
+        return {
+          kind: 'ask',
+          reason: describeImpact(summary, verdict.reason),
+          displayReason: {
+            en: `This edit changes ${summary.path}: ${summary.incoming} references from ${summary.callers} files. Continue?`,
+            zh: `这次编辑会改动 ${summary.path}：有 ${summary.incoming} 处引用来自 ${summary.callers} 个文件。继续吗？`,
+          },
+        };
+      });
+    }
+
+    const promptService = ctx.get('systemPrompt') as
+      | { context?: (context: { name: string; order: number; text: () => string }) => () => void }
+      | undefined;
+    const registerContext = promptService?.context;
+    if (promptService !== undefined && typeof registerContext === 'function') {
+      ctx.effect(
+        () =>
+          registerContext.call(promptService, {
+            name: 'gitnexus-plus:change-scope',
+            order: 950,
+            text: changeScopeContext,
+          }),
+        'gitnexus-plus: change scope prompt',
+      );
+    }
+  }
 
   /**
    * The shell executor, resolved per call rather than at boot.

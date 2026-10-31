@@ -26,6 +26,7 @@ import { coverageGateTests } from './suites/coverage-gate.mjs';
 import { storageStateTests } from './suites/storage-state.mjs';
 import { signalsTests } from './suites/signals.mjs';
 import { riskFormatTests } from './suites/risk-format.mjs';
+import { precheckTests } from './suites/precheck.mjs';
 import { riskQueryTests } from './suites/risk-query.mjs';
 import { watchTests } from './suites/watch.mjs';
 import { managedPathTests, anchorTests } from './suites/anchor.mjs';
@@ -82,6 +83,7 @@ export async function main() {
   await storageStateTests();
 await signalsTests();
 await riskFormatTests();
+ await precheckTests();
 await riskQueryTests();
 await watchTests();
   await managedPathTests();

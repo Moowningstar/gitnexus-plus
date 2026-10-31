@@ -51,6 +51,7 @@ function makeStubContext(options = {}) {
   const effects = [];
   const injected = [];
   const requested = [];
+  const listeners = {};
 
   const webServer = {
     register(route) {
@@ -75,6 +76,21 @@ function makeStubContext(options = {}) {
         disposers.push(dispose);
         return dispose;
       },
+    },
+    /**
+     * Stands in for cordis' event registry so the pre-change gate can be observed.
+     *
+     * The gate is registered on `tools/pre-execute` and answers with a decision; without a
+     * recorder here a plugin that silently failed to hook in would still pass every check
+     * about its tools, which is exactly the failure mode worth catching.
+     */
+    on(name, listener) {
+      listeners[name] = listener;
+      const dispose = () => {
+        delete listeners[name];
+      };
+      disposers.push(dispose);
+      return dispose;
     },
     inject(names, callback) {
       injected.push(...names);
@@ -101,7 +117,7 @@ function makeStubContext(options = {}) {
     },
   };
 
-  return { ctx, registered, routes, disposers, effects, injected, requested };
+  return { ctx, registered, routes, disposers, effects, injected, requested, listeners };
 }
 
 console.log('\u001b[1mgitnexus-plus · plugin contract tests\u001b[0m');
@@ -714,6 +730,38 @@ const off = makeStubContext();
 plugin.apply(off.ctx, { ...defaults, serveRoutes: false });
 check('no routes when disabled', off.routes.length === 0, `got ${off.routes.length}`);
 check('tool still registered when disabled', off.registered.length === 6, `got ${off.registered.length}`);
+
+section('the pre-change gate hooks the edit pipeline');
+
+// The gate is the half of the feature that arrives *before* the bytes are written, and a
+// plugin that silently failed to register it would look identical from every other angle:
+// same tools, same routes, same panel. So the listener itself is the thing to assert.
+const gateStub = makeStubContext({ services: { systemPrompt: { context: () => () => {} } } });
+plugin.apply(gateStub.ctx, { ...defaults, precheck: true });
+check(
+  'a pre-execute listener is registered by default',
+  typeof gateStub.listeners['tools/pre-execute'] === 'function',
+  Object.keys(gateStub.listeners).join(','),
+);
+check(
+  'the change-set line is offered to the system prompt',
+  Object.keys(gateStub.listeners).length > 0 &&
+    gateStub.effects.some((label) => label.includes('change scope')),
+  gateStub.effects.join(','),
+);
+
+const gateOff = makeStubContext({ services: { systemPrompt: { context: () => () => {} } } });
+plugin.apply(gateOff.ctx, { ...defaults, precheck: false });
+check(
+  'precheck: false leaves the pipeline untouched',
+  gateOff.listeners['tools/pre-execute'] === undefined,
+  Object.keys(gateOff.listeners).join(','),
+);
+check(
+  'precheck: false still registers every tool',
+  gateOff.registered.length === 6,
+  `got ${gateOff.registered.length}`,
+);
 
 section('tool execution against a real repository');
 const repo = 'D:\\project\\data-screen';

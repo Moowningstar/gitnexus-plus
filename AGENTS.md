@@ -52,3 +52,21 @@ This package **consumes** GitNexus; it is not a fork. Two versions are in play a
 - **The bridge is `peerDependencies.gitnexus`** = `^1.6.12 || >=1.6.13-rc.0 <2.0.0`. npm hides prereleases from a plain range, so the second arm says *a candidate checkout is accepted*, not *we ship a candidate*.
 - **Storage versions are one-way.** 1.6.12 pins lbug storage 42, 1.6.13 pins 47. The newer reader opens the older store; the older reader refuses a 47 store (`Trying to read a database file with a different version`). This checkout's `.gitnexus` is a **47** store, so pointing it back at 1.6.12 needs `gitnexus analyze --force` (about 90 s) first.
 - **Cross-engine rule.** A change that touches an upstream artifact — walker constants, `LocalBackend`, `stdio-context`, `GITNEXUS_WEB_DIST` resolution — is verified on both engines before it is called done. The measured contract matrix lives in `.docs/audit-v1.6.13-rc.159.md` §7 (local, gitignored).
+
+## The pre-change gate (this repo's own surface, not upstream's)
+
+`src/index.ts` also hooks the harness: `tools/pre-execute` asks for confirmation before an
+`edit`/`write` whose file has live callers, and a `systemPrompt.context` line carries the change
+set. Three rules a future change must keep, because each one is a way this becomes harmful:
+
+- **Degrade to `allow`, never to a block.** No approval service (`ctx.get('approval')`), no
+  `ctx.on`, no measurement, an exception, a query over its 4 s ceiling — every one of those
+  returns the unmodified decision. A gate that cannot measure must not become a gate that
+  stops work.
+- **`precheck: false` removes both halves.** The config flag is the escape hatch; if it ever
+  stops disabling the prompt line as well, an operator who turned the gate off still gets it.
+- **The words are the contract.** No `编译失败` / `构建破坏` / `测试会挂` anywhere near this
+  feature: the answer is structural, and `test/suites/risk-format.mjs` asserts the absence.
+  `test/suites/precheck.mjs` covers the numbers, and `test/plugin.mjs` asserts the listener is
+  actually registered — a silently unhooked gate looks identical to a working one from every
+  other angle.
