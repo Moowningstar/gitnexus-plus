@@ -30,6 +30,16 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   "up to date" when it is anchored to the commit the index recorded; an index that
   recorded none falls back to comparing the working tree with `HEAD` and says it cannot
   confirm instead of claiming freshness.
+- **Storage state, not just "indexed or not"** — GitNexus 1.6.13 inspects `.gitnexus` before
+  writing and distinguishes six states, not two, so "no index" was the wrong answer for the
+  four that are neither `owned` nor absent. The panel now names the state it found: `unowned` (data with no ownership manifest),
+  `foreign` (the manifest names another repository or storage directory — a moved checkout,
+  or a directory copied together with its `.gitnexus`), `invalid_storage` (a manifest exists
+  but does not parse) and `unknown` (the bytes could not be read — this plugin's own state,
+  so an unreadable store is not called malformed). Only `owned` counts as a usable index;
+  the blocked screen says which state it is and offers **全量重建**, withholding 初始化索引
+  because upstream rejects that write in all four. The text output follows the same rule:
+  `GitNexus index: BLOCKED (<state>)` instead of `NOT FOUND`.
 - **Graph view** — the index's communities drawn on a canvas, with aggregated
   cross-community edges; click a community to see its member symbols and the relations
   among them, click a symbol to open its file at the line. Node and edge budgets are
@@ -131,7 +141,9 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   line of the verdict, and `gitnexus_risk` answers directly. The card also names the files:
   what the watcher just saw written (a save counts even when no byte changed, which is what
   makes it usable mid-edit) and what the change set says differs from the index, with
-  `+`/`~`/`-` marks. It is a structural reading of
+  `+`/`~`/`-` marks. When there is no live change set yet it shows the scan's own drift
+  numbers under **索引与工作树** instead — scan and hash are two counting methods, so the
+  card never puts both on screen at once. It is a structural reading of
   the call graph, not a compiler: the card says so, and an evaluation that did not happen
   says "无法评估" rather than "no risk".
 
@@ -153,7 +165,10 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   repeat the same sentence at the top of their answers. A tree that matches says nothing at
   all, and a verdict that cannot be confirmed gets its own wording instead of borrowing
   "stale" — a refresh prompt for an index that is merely unanchored would train people to
-  ignore both.
+  ignore both. The caveats the panel has about its own reach (size caps, skipped files, a
+  version mismatch, a truncated activity window) are not a card of their own either: they
+  render at the bottom of the activity card, because that card already exists to say what
+  the reading in front of you does and does not cover.
 
 - **CI gates** — `gitnexus-coverage` can fail a pipeline instead of waiting for someone to
   read the panel: `--fail-on-uncovered` (the analyzer would index files the index does not
