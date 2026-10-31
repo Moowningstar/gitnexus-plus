@@ -735,6 +735,71 @@ export function CoverageView({
   const contextCaveats = contextWarnings.filter((warning) => !DRIFT_CODES.has(warning.code));
   const ratio = coverageRatio(report);
 
+  // The remaining caveats are "what this reading does not cover" — the same kind of statement
+  // the git-activity card makes about its window, so they render inside that card instead of
+  // owning a card of their own for two or three lines.
+  const caveatRows =
+    caveats.length + contextCaveats.length === 0
+      ? null
+      : [
+          caveats.map((warning, index) =>
+            h(
+              'div',
+              {
+                key: `${warning.code}-${index}`,
+                style: {
+                  display: 'flex',
+                  gap: '7px',
+                  alignItems: 'flex-start',
+                  padding: '6px 8px',
+                  border: '1px solid color-mix(in srgb, #d9a441 45%, transparent)',
+                  background: 'color-mix(in srgb, #d9a441 9%, transparent)',
+                  borderRadius: '6px',
+                },
+              },
+              h(StateDot, { state: 'warning' }),
+              h('span', { style: { minWidth: 0 } }, warning.message),
+            ),
+          ),
+          // The milder ones stay quiet rows: giving every item an amber box would
+          // make a stale-index count look as urgent as a truncated activity window.
+          contextCaveats.length === 0
+            ? null
+            : h(
+                'div',
+                {
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    ...MUTED,
+                    ...(caveats.length > 0 ? { borderTop: HAIRLINE, paddingTop: '8px' } : {}),
+                  },
+                },
+                contextCaveats.map((warning, index) =>
+                  h('div', { key: `${warning.code}-${index}` }, `· ${warning.message}`),
+                ),
+              ),
+        ];
+  const caveatBlock =
+    caveatRows === null
+      ? null
+      : h(
+          'div',
+          {
+            style: {
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+              marginTop: '10px',
+              paddingTop: '8px',
+              borderTop: HAIRLINE,
+            },
+          },
+          h('div', { style: { ...MUTED, fontSize: '11px' } }, `需要注意 · ${caveats.length + contextCaveats.length}`),
+          caveatRows,
+        );
+
   // Multi-project workspaces get one aggregate card before the project-scoped ones.
   // It is null for a single project, so the common case is unchanged.
   const workspaceSection = h(WorkspaceOverview, {
@@ -1122,66 +1187,6 @@ export function CoverageView({
         )
       : null,
 
-    // Caveats, in one card, sharing a row with the provenance card.
-    //
-    // `notable` and `contextWarnings` were two cards — one amber, one an untitled
-    // list of `·` lines. They are the same thing at two volumes: both say "this
-    // index does not line up with the working tree". Splitting them made the reader
-    // check two boxes to answer one question, and the untitled one had no heading
-    // to say what it was. The drift pair that used to live here now travels to the
-    // risk card; what remains is what the scan found about its own reach — caps,
-    // skipped files, version mismatch, activity window.
-    caveats.length > 0 || contextCaveats.length > 0
-      ? h(
-          Section,
-          {
-            // Full width: a list of warnings would otherwise pair with whatever card
-            // happened to follow and leave a hole in the other column.
-            wide: true,
-            title: `需要注意 · ${caveats.length + contextCaveats.length}`,
-            scroll: 300,
-          },
-          caveats.map((warning, index) =>
-            h(
-              'div',
-              {
-                key: `${warning.code}-${index}`,
-                style: {
-                  display: 'flex',
-                  gap: '7px',
-                  alignItems: 'flex-start',
-                  padding: '6px 8px',
-                  border: '1px solid color-mix(in srgb, #d9a441 45%, transparent)',
-                  background: 'color-mix(in srgb, #d9a441 9%, transparent)',
-                  borderRadius: '6px',
-                },
-              },
-              h(StateDot, { state: 'warning' }),
-              h('span', { style: { minWidth: 0 } }, warning.message),
-            ),
-          ),
-          // The milder ones stay quiet rows: giving every item an amber box would
-          // make a stale-index count look as urgent as a truncated activity window.
-          contextCaveats.length === 0
-            ? null
-            : h(
-                'div',
-                {
-                  style: {
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '4px',
-                    ...MUTED,
-                    ...(caveats.length > 0 ? { borderTop: HAIRLINE, paddingTop: '8px' } : {}),
-                  },
-                },
-                contextCaveats.map((warning, index) =>
-                  h('div', { key: `${warning.code}-${index}` }, `· ${warning.message}`),
-                ),
-              ),
-        )
-      : null,
-
     // Wide: file paths must keep their tails.
     largeFiles.length > 0
       ? h(
@@ -1203,16 +1208,24 @@ export function CoverageView({
     report.activity === undefined || report.activity === null
       ? // The card is dropped when there is no activity, but "no activity" has three
         // causes and the reader deserves the one that is true here. Same sentence as the
-        // staleness line, deliberately — one fact, one wording.
+        // staleness line, deliberately — one fact, one wording. The caveats still render:
+        // when there is no card to fold them into, they get one of their own.
         report.staleness !== undefined && report.staleness.gitAvailable === false
         ? h(
-            'div',
-            { style: { ...MUTED, fontSize: '11px' } },
-            typeof report.staleness.reason === 'string' && report.staleness.reason !== ''
-              ? `Git 活动不可用：${report.staleness.reason}`
-              : 'Git 活动不可用：读不到 git',
+            Section,
+            { wide: true, title: 'Git 活动', scroll: caveatBlock === null ? false : 300 },
+            h(
+              'div',
+              { style: { ...MUTED, fontSize: '11px' } },
+              typeof report.staleness.reason === 'string' && report.staleness.reason !== ''
+                ? `Git 活动不可用：${report.staleness.reason}`
+                : 'Git 活动不可用：读不到 git',
+            ),
+            caveatBlock,
           )
-        : null
+        : caveatBlock === null
+          ? null
+          : h(Section, { wide: true, title: '需要注意', scroll: 300 }, caveatRows)
       : h(
           Section,
           {
@@ -1263,6 +1276,7 @@ export function CoverageView({
             days: activeDays,
             onDaysChange: chooseActivityDays,
           }),
+          caveatBlock,
         ),
 
     // Wide, and always open: the commands are the action this panel offers.

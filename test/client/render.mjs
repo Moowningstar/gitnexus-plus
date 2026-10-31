@@ -276,11 +276,11 @@ export function renderSuite(ctx) {
   // full-width cards stretches every row across a metre of empty space.
   check(
     'every section renders as a card element',
-    // Exactly the nine cards: 关键词搜索, 索引概览, 语言分布, 需要注意 (as applicable),
-    // 解析质量与溯源, 被跳过的超大文件, Git 活动, 维护命令, 3D 视图. Pinned rather than a
-    // floor, because the failure this guards against is a section quietly losing its
-    // card wrapper — which shows up as a lower count, not a higher one.
-    view.tags.filter((t) => t === 'section').length === 9,
+    // Exactly the eight cards: 关键词搜索, 索引概览, 语言分布, 解析质量与溯源, 依赖风险,
+    // 被跳过的超大文件, Git 活动, 维护命令 (3D 视图 only in three.js mode). The caveats
+    // have no card of their own — they render inside the Git activity card, because
+    // "what this reading does not cover" is the same statement that card already makes.
+    view.tags.filter((t) => t === 'section').length === 8,
     'sections=' + view.tags.filter((t) => t === 'section').length,
   );
   check(
