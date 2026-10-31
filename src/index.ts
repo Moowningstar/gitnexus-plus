@@ -486,7 +486,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
                 deleted: snapshot.delta.counts.deleted,
                 excluded: snapshot.delta.counts.excluded,
               },
+              // The head of the change set, for naming files; the counts stay the whole truth.
+              files: snapshot.delta.entries.slice(0, 8).map((entry) => ({ path: entry.path, kind: entry.kind })),
             },
+      recent: snapshot.recent,
+      lastChangeAt: snapshot.lastChangeAt,
       version: snapshot.version,
     };
   };

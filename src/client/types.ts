@@ -500,7 +500,12 @@ export interface ClientRisk {
     certain: boolean;
     needsRefresh: boolean;
     counts: { modified: number; added: number; deleted: number; excluded: number };
+    /** The head of the change set, so the card can name files instead of only counting them. */
+    files?: Array<{ path: string; kind: 'modified' | 'added' | 'deleted' | 'excluded' }>;
   } | null;
+  /** Paths the watcher saw change, newest first; the live half of "what is being edited". */
+  recent?: Array<{ path: string; at: string }>;
+  lastChangeAt?: string | null;
   version: number;
 }
 

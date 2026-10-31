@@ -103,6 +103,8 @@ export function RiskSection({
 
     report === null ? null : riskBody(report),
 
+    risk === null ? null : filesBlock(risk),
+
     report !== null && report.truncated
       ? h('div', { style: MUTED }, '列表已截断：这里只列出引用最多的部分，计数是完整的。')
       : null,
@@ -112,6 +114,82 @@ export function RiskSection({
       { style: { ...MUTED, fontSize: '11px' } },
       '结构判断：来自上次 GitNexus 分析的调用关系，不是编译结论，也不代表测试通过或失败。',
     ),
+  );
+}
+
+/** How long ago an ISO time was, in the few words a badge can hold. */
+function ageText(at: string): string {
+  const ms = Date.now() - Date.parse(at);
+  if (!Number.isFinite(ms) || ms < 1_000) return '刚刚';
+  if (ms < 60_000) return `${Math.round(ms / 1_000)} 秒前`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} 分钟前`;
+  return `${Math.round(ms / 3_600_000)} 小时前`;
+}
+
+const MONO = { fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', fontSize: '12px' } as const;
+
+/** One path, with the change kind when it has one and the time when it is a live event. */
+function FileRow({ path, kind, at }: { path: string; kind?: string; at?: string }) {
+  const mark = kind === 'added' ? '+' : kind === 'deleted' ? '-' : kind === 'excluded' ? '·' : '~';
+  return h(
+    'div',
+    { style: { display: 'flex', gap: '8px', alignItems: 'baseline', minWidth: 0 } },
+    kind === undefined ? null : h('span', { style: { ...MUTED, ...MONO, width: '10px', flex: 'none' } }, mark),
+    h('span', { style: { ...MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, path),
+    at === undefined ? null : h('span', { style: { ...MUTED, fontSize: '11px', marginLeft: 'auto', flex: 'none' } }, ageText(at)),
+  );
+}
+
+/**
+ * The two lists that answer "which files is the edit touching".
+ *
+ * They are different questions and stay separate. `recent` is event-level: a file appears the
+ * moment it is written, before any hash is compared, so a save that changes nothing still
+ * shows up — that is what makes it usable while an agent is mid-edit. `delta.files` is the
+ * exact difference from the index, which is why it carries +/~/- marks and is only as fresh as
+ * the last evaluation.
+ */
+function filesBlock(risk: ClientRisk): React.ReactElement | null {
+  const recent = risk.recent ?? [];
+  const changed = risk.delta?.files ?? [];
+  const counts = risk.delta?.counts ?? null;
+  if (recent.length === 0 && changed.length === 0) return null;
+  const total = counts === null ? 0 : counts.modified + counts.added + counts.deleted + counts.excluded;
+  return h(
+    'div',
+    { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+
+    recent.length === 0
+      ? null
+      : h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '3px' } },
+          h(
+            'div',
+            { style: { ...MUTED, fontSize: '11px' } },
+            `最近被写入 · ${recent.length} 个文件${risk.lastChangeAt === null || risk.lastChangeAt === undefined ? '' : `（最近一次 ${ageText(risk.lastChangeAt)}）`}`,
+          ),
+          recent.slice(0, 6).map((entry) => h(FileRow, { key: `recent-${entry.path}`, path: entry.path, at: entry.at })),
+          recent.length > 6 ? h('div', { style: { ...MUTED, fontSize: '11px' } }, `另有 ${recent.length - 6} 个文件。`) : null,
+        ),
+
+    changed.length === 0
+      ? null
+      : h(
+          'div',
+          { style: { display: 'flex', flexDirection: 'column', gap: '3px' } },
+          h(
+            'div',
+            { style: { ...MUTED, fontSize: '11px' } },
+            counts === null
+              ? '相对索引的改动'
+              : `相对索引的改动（+${counts.added} ~${counts.modified} -${counts.deleted}${counts.excluded > 0 ? ` ·${counts.excluded} 被排除` : ''}）`,
+          ),
+          changed.slice(0, 8).map((entry) => h(FileRow, { key: `changed-${entry.path}`, path: entry.path, kind: entry.kind })),
+          total > changed.length
+            ? h('div', { style: { ...MUTED, fontSize: '11px' } }, `另有 ${total - changed.length} 个文件未列出。`)
+            : null,
+        ),
   );
 }
 

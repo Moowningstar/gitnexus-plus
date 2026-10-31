@@ -16,6 +16,7 @@ import { isExistingDirectory, isFilesystemRoot } from '../gitnexus/index-meta.js
 import { guardHandler, passGuard, answerHead, sendJson } from './guard.js';
 import type { WebServerService } from '@deepseek-ai/cordis';
 import type { RiskReport } from '../gitnexus/risk.js';
+import type { TrackerRecentChange } from '../gitnexus/watch/registry.js';
 
 const RISK_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
@@ -34,7 +35,23 @@ export interface RiskRoutePayload {
     certain: boolean;
     needsRefresh: boolean;
     counts: { modified: number; added: number; deleted: number; excluded: number };
+    /**
+     * Files that differ from the index, capped for the wire.
+     *
+     * The counts above are the whole truth; this is the readable head of the same list, so
+     * the panel can name files without shipping four thousand paths on every poll.
+     */
+    files: Array<{ path: string; kind: 'modified' | 'added' | 'deleted' | 'excluded' }>;
   } | null;
+  /**
+   * Paths the watcher saw change, newest first — "what is being written right now".
+   *
+   * Distinct from `delta.files`: this is event-level, so it includes a file that was saved
+   * without changing a byte, and it updates before any evaluation runs.
+   */
+  recent: TrackerRecentChange[];
+  /** ISO time of the last coalesced change. */
+  lastChangeAt: string | null;
   /** Bumped whenever the tracker observes a change; the panel skips identical values. */
   version: number;
 }

@@ -1058,6 +1058,70 @@ export function renderSuite(ctx) {
   );
 
   // ---------------------------------------------------------------------------
+  // The two file lists: "what is being written right now" (watcher events) and "what differs
+  // from the index" (the change set). They answer different questions and are asserted apart.
+
+  const withFiles = render(
+    I.CoverageView,
+    riskProps({
+      risk: {
+        evaluated: true,
+        verdict: 'exposed',
+        reason: null,
+        counts: { broken: 0, exposed: 1, blind: 0, crossCommunity: 0 },
+        broken: [],
+        exposed: [hit('touched', 'src/gitnexus/coverage.ts', 'caller')],
+        blind: [],
+        truncated: false,
+        notes: [],
+      },
+      text: '依赖风险：0 处确定断裂、1 处暴露（改动后结构上的引用，不是编译结论）。',
+      line: '依赖风险：0 处确定断裂、1 处暴露（改动后结构上的引用，不是编译结论）。',
+      watching: true,
+      live: true,
+      degraded: null,
+      busy: false,
+      delta: {
+        comparable: true,
+        certain: true,
+        needsRefresh: false,
+        counts: { modified: 1, added: 1, deleted: 1, excluded: 0 },
+        files: [
+          { path: 'src/gitnexus/index-meta.ts', kind: 'modified' },
+          { path: 'src/gitnexus/risk-query.ts', kind: 'added' },
+          { path: 'src/gitnexus/old.ts', kind: 'deleted' },
+        ],
+      },
+      recent: [
+        { path: 'src/gitnexus/coverage.ts', at: new Date().toISOString() },
+        { path: 'src/client/sections/risk-card.ts', at: new Date(Date.now() - 120_000).toISOString() },
+      ],
+      lastChangeAt: new Date().toISOString(),
+      version: 5,
+    }),
+  );
+  check(
+    'the card names the files the watcher just saw change',
+    withFiles.text.includes('最近被写入') &&
+      withFiles.text.includes('src/gitnexus/coverage.ts') &&
+      withFiles.text.includes('刚刚'),
+    withFiles.text.slice(0, 1200),
+  );
+  check(
+    'the card names the files that differ from the index, with their kinds',
+    withFiles.text.includes('相对索引的改动') &&
+      withFiles.text.includes('+1 ~1 -1') &&
+      withFiles.text.includes('src/gitnexus/risk-query.ts') &&
+      withFiles.text.includes('src/gitnexus/old.ts'),
+    withFiles.text.slice(0, 1600),
+  );
+  check(
+    'a card with nothing written and nothing changed renders no file list',
+    !brokenRisk.text.includes('最近被写入') && !brokenRisk.text.includes('相对索引的改动'),
+    brokenRisk.text.slice(0, 900),
+  );
+
+  // ---------------------------------------------------------------------------
 
   return { report, project, view, empty };
 }

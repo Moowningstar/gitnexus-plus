@@ -34,6 +34,15 @@ const MAX_WATCHED = 3;
 const IDLE_STOP_MS = 5 * 60_000;
 /** The child process budget for one risk evaluation. */
 const RISK_TIMEOUT_MS = 20_000;
+/**
+ * How many recently-touched paths are remembered.
+ *
+ * The list answers "what is being written right now", so it is deliberately small and
+ * short-lived: forty entries covers a burst of edits without turning the tracker into a log,
+ * and five minutes is long enough to look at the panel after switching windows.
+ */
+const RECENT_MAX = 40;
+const RECENT_TTL_MS = 5 * 60_000;
 
 export interface TrackerOptions {
   repoPath: string;
@@ -55,6 +64,14 @@ export interface TrackerOptions {
   onWarning?: (message: string) => void;
 }
 
+/** One path the watcher saw change, and when it saw it. */
+export interface TrackerRecentChange {
+  /** Repository-relative, forward slashes. */
+  path: string;
+  /** ISO time of the coalesced event that reported it. */
+  at: string;
+}
+
 /** What a route or a tool answer may read at any instant. */
 export interface TrackerSnapshot {
   repoPath: string;
@@ -69,10 +86,40 @@ export interface TrackerSnapshot {
   risk: RiskReport | null;
   /** ISO time of the last completed evaluation attempt. */
   evaluatedAt: string | null;
+  /**
+   * The most recent paths the watcher reported, newest first.
+   *
+   * This is the only view of "what is being written right now": the change set below is what
+   * differs from the index, which is exact but only as fresh as the last evaluation. A file
+   * appears here the moment it is written, before any hash has been compared.
+   */
+  recent: TrackerRecentChange[];
+  /** ISO time of the last coalesced change, or null when nothing has moved yet. */
+  lastChangeAt: string | null;
   /** True while an evaluation is running. */
   busy: boolean;
   /** Bumped on every observable change, so a poller can skip identical responses. */
   version: number;
+}
+
+/**
+ * Fold freshly-seen paths into the recent list.
+ *
+ * Exported for the test seam: the interesting rules are dedupe-by-path (a file saved ten
+ * times appears once), newest-first ordering, the cap, and the TTL, and none of them need a
+ * filesystem to check.
+ */
+export function mergeRecent(
+  existing: readonly TrackerRecentChange[],
+  paths: readonly string[],
+  now: number,
+): TrackerRecentChange[] {
+  if (paths.length === 0) return [...existing];
+  const at = new Date(now).toISOString();
+  const cutoff = now - RECENT_TTL_MS;
+  const moved = new Set(paths.map((entry) => entry.replace(/\\/g, '/')));
+  const kept = existing.filter((entry) => Date.parse(entry.at) >= cutoff && !moved.has(entry.path));
+  return [...[...moved].map((entry) => ({ path: entry, at })), ...kept].slice(0, RECENT_MAX);
 }
 
 function changeKey(delta: DeltaReport): string {
@@ -114,6 +161,8 @@ export class RepoTracker {
   private version = 0;
   private inFlight: Promise<void> | null = null;
   private lastRiskKey: string | null = null;
+  private recent: TrackerRecentChange[] = [];
+  private lastChangeAt: string | null = null;
 
   constructor(options: TrackerOptions) {
     this.options = options;
@@ -141,6 +190,7 @@ export class RepoTracker {
       onChange: (paths) => {
         this.lastAccess = this.now();
         if (paths.some((entry) => entry.endsWith('analyze.lock'))) return;
+        this.remember(paths);
         this.fsSeq.update((value) => value + 1);
       },
       onWarning: (message) => {
@@ -162,6 +212,19 @@ export class RepoTracker {
 
     // First look is immediate: a repository the user just opened should not wait for a save.
     void this.settle();
+  }
+
+  /**
+   * Remember which paths moved, newest first.
+   *
+   * A hint, not evidence: it answers "the editor just wrote this" with no claim that the
+   * bytes differ from the index. One entry per path, so a file saved ten times in a row
+   * appears once at its latest time instead of flooding the list.
+   */
+  private remember(paths: readonly string[]): void {
+    const now = this.now();
+    this.lastChangeAt = new Date(now).toISOString();
+    this.recent = mergeRecent(this.recent, paths, now);
   }
 
   private gitStampValue(): string {
@@ -278,6 +341,8 @@ export class RepoTracker {
       deltaAt: this.delta?.readAt ?? null,
       risk: this.risk,
       evaluatedAt: this.evaluatedAt,
+      recent: this.recent,
+      lastChangeAt: this.lastChangeAt,
       busy: this.busy,
       version: this.version,
     };

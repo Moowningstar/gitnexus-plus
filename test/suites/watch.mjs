@@ -34,8 +34,9 @@ async function makeOwned(root) {
 }
 
 export async function watchTests() {
-  const { RepoTracker, TrackerRegistry } = await import('../../lib/gitnexus/watch/registry.js');
+  const { RepoTracker, TrackerRegistry, mergeRecent } = await import('../../lib/gitnexus/watch/registry.js');
   const { readStorageState } = await import('../../lib/gitnexus/storage-state.js');
+  const { createFsWatch } = await import('../../lib/gitnexus/watch/stamps.js');
 
   section('tracker: a store it cannot use is not watched');
 
@@ -160,6 +161,60 @@ export async function watchTests() {
         readStorageState(root).state,
       );
       tracker.dispose();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // The list of "what was just written" is the only live view the panel has, so its rules are
+  // checked directly: no filesystem, no debounce, no timing.
+  section('tracker: the recent-change list');
+
+  {
+    const at = (offsetMs) => new Date(Date.UTC(2026, 0, 1, 12, 0, 0) + offsetMs).toISOString();
+    const now = Date.parse(at(0));
+    const older = [{ path: 'kept.ts', at: at(-60_000) }, { path: 'expired.ts', at: at(-10 * 60_000) }];
+
+    const merged = mergeRecent(older, ['src/a.ts', 'src\\b.ts'], now);
+    check(
+      'a fresh event lands at the front, with backslashes normalized',
+      merged[0].path === 'src/a.ts' && merged[1].path === 'src/b.ts' && merged[0].at === at(0),
+      JSON.stringify(merged),
+    );
+    check(
+      'entries older than the window are dropped',
+      !merged.some((entry) => entry.path === 'expired.ts') && merged.some((entry) => entry.path === 'kept.ts'),
+      JSON.stringify(merged),
+    );
+    check(
+      'the same path written again moves to the front instead of appearing twice',
+      mergeRecent(merged, ['src/a.ts'], now + 1_000).filter((entry) => entry.path === 'src/a.ts').length === 1,
+      JSON.stringify(mergeRecent(merged, ['src/a.ts'], now + 1_000)),
+    );
+    const many = mergeRecent([], Array.from({ length: 60 }, (_unused, index) => `file-${index}.ts`), now);
+    check('the list is capped', many.length === 40, String(many.length));
+
+    // End to end through a real watcher: the debounce is shortened so the assertion does not
+    // wait 800 ms per run, and the path it reports is exactly what the tracker remembers.
+    const root = await tempRepo('gnp-watch-');
+    try {
+      const reported = [];
+      const watch = createFsWatch(root, {
+        debounceMs: 40,
+        minGapMs: 0,
+        onChange: (paths) => reported.push(...paths),
+      });
+      if (watch.live) {
+        await fs.writeFile(path.join(root, 'touched.ts'), 'export const touched = 1;\n', 'utf8');
+        const deadline = Date.now() + 3_000;
+        while (reported.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      check(
+        'a real write is reported with its path',
+        !watch.live || reported.some((entry) => entry.replace(/\\/g, '/').endsWith('touched.ts')),
+        `${watch.live} ${JSON.stringify(reported)}`,
+      );
+      watch.close();
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

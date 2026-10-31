@@ -128,7 +128,10 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   reported as **确定断裂** (with the caller that still points at it); a modified file whose
   symbols are still referenced elsewhere is reported as **暴露**; files the index never
   recorded are **盲区**. The panel card updates itself, every graph-tool answer carries one
-  line of the verdict, and `gitnexus_risk` answers directly. It is a structural reading of
+  line of the verdict, and `gitnexus_risk` answers directly. The card also names the files:
+  what the watcher just saw written (a save counts even when no byte changed, which is what
+  makes it usable mid-edit) and what the change set says differs from the index, with
+  `+`/`~`/`-` marks. It is a structural reading of
   the call graph, not a compiler: the card says so, and an evaluation that did not happen
   says "无法评估" rather than "no risk".
 
@@ -296,9 +299,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1392
-checks (969 engine, 86 plugin, 337 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1389). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1400
+checks (974 engine, 86 plugin, 340 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1397). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every
