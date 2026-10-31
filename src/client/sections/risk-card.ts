@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { HAIRLINE, MUTED, SOFT_BG, StateDot, Tag, h } from '../primitives';
-import type { ClientRisk, ClientRiskHit } from '../types';
+import type { ClientRisk, ClientRiskHit, ClientWarning } from '../types';
 
 /**
  * The dependency-risk card.
@@ -20,11 +20,19 @@ export function RiskSection({
   risk,
   route,
   error,
+  drift,
 }: {
   risk: ClientRisk | null;
   /** Whether the host mounted `/api/gitnexus/risk`; `missing` is named, not swallowed. */
   route: 'unknown' | 'ready' | 'missing';
   error: string | null;
+  /**
+   * The scan's own "index and working tree disagree" warnings, moved here from the
+   * caveats card so one fact has one home. Rendered only as a fallback: when the
+   * tracker has a live change set, its numbers are the better answer and saying both
+   * would invite the reader to reconcile two counting methods.
+   */
+  drift?: ClientWarning[];
 }) {
   const report = risk?.risk ?? null;
   const counts = report?.counts ?? null;
@@ -105,6 +113,8 @@ export function RiskSection({
     report === null ? null : riskBody(report),
 
     risk === null ? null : filesBlock(risk),
+
+    driftBlock(risk, drift),
 
     report !== null && report.truncated
       ? h('div', { style: MUTED }, '列表已截断：这里只列出引用最多的部分，计数是完整的。')
@@ -191,6 +201,30 @@ function filesBlock(risk: ClientRisk): React.ReactElement | null {
             ? h('div', { style: { ...MUTED, fontSize: '11px' } }, `另有 ${total - changed.length} 个文件未列出。`)
             : null,
         ),
+  );
+}
+
+/**
+ * The scan's index-vs-working-tree caveats, shown only when the tracker has nothing to say.
+ *
+ * `uncovered-files` and `index-holds-retired-paths` describe the same gap as `delta` — the
+ * working tree moved and the index did not — but they are computed from a fresh scan rather
+ * than from a hash comparison, so the two counts can differ (exclusion rules, files outside
+ * git). When a live change set exists it wins: two numbers for one fact would make the reader
+ * compare counting methods instead of reading the answer.
+ */
+function driftBlock(risk: ClientRisk | null, drift: ClientWarning[] | undefined): React.ReactElement | null {
+  const list = Array.isArray(drift) ? drift : [];
+  if (list.length === 0) return null;
+  const counts = risk?.delta?.counts ?? null;
+  const deltaSilent =
+    counts === null || counts.modified + counts.added + counts.deleted + counts.excluded === 0;
+  if (!deltaSilent) return null;
+  return h(
+    'div',
+    { style: { display: 'flex', flexDirection: 'column', gap: '3px', ...MUTED, fontSize: '11px' } },
+    h('div', null, '索引与工作树（来自扫描，不是本次改动）'),
+    list.map((warning, index) => h('div', { key: `${warning.code}-${index}` }, `· ${warning.message}`)),
   );
 }
 

@@ -1135,6 +1135,47 @@ export function renderSuite(ctx) {
   );
 
   // ---------------------------------------------------------------------------
+  // One fact, one home: the scan's "index vs working tree" warnings used to sit in
+  // 需要注意 while the risk card said the same thing with live counts. They now travel
+  // to the risk card, and only when it has no live change set to say it with.
+
+  const driftReport = {
+    ...report,
+    warnings: [
+      ...report.warnings,
+      {
+        level: 'info',
+        code: 'uncovered-files',
+        message: '4 个文件会被扫描选中但不在索引中——索引可能已过期，或建索引时的排除规则不同',
+        evidence: {},
+      },
+      {
+        level: 'info',
+        code: 'index-holds-retired-paths',
+        message: '2 个索引中的文件在本次扫描中不存在（已删除或已被排除）',
+        evidence: {},
+      },
+    ],
+  };
+  const driftFallback = render(I.CoverageView, { report: driftReport, ...viewProps, riskRoute: 'missing' });
+  check(
+    'the index-vs-worktree caveats live in the risk card now',
+    driftFallback.text.includes('索引与工作树') && driftFallback.text.includes('4 个文件会被扫描选中但不在索引中'),
+    driftFallback.text.slice(0, 1200),
+  );
+  check(
+    'the caveats card no longer repeats them',
+    driftFallback.text.includes('需要注意 · 3') && !driftFallback.text.includes('需要注意 · 5'),
+    driftFallback.text.slice(0, 1200),
+  );
+  const driftWithDelta = render(I.CoverageView, { report: driftReport, ...viewProps, ...riskProps(withFilesRisk) });
+  check(
+    'a live change set outranks the scan caveats instead of sitting beside them',
+    driftWithDelta.text.includes('相对索引的改动') && !driftWithDelta.text.includes('索引与工作树'),
+    driftWithDelta.text.slice(0, 1600),
+  );
+
+  // ---------------------------------------------------------------------------
 
   return { report, project, view, empty };
 }

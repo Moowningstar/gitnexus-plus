@@ -723,6 +723,16 @@ export function CoverageView({
   const languages = report.languages ?? null;
 
   const { notable, context: contextWarnings } = splitWarnings(report.warnings);
+
+  // Two of those warnings answer the same question as the risk card: "the index and the
+  // working tree disagree". The card states it with counts that follow the edit and lists
+  // the files; keeping the report's version here as well meant reading one fact twice, in
+  // two number systems. They move to the card, which renders them only when it has no live
+  // change set of its own.
+  const DRIFT_CODES = new Set(['uncovered-files', 'index-holds-retired-paths']);
+  const driftWarnings = [...notable, ...contextWarnings].filter((warning) => DRIFT_CODES.has(warning.code));
+  const caveats = notable.filter((warning) => !DRIFT_CODES.has(warning.code));
+  const contextCaveats = contextWarnings.filter((warning) => !DRIFT_CODES.has(warning.code));
   const ratio = coverageRatio(report);
 
   // Multi-project workspaces get one aggregate card before the project-scoped ones.
@@ -1088,8 +1098,9 @@ export function CoverageView({
 
     // The alarm, immediately after the graph it is about: "what did my edit do to the call
     // graph" is the question the graph card provokes, and answering it one card later keeps
-    // the two readings next to each other.
-    indexed && (risk !== null || riskRoute !== 'unknown')
+    // the two readings next to each other. It also owns the index-vs-working-tree caveats,
+    // which is why it renders for them even when the route is still unknown.
+    indexed && (risk !== null || riskRoute !== 'unknown' || driftWarnings.length > 0)
       ? h(
           Section,
           {
@@ -1107,7 +1118,7 @@ export function CoverageView({
                     : '未在监听',
             ),
           },
-          h(RiskSection, { risk, route: riskRoute, error: riskError }),
+          h(RiskSection, { risk, route: riskRoute, error: riskError, drift: driftWarnings }),
         )
       : null,
 
@@ -1117,18 +1128,20 @@ export function CoverageView({
     // list of `·` lines. They are the same thing at two volumes: both say "this
     // index does not line up with the working tree". Splitting them made the reader
     // check two boxes to answer one question, and the untitled one had no heading
-    // to say what it was.
-    notable.length > 0 || contextWarnings.length > 0
+    // to say what it was. The drift pair that used to live here now travels to the
+    // risk card; what remains is what the scan found about its own reach — caps,
+    // skipped files, version mismatch, activity window.
+    caveats.length > 0 || contextCaveats.length > 0
       ? h(
           Section,
           {
             // Full width: a list of warnings would otherwise pair with whatever card
             // happened to follow and leave a hole in the other column.
             wide: true,
-            title: `需要注意 · ${notable.length + contextWarnings.length}`,
+            title: `需要注意 · ${caveats.length + contextCaveats.length}`,
             scroll: 300,
           },
-          notable.map((warning, index) =>
+          caveats.map((warning, index) =>
             h(
               'div',
               {
@@ -1149,7 +1162,7 @@ export function CoverageView({
           ),
           // The milder ones stay quiet rows: giving every item an amber box would
           // make a stale-index count look as urgent as a truncated activity window.
-          contextWarnings.length === 0
+          contextCaveats.length === 0
             ? null
             : h(
                 'div',
@@ -1159,10 +1172,10 @@ export function CoverageView({
                     flexDirection: 'column',
                     gap: '4px',
                     ...MUTED,
-                    ...(notable.length > 0 ? { borderTop: HAIRLINE, paddingTop: '8px' } : {}),
+                    ...(caveats.length > 0 ? { borderTop: HAIRLINE, paddingTop: '8px' } : {}),
                   },
                 },
-                contextWarnings.map((warning, index) =>
+                contextCaveats.map((warning, index) =>
                   h('div', { key: `${warning.code}-${index}` }, `· ${warning.message}`),
                 ),
               ),
