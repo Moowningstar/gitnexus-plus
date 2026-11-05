@@ -40,6 +40,14 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   the blocked screen says which state it is and offers **全量重建**, withholding 初始化索引
   because upstream rejects that write in all four. The text output follows the same rule:
   `GitNexus index: BLOCKED (<state>)` instead of `NOT FOUND`.
+- **Read paths ask the same question as the panel** — search and the three graph tools
+  (`impact`, `context`, `query`) used to check only that a manifest existed, then open
+  `.gitnexus/lbug`; for a moved or copied checkout that returned *another* repository's
+  graph. They now consult the storage state first and answer `409 index-not-usable` with
+  the sentence the blocked panel shows (`409 no-index` for a project that never had an
+  index). The check runs before the manifest is parsed, because that parse does not
+  validate ownership. Routes that read git objects — a commit's files, file history,
+  checkout — still answer without an index, since they never touch the graph.
 - **Graph view** — the index's communities drawn on a canvas, with aggregated
   cross-community edges; click a community to see its member symbols and the relations
   among them, click a symbol to open its file at the line. Node and edge budgets are
@@ -169,6 +177,20 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   version mismatch, a truncated activity window) are not a card of their own either: they
   render at the bottom of the activity card, because that card already exists to say what
   the reading in front of you does and does not cover.
+
+- **This session's change set, not just "differs from the index"** — a dirty-window ledger.
+  It opens when the tree first goes dirty; a commit closes it (`head`, and a new window
+  opens if the tree is still dirty), returning clean closes it (`clean`), and a stopped
+  watcher freezes it (`idle`) rather than discarding what happened. Counts are per content
+  hash, so saving a file twice without changing a byte does not inflate them; a path the
+  watcher saw but has not compared yet is reported as pending, never as unchanged.
+  `GET /api/gitnexus/ledger` returns the window plus those pending paths, and the panel
+  card sits next to the dependency-risk card (it answers the same question the risk card
+  raises), naming the window state, the counts, the files the index does not hold, and the
+  policy exclusions. It records paths, counts, timestamps and hashes — never content,
+  diffs or line numbers — and it is in-memory only, so a restart forgets the window.
+  Without symbols to attribute, the refresh card says so: a change set entirely inside
+  files the index does not cover reads "符号归因不适用——这不是索引过期", not "index behind".
 
 - **CI gates** — `gitnexus-coverage` can fail a pipeline instead of waiting for someone to
   read the panel: `--fail-on-uncovered` (the analyzer would index files the index does not
@@ -329,9 +351,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1517
-checks (1070 engine, 91 plugin, 356 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1514). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1520
+checks (1072 engine, 92 plugin, 356 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1517). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every
