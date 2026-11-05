@@ -43,6 +43,7 @@ import { exitDetail, parseHelperOutput, readLineNumber } from '../shell.js';
 import { shellRunner, type Runner } from '../subprocess.js';
 import { findGitnexusRoot } from './root.js';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
+import { readStorageState, storageReadBlock } from './storage-state.js';
 import { isOrphanShadowError, quarantineOrphanShadow } from './lbug-heal.js';
 import { readCapabilities } from './coverage.js';
 import { isFtsLoadFailure, mergeHits, messageOf, searchViaFts } from './search-fts.js';
@@ -114,6 +115,8 @@ export type SearchErrorCode =
   | 'not-a-project'
   | 'no-index'
   | 'no-index-store'
+  /** The store exists but is not this checkout's (or cannot be read); see storage-state. */
+  | 'index-not-usable'
   | 'search-unavailable'
   | 'index-busy'
   | 'search-cancelled'
@@ -316,6 +319,11 @@ export async function searchSymbols(
     throw new SearchError('not-a-project', 404, '目录不是 GitNexus 索引，也不是 git 项目根。');
   }
 
+  // Before the manifest is read, not after: `readIndexMeta` parses a foreign store's
+  // manifest quite happily, so asking it first means answering from another checkout.
+  const blocked = storageReadBlock(readStorageState(absRepo));
+  if (blocked !== null) throw new SearchError(blocked.code, 409, blocked.message);
+
   const meta = await readIndexMeta(absRepo);
   if (meta === null) {
     throw new SearchError('no-index', 409, '该项目还没有 GitNexus 索引；初始化后才能搜索。');
@@ -468,6 +476,7 @@ function searchErrorCode(value: unknown): SearchErrorCode {
     case 'not-a-project':
     case 'no-index':
     case 'no-index-store':
+    case 'index-not-usable':
     case 'search-unavailable':
     case 'index-busy':
     case 'search-cancelled':
@@ -540,6 +549,8 @@ export async function searchViaHelper(
   if (!(await isProjectRoot(absRepo))) {
     throw new SearchError('not-a-project', 404, '目录不是 GitNexus 索引，也不是 git 项目根。');
   }
+  const blocked = storageReadBlock(readStorageState(absRepo));
+  if (blocked !== null) throw new SearchError(blocked.code, 409, blocked.message);
   const meta = await readIndexMeta(absRepo);
   if (meta === null) {
     throw new SearchError('no-index', 409, '该项目还没有 GitNexus 索引；初始化后才能搜索。');
@@ -646,6 +657,10 @@ export async function searchText(
   if (!(await isProjectRoot(absRepo))) {
     throw new SearchError('not-a-project', 404, '目录不是 GitNexus 索引，也不是 git 项目根。');
   }
+  // The text fallback reads the manifest's file table; a foreign manifest names files
+  // that are not in this tree, so the same gate applies here.
+  const blocked = storageReadBlock(readStorageState(absRepo));
+  if (blocked !== null) throw new SearchError(blocked.code, 409, blocked.message);
   const meta = await readIndexMeta(absRepo);
   if (meta === null) {
     throw new SearchError('no-index', 409, '该项目还没有 GitNexus 索引；初始化后才能搜索。');

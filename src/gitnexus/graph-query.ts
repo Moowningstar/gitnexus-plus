@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { defaultGitnexusHome } from './commands.js';
 import { isProjectRoot, readIndexMeta } from './index-meta.js';
+import { readStorageState, storageReadBlock } from './storage-state.js';
 import { exitDetail, parseHelperOutput, type ShellLike } from '../shell.js';
 import { shellRunner, type Runner } from '../subprocess.js';
 import { registryHasRepo, registryHomesFor } from './webview-probe.js';
@@ -44,6 +45,8 @@ export const GRAPH_TOOLS: readonly GraphToolName[] = ['impact', 'context', 'quer
 export type GraphToolErrorCode =
   | 'not-a-project'
   | 'no-index'
+  /** The store exists but is not this checkout's (or cannot be read); see storage-state. */
+  | 'index-not-usable'
   | 'no-shell'
   | 'gitnexus-missing'
   | 'tool-failed'
@@ -109,6 +112,9 @@ const STDOUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const MESSAGES: Record<GraphToolErrorCode, string> = {
   'not-a-project': '目录不是 GitNexus 索引，也不是 git 项目根。',
   'no-index': '该项目还没有 GitNexus 索引；初始化后才能问图。',
+  // `failure` appends `detail` to this base, and the storage sentence already names
+  // the state and the remedy, so the base is empty rather than said twice.
+  'index-not-usable': '',
   'no-shell': '当前部署没有 shell 执行器，无法启动查图子进程；查图需要系统 Node 加载 GitNexus 原生模块。',
   'gitnexus-missing': '找不到 gitnexus 包；装好后才能查图。',
   'tool-failed': '查图子进程失败。',
@@ -153,6 +159,12 @@ export async function runGraphTool(
 ): Promise<GraphToolOutcome> {
   const absRepo = path.resolve(repoPath);
   if (!(await isProjectRoot(absRepo))) return failure('not-a-project');
+  // Same gate and same sentence as the graph route and search: without it a moved or
+  // copied checkout answers from the previous owner's graph.
+  const blocked = storageReadBlock(readStorageState(absRepo));
+  if (blocked !== null) {
+    return failure(blocked.code, blocked.code === 'index-not-usable' ? blocked.message : '');
+  }
   const meta = await readIndexMeta(absRepo);
   if (meta === null) return failure('no-index');
   if (!existsSync(path.join(absRepo, '.gitnexus', 'lbug'))) {

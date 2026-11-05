@@ -375,3 +375,24 @@ export function describeBlockedStorage(storage: StorageStateReport): string {
       return '索引存储可用。';
   }
 }
+
+/**
+ * What a read path must refuse on, before it opens the graph.
+ *
+ * `null` means the store belongs to this checkout and a reader may open it. The graph
+ * route has asked this since 0.1.11; search and the three graph tools did not, so a
+ * checkout that was moved or copied with its `.gitnexus` directory could read the
+ * previous owner's graph — and answer about symbols that are not in this tree.
+ *
+ * Sharing the sentence matters as much as sharing the decision. Two routes that answer
+ * the same state with different words teach the reader that one of them is wrong.
+ */
+export function storageReadBlock(
+  storage: StorageStateReport,
+): { code: 'no-index' | 'index-not-usable'; message: string } | null {
+  if (storage.state === 'owned') return null;
+  return {
+    code: storage.state === 'missing' || storage.state === 'empty' ? 'no-index' : 'index-not-usable',
+    message: describeBlockedStorage(storage),
+  };
+}

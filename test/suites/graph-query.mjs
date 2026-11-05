@@ -69,6 +69,17 @@ async function indexedFixture(name) {
   return root;
 }
 
+/** A store that came along with a checkout it does not belong to. */
+async function foreignFixture(name) {
+  const root = await indexedFixture(name);
+  await fs.writeFile(
+    path.join(root, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ repoPath: path.join(root, 'previous-checkout'), lastCommit: '', stats: {}, capabilities: {} }, null, 2),
+    'utf8',
+  );
+  return root;
+}
+
 // ---------------------------------------------------------------------------
 // Renderers
 // ---------------------------------------------------------------------------
@@ -294,6 +305,24 @@ export async function graphQueryToolTests() {
     'a manifest without a graph store is no-index, with the reason',
     missingStore.ok === false && missingStore.code === 'no-index' && missingStore.message.includes('lbug'),
     JSON.stringify(missingStore),
+  );
+
+  // A store that belongs to another checkout: the tools must refuse rather than answer
+  // from a graph whose file paths are not in this tree.
+  const foreignRoot = await foreignFixture('graph-query-foreign');
+  const foreignStore = await runGraphTool(foreignRoot, 'impact', { target: 'x' }, {
+    shell: stubShell({ ok: false }),
+    helperPath,
+  });
+  check(
+    'a store from another checkout is index-not-usable',
+    foreignStore.ok === false && foreignStore.code === 'index-not-usable',
+    JSON.stringify(foreignStore),
+  );
+  check(
+    'the refusal carries the storage sentence, not a generic one',
+    foreignStore.message.includes('另一个检出') && !foreignStore.message.includes('初始化后才能问图'),
+    foreignStore.message,
   );
 
   section('graph tool plumbing');

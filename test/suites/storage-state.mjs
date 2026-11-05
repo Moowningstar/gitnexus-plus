@@ -21,6 +21,7 @@ import {
   inspectStorage,
   readStorageState,
   storageIsUsable,
+  storageReadBlock,
 } from '../../lib/gitnexus/storage-state.js';
 import { formatReport } from '../../lib/gitnexus/format.js';
 
@@ -210,6 +211,51 @@ export async function storageStateTests() {
     'the graph store flag is reported with the state',
     decideStorageState(inspection({ entries: ['lbug'], hasCodeIndexDB: true })).hasCodeIndexDB === true,
     'hasCodeIndexDB survived',
+  );
+
+  section('storage state: what a read path refuses on');
+
+  // The gate search and the three graph tools consult before opening a graph. `null`
+  // means "this store is this checkout's"; every other state carries the sentence the
+  // route prints, so two routes cannot describe the same store differently.
+  const missingBlock = storageReadBlock(decideStorageState(inspection()));
+  check('a missing store blocks a read as no-index', missingBlock?.code === 'no-index', JSON.stringify(missingBlock));
+  check(
+    'a missing store keeps the index-it-first sentence',
+    missingBlock?.message.includes('初始化后才能看图') === true,
+    missingBlock?.message,
+  );
+
+  const emptyBlock = storageReadBlock(decideStorageState(inspection({ entries: [] })));
+  check('an empty store blocks a read as no-index too', emptyBlock?.code === 'no-index', JSON.stringify(emptyBlock));
+
+  const ownedBlock = storageReadBlock(
+    decideStorageState(inspection({ primary: probe({ state: 'valid', repoPath: ownRepo }) })),
+  );
+  check('an owned store does not block a read', ownedBlock === null, JSON.stringify(ownedBlock));
+
+  const unownedBlock = storageReadBlock(decideStorageState(inspection({ entries: ['lbug'], hasCodeIndexDB: true })));
+  check(
+    'an unowned store blocks a read as index-not-usable',
+    unownedBlock?.code === 'index-not-usable' && unownedBlock.message.includes('unowned'),
+    JSON.stringify(unownedBlock),
+  );
+
+  const foreignBlock = storageReadBlock(movedStorage);
+  check(
+    'a foreign store blocks a read as index-not-usable and names the other checkout',
+    foreignBlock?.code === 'index-not-usable' && foreignBlock.message.includes('另一个检出'),
+    JSON.stringify(foreignBlock),
+  );
+
+  const invalidBlock = storageReadBlock(brokenPrimary);
+  check('a broken manifest blocks a read as index-not-usable', invalidBlock?.code === 'index-not-usable', JSON.stringify(invalidBlock));
+
+  const unknownBlock = storageReadBlock(unreadableManifest);
+  check(
+    'an unreadable store blocks a read as index-not-usable and says why',
+    unknownBlock?.code === 'index-not-usable' && unknownBlock.message.includes('不会读图'),
+    JSON.stringify(unknownBlock),
   );
 
   section('storage state: read off a real directory');

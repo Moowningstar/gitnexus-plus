@@ -357,6 +357,46 @@ export async function searchTests() {
     String(noIndexError),
   );
   await fs.rm(noIndex, { recursive: true, force: true });
+
+  // A checkout that was moved or copied together with its `.gitnexus` directory. 0.1.11
+  // refused this in the graph route only: search and the graph tools opened the previous
+  // owner's graph and answered about symbols that are not in this tree.
+  const foreign = fixturePath('search-foreign');
+  await fs.rm(foreign, { recursive: true, force: true });
+  await fs.mkdir(path.join(foreign, '.git'), { recursive: true });
+  await fs.mkdir(path.join(foreign, '.gitnexus', 'lbug'), { recursive: true });
+  await fs.writeFile(
+    path.join(foreign, '.gitnexus', 'gitnexus.json'),
+    JSON.stringify({ repoPath: path.join(foreign, 'previous-checkout'), lastCommit: '', stats: {}, capabilities: {} }, null, 2),
+  );
+  const foreignError = await searchSymbols(foreign, 'x').catch((error) => error);
+  check(
+    'a foreign store is refused by the graph search',
+    foreignError instanceof SearchError && foreignError.code === 'index-not-usable' && foreignError.status === 409,
+    String(foreignError),
+  );
+  check(
+    'the refusal names the other checkout instead of saying 还没有索引',
+    String(foreignError.message).includes('foreign') && String(foreignError.message).includes('另一个检出'),
+    String(foreignError.message),
+  );
+  const foreignText = await searchText(foreign, 'x').catch((error) => error);
+  check(
+    'the text fallback is refused too, it reads the foreign file table',
+    foreignText instanceof SearchError && foreignText.code === 'index-not-usable',
+    String(foreignText),
+  );
+  // `shell: null` answers `search-unavailable` if the storage gate runs second, so the
+  // answer here is also the ordering proof: the store is judged before a helper is.
+  const foreignHelper = await searchViaHelper(foreign, 'x', { helperPath: 'unused.js', shell: null }).catch(
+    (error) => error,
+  );
+  check(
+    'a foreign store is refused before a helper is started',
+    foreignHelper instanceof SearchError && foreignHelper.code === 'index-not-usable',
+    String(foreignHelper),
+  );
+  await fs.rm(foreign, { recursive: true, force: true });
 }
 
 export async function ftsSearchTests() {
@@ -612,6 +652,9 @@ export async function searchRouteTests() {
     search: async (repo, query, options) => {
       calls.push({ repo, query, options });
       if (query === 'busy') throw new SearchError('index-busy', 503, '索引正忙');
+      if (query === 'not-usable') {
+        throw new SearchError('index-not-usable', 409, '索引存储不可用（foreign）：归属元数据记录的是另一个检出。');
+      }
       return {
         query,
         mode: 'graph',
@@ -663,6 +706,13 @@ export async function searchRouteTests() {
 
   const busy = await hit(`/api/gitnexus/search?repo=${repo}&q=busy`);
   check('a typed engine error keeps its status', busy.status === 503 && busy.body?.code === 'index-busy', 'status=' + busy.status);
+
+  const notUsable = await hit(`/api/gitnexus/search?repo=${repo}&q=not-usable`);
+  check(
+    "a store that is not this checkout's keeps its 409 and its code",
+    notUsable.status === 409 && notUsable.body?.code === 'index-not-usable',
+    'status=' + notUsable.status,
+  );
 
   const post = await fetch('http://127.0.0.1:' + port + `/api/gitnexus/search?repo=${repo}&q=analyze`, {
     method: 'POST',
