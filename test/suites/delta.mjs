@@ -473,6 +473,35 @@ export async function deltaTests() {
   }
 
   {
+    // The indexer skips some names outright (`IGNORED_FILES` upstream): a tracked
+    // `package-lock.json` is not a gap a refresh can close. Before the name check, every
+    // clean tree in an npm project reported one addition — forever, since no refresh
+    // would ever record it.
+    const fixture = await build('name-ignored-lockfile', {
+      'src/a.ts': 'export const a = 1;\n',
+      'package-lock.json': '{"lockfileVersion": 3}\n',
+    });
+    await fixture.index({ 'src/a.ts': 'export const a = 1;\n' });
+    // A lockfile only becomes a candidate once it differs from the indexed commit — the
+    // real-repo shape (index baseline older than HEAD, lockfile bumped in between).
+    await fs.writeFile(
+      path.join(fixture.root, 'package-lock.json'),
+      '{"lockfileVersion": 3, "name": "fixture"}\n',
+    );
+    const report = await readDelta(fixture.root);
+    check(
+      'a tracked lockfile is excluded, not added',
+      report.counts.added === 0 && report.counts.excluded === 1 && report.needsRefresh === false,
+      JSON.stringify({ counts: report.counts, entries: report.entries }),
+    );
+    check(
+      'and the reason names the rule it hit',
+      report.entries.some((entry) => entry.path === 'package-lock.json' && entry.reason.includes('文件名')),
+      JSON.stringify(report.entries),
+    );
+  }
+
+  {
     const root = fixturePath('delta-absent');
     await fs.rm(root, { recursive: true, force: true });
     await fs.mkdir(path.join(root, 'src'), { recursive: true });

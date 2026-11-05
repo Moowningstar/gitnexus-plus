@@ -275,6 +275,57 @@ function extensionOf(key: string): string {
   return dot <= 0 ? '' : base.slice(dot).toLowerCase();
 }
 
+/**
+ * Files the indexer skips by name, not by extension.
+ *
+ * Mirrors `IGNORED_FILES` in GitNexus `dist/config/ignore-service.js` (1.6.12). The
+ * extension check below cannot see these: `package-lock.json` and `pnpm-lock.yaml` carry
+ * extensions the index does cover, so a tracked lockfile looked like an addition on every
+ * clean tree — the refresh gate said "索引落后" for a file no refresh would ever take, and
+ * the prompt line reported one addition forever. Keeping the list local (rather than
+ * importing upstream internals) is deliberate; upstream's list moving is a reason to add a
+ * test here, not to reach into its dist.
+ */
+const NAME_IGNORED_FILES: ReadonlySet<string> = new Set([
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'composer.lock',
+  'gemfile.lock',
+  'poetry.lock',
+  'cargo.lock',
+  'go.sum',
+  '.gitignore',
+  '.gitattributes',
+  '.npmrc',
+  '.yarnrc',
+  '.editorconfig',
+  '.prettierrc',
+  '.prettierignore',
+  '.eslintignore',
+  '.dockerignore',
+  'thumbs.db',
+  '.ds_store',
+  'license',
+  'license.md',
+  'license.txt',
+  'changelog.md',
+  'changelog',
+  'contributing.md',
+  'code_of_conduct.md',
+  'security.md',
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.env.test',
+  '.env.example',
+]);
+
+function baseNameOf(key: string): string {
+  return key.slice(key.lastIndexOf('/') + 1).toLowerCase();
+}
+
 /** Stream one file through sha256. Returns null when it cannot be read. */
 async function hashFile(absolutePath: string): Promise<string | null> {
   try {
@@ -576,6 +627,17 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
               path: key,
               kind: 'excluded',
               reason: `超过索引记录的大小上限（${formatBytes(cap)}），刷新也会被跳过`,
+              hash: null,
+            };
+          }
+          // The indexer skips some names outright (lockfiles, license/readme boilerplate,
+          // dot-config files). Their extensions are indexable, so the check below would
+          // call them additions on a tree nobody touched.
+          if (NAME_IGNORED_FILES.has(baseNameOf(key))) {
+            return {
+              path: key,
+              kind: 'excluded',
+              reason: '索引不收录该文件（按文件名跳过：锁文件/配置文件），刷新也不会收录',
               hash: null,
             };
           }

@@ -768,6 +768,14 @@ check(
   gateOff.registered.length === 6,
   `got ${gateOff.registered.length}`,
 );
+// The flag is the escape hatch for both halves. Asserting only the listener would let a
+// change-scope registration survive a `precheck: false` and nobody would notice: the line
+// is not a listener, it is a prompt registration.
+check(
+  'precheck: false also drops the change-set line',
+  !gateOff.effects.some((label) => label.includes('change scope')),
+  gateOff.effects.join(','),
+);
 
 section('tool execution against a real repository');
 const repo = 'D:\\project\\data-screen';
