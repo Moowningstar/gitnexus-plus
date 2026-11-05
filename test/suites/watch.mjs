@@ -219,4 +219,68 @@ export async function watchTests() {
       await fs.rm(root, { recursive: true, force: true });
     }
   }
+
+  section('change scope: the prompt line names its repository');
+
+  {
+    const { describeChangeScope } = await import('../../lib/gitnexus/watch/change-scope.js');
+    /** @param {number} modified @param {number} added @param {number} deleted */
+    const delta = (modified, added = 0, deleted = 0) => ({
+      comparable: true,
+      counts: { modified, added, deleted },
+    });
+
+    check('no trackers says nothing', describeChangeScope([]) === '', describeChangeScope([]));
+    check(
+      'a clean tracker contributes nothing',
+      describeChangeScope([
+        { repoPath: 'C:\\work\\clean', delta: delta(0), deltaAt: '2026-11-04T10:00:00.000Z', risk: null },
+      ]) === '',
+    );
+    check(
+      'an incomparable tracker is not described',
+      describeChangeScope([
+        {
+          repoPath: 'C:\\work\\unindexed',
+          delta: { comparable: false, counts: { modified: 3, added: 0, deleted: 0 } },
+          deltaAt: '2026-11-04T10:00:00.000Z',
+          risk: null,
+        },
+      ]) === '',
+    );
+
+    const named = describeChangeScope([
+      { repoPath: 'C:\\work\\alpha', delta: delta(2, 1, 1), deltaAt: '2026-11-04T10:00:00.000Z', risk: null },
+    ]);
+    check(
+      'the line names the repository it describes',
+      named.includes('改动集（alpha）') && named.includes('2 改、1 增、1 删'),
+      named,
+    );
+    check(
+      'without an evaluation it says the dependency impact is unknown, not clear',
+      named.includes('依赖影响还没有评估'),
+      named,
+    );
+
+    // Two dirty projects: the one read most recently wins, so the sentence describes the
+    // newest evidence rather than whichever tracker happened to be inserted first.
+    const newest = describeChangeScope([
+      {
+        repoPath: 'C:\\work\\older',
+        delta: delta(5),
+        deltaAt: '2026-11-04T09:00:00.000Z',
+        risk: null,
+      },
+      {
+        repoPath: 'C:\\work\\newer',
+        delta: delta(1),
+        deltaAt: '2026-11-04T11:00:00.000Z',
+        risk: { evaluated: true, counts: { broken: 1, exposed: 2 } },
+      },
+    ]);
+    check('the most recently read change set is the one described', newest.includes('改动集（newer）'), newest);
+    check('and its risk counts ride along', newest.includes('1 处确定断裂、2 处暴露'), newest);
+    check('a sentence never mentions two repositories at once', !newest.includes('older'), newest);
+  }
 }

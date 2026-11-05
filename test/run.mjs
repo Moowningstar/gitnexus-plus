@@ -17,10 +17,11 @@ import { checkAdvertisedCount } from './claims.mjs';
 import { fixtureTests, discoveryTests, binaryTests, regressionTests, crossCheckTests, stalenessTests, capabilityTests, languageTests, commandTests, formatTests, compatibilityTests, graphQualityTests } from './suites/coverage.mjs';
 import { versionLinesTests } from './suites/version-lines.mjs';
 import { searchTests, ftsSearchTests, searchRouteTests } from './suites/search.mjs';
-import { routeTests, fileHistoryRouteTests } from './suites/routes.mjs';
+import { routeTests, fileHistoryRouteTests, ledgerRouteTests } from './suites/routes.mjs';
 import { checkoutRouteTests } from './suites/checkout-route.mjs';
 import { analyzeTests, installTests } from './suites/runners.mjs';
 import { deltaTests } from './suites/delta.mjs';
+import { ledgerTests } from './suites/ledger.mjs';
 import { freshnessTests } from './suites/freshness.mjs';
 import { coverageGateTests } from './suites/coverage-gate.mjs';
 import { storageStateTests } from './suites/storage-state.mjs';
@@ -69,12 +70,17 @@ export async function main() {
   await searchRouteTests();
   await routeTests();
   await fileHistoryRouteTests();
+  // The ledger route only projects a snapshot; its transitions have their own pure suite.
+  await ledgerRouteTests();
   await checkoutRouteTests();
   await analyzeTests();
   await installTests();
   // `deltaRouteTests` is not listed here: the delta suite invokes it itself, in both the
   // git-less skip path and the normal path, so awaiting it again would double-count.
   await deltaTests();
+  // Pure, like freshness: every transition is a function of two literals, so it runs even
+  // where spawning git is denied.
+  await ledgerTests();
   // Pure: the report is a literal, so this runs whether or not git is available here.
   await freshnessTests();
   // Same reason: the gate turns literal reports into a verdict, no index involved.

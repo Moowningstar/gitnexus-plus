@@ -3,7 +3,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
 import { contextDiagnostic, fileResourceAddress, openResource, openResourceIn, routeUrl, useProjectPath } from '../navigation';
 import { h } from '../primitives';
 import { type MaintenanceStartMode } from '../sections/maintenance';
-import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, ClientRisk, SlotProps } from '../types';
+import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientLedgerPayload, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, ClientRisk, SlotProps } from '../types';
 import { CoverageView } from './coverage-view';
 import { useGitnexusInstall } from './panel-install';
 import { useKeywordSearch } from './panel-search';
@@ -235,6 +235,11 @@ export function CoveragePanel(props: SlotProps) {
   const [riskRoute, setRiskRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
   /** Which project the current risk reading belongs to, so a switch can clear it. */
   const riskRepoRef = React.useRef<string | null>(null);
+  /** The dirty window the tracker observed, with the same three-way route state as risk. */
+  const [ledger, setLedger] = React.useState<ClientLedgerPayload | null>(null);
+  const [ledgerError, setLedgerError] = React.useState<string | null>(null);
+  const [ledgerRoute, setLedgerRoute] = React.useState<'unknown' | 'ready' | 'missing'>('unknown');
+  const ledgerRepoRef = React.useRef<string | null>(null);
   /** The bounded graph projection, its scope, and the load state around it. */
   const [graphProjection, setGraphProjection] = React.useState<ClientGraphProjection | null>(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
@@ -682,6 +687,71 @@ export function CoveragePanel(props: SlotProps) {
   }, [projectPath, riskRoute]);
 
   /**
+   * Poll the dirty window.
+   *
+   * Same cadence as the risk route and for the same reason: the tracker's debounce is 800 ms
+   * and its minimum gap 5 s, so a faster poll would read the same version twice. A 404 stops
+   * the loop for good — an older host will not grow the route while the panel is open, and a
+   * request every four seconds to be told that is noise.
+   */
+  React.useEffect(() => {
+    if (projectPath === null) return undefined;
+    if (ledgerRoute === 'missing') return undefined;
+    if (ledgerRepoRef.current !== projectPath) {
+      ledgerRepoRef.current = projectPath;
+      setLedger(null);
+      setLedgerError(null);
+    }
+    const controller = new AbortController();
+    const read = async (): Promise<void> => {
+      try {
+        const res = await fetch(routeUrl(`/api/gitnexus/ledger?repo=${encodeURIComponent(projectPath)}`), {
+          signal: controller.signal,
+        });
+        if (res.status === 404) {
+          if (!controller.signal.aborted) {
+            setLedger(null);
+            setLedgerError(null);
+            setLedgerRoute('missing');
+          }
+          return;
+        }
+        setLedgerRoute('ready');
+        const body = (await res.json().catch(() => null)) as
+          | ({ ok?: boolean; message?: string } & Partial<ClientLedgerPayload>)
+          | null;
+        if (controller.signal.aborted) return;
+        if (!body?.ok || body.version === undefined) {
+          setLedgerError(typeof body?.message === 'string' ? body.message : `会话账本读取失败 (${res.status})`);
+          return;
+        }
+        const next: ClientLedgerPayload = {
+          repo: typeof body.repo === 'string' ? body.repo : projectPath,
+          tracking: body.tracking === true,
+          degraded: body.degraded ?? null,
+          ledger: body.ledger ?? null,
+          pending: Array.isArray(body.pending) ? body.pending : [],
+          version: body.version,
+        };
+        // Only a moved version is worth a re-render: the route answers every four seconds.
+        setLedger((previous) => (previous !== null && previous.version === next.version ? previous : next));
+        setLedgerError(null);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        setLedgerError(String((cause as Error)?.message ?? cause));
+      }
+    };
+    void read();
+    const id = setInterval(() => {
+      void read();
+    }, 4000);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, [projectPath, ledgerRoute]);
+
+  /**
    * Read the graph projection for the current scope.
    *
    * Two views, one endpoint: the overview is the default, and a scope switches to the
@@ -858,6 +928,9 @@ export function CoveragePanel(props: SlotProps) {
     risk,
     riskError,
     riskRoute,
+    ledger,
+    ledgerError,
+    ledgerRoute,
     // `tick` is read here rather than inside the card, so elapsed seconds re-render
     // even when the host reports nothing new — a run with no output for a minute
     // otherwise looks frozen.

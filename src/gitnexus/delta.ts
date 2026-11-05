@@ -76,7 +76,43 @@ export interface DeltaEntry {
   kind: DeltaKind;
   /** why this path was classified as excluded; null for every other kind */
   reason: string | null;
+  /**
+   * Content hash of the working-tree file, when one was computed.
+   *
+   * `modified` always has it — the comparison hashed the file anyway. `added` has it
+   * only when the caller asked (`hashAdded`), because hashing new files is the one cost
+   * a caller can reasonably decline. `deleted` and `excluded` are null: there is no
+   * content left to hash.
+   */
+  hash?: string | null;
 }
+
+/**
+ * Whether a symbol-level answer is even possible for this change set.
+ *
+ * `detect_changes` maps changed paths to indexed symbols. Script-shaped files — the
+ * `src/bin/*.ts` entry points and the test runners, whose whole body is top-level
+ * statements with no function declarations — carry no symbols, so that mapping comes back
+ * partial no matter how fresh the index is. Reporting "partial" alone reads as a broken
+ * index; saying "symbol attribution does not apply here" is the honest answer.
+ *
+ * - `symbols` — the change set has at least one path the index holds, so symbol-level
+ *   attribution is meaningful (also the answer for an empty change set: nothing to say).
+ * - `not-applicable` — every changed path is outside `fileHashes`: the index does not
+ *   hold these files at all, so there are no symbols to attribute.
+ * - `unknown` — only excluded entries, or nothing comparable at all: the index's policy
+ *   (not the change) is what hides the paths.
+ */
+export type SymbolAttribution = 'symbols' | 'not-applicable' | 'unknown';
+
+/**
+ * The sentence for `not-applicable`, worded once.
+ *
+ * It is not "the index is stale" — refreshing cannot add symbols to a file the index does
+ * not hold — and it is not a compile result. `test/suites/delta.mjs` pins the text.
+ */
+export const SYMBOL_ATTRIBUTION_NOTICE =
+  '本次改动全部落在索引未覆盖的文件（脚本/测试入口/文档），符号归因不适用——这不是索引过期。';
 
 /** Which side the candidate set came from. */
 export type DeltaBasis =
@@ -155,6 +191,11 @@ export interface DeltaReport {
   truncated: boolean;
   /** operator-facing explanation of the verdict, in order of importance */
   notes: string[];
+  /**
+   * Whether symbol-level attribution applies to this change set. See
+   * {@link SymbolAttribution}; `unknown` when there is nothing to compare against.
+   */
+  attribution: SymbolAttribution;
   /** Which maintenance tier the evidence supports. */
   advice: RefreshAdvice;
   durationMs: number;
@@ -172,6 +213,12 @@ export interface DeltaOptions {
   hashConcurrency?: number;
   /** `git` timeout for one call. */
   gitTimeoutMs?: number;
+  /**
+   * Hash `added` files as well, so a caller can tell "added, then edited again" from
+   * "added once". Off by default: the refresh decision does not need it, and the
+   * hashed count is the cost signal the panel prints.
+   */
+  hashAdded?: boolean;
   now?: () => number;
 }
 
@@ -327,6 +374,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
   const absRepo = path.resolve(repoPath);
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
   const concurrency = Math.max(1, options.hashConcurrency ?? DEFAULT_HASH_CONCURRENCY);
+  const hashAdded = options.hashAdded === true;
   const gitTimeoutMs = options.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS;
 
   const empty = (patch: Partial<DeltaReport>): DeltaReport => ({
@@ -342,6 +390,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     certain: false,
     truncated: false,
     notes: [],
+    attribution: 'unknown',
     advice: { tier: 'unknown', label: '无法判断', reason: '索引无法与工作区比较' },
     durationMs: now() - startedAt,
     readAt: new Date().toISOString(),
@@ -516,7 +565,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
         } catch {
           // Gone from the working tree. Only worth reporting when the index had it;
           // an untracked file deleted between `ls-files` and this stat is not news.
-          return hashByKey.has(key) ? { path: key, kind: 'deleted', reason: null } : null;
+          return hashByKey.has(key) ? { path: key, kind: 'deleted', reason: null, hash: null } : null;
         }
 
         const recorded = hashByKey.get(key);
@@ -527,21 +576,36 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
               path: key,
               kind: 'excluded',
               reason: `超过索引记录的大小上限（${formatBytes(cap)}），刷新也会被跳过`,
+              hash: null,
             };
           }
-          if (repoNew.has(key)) return { path: key, kind: 'added', reason: null };
+          if (repoNew.has(key)) {
+            // `hashAdded` is off for the refresh decision (a new file is new either way)
+            // and on for the ledger, which needs the hash to notice a second edit.
+            const addedHash = hashAdded ? await hashFile(absolute) : null;
+            if (addedHash !== null) counts.hashed += 1;
+            return { path: key, kind: 'added', reason: null, hash: addedHash };
+          }
           // Tracked and modified, yet the manifest has no hash: either the index knows
           // this type and the file fell through (a real gap worth a refresh), or the
           // index never covers this type at all (`.gitignore`, `Makefile`, a binary).
           // Treating the second as "added" kept the gate saying 索引落后 for a file the
           // graph cannot use, until the edit happened to be committed.
           if (indexedExtensions.has(extensionOf(key))) {
-            return { path: key, kind: 'added', reason: '索引里没有这个文件，但索引收录同类文件' };
+            const addedHash = hashAdded ? await hashFile(absolute) : null;
+            if (addedHash !== null) counts.hashed += 1;
+            return {
+              path: key,
+              kind: 'added',
+              reason: '索引里没有这个文件，但索引收录同类文件',
+              hash: addedHash,
+            };
           }
           return {
             path: key,
             kind: 'excluded',
             reason: '索引不收录该文件类型（索引里没有同类文件），刷新也不会收录',
+            hash: null,
           };
         }
 
@@ -551,13 +615,13 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
           // Unreadable is not unchanged. Treating it as modified makes the panel ask
           // for a refresh; treating it as unchanged would report a stale index as
           // current, which is the one error this module exists to prevent.
-          return { path: key, kind: 'modified', reason: '无法读取文件内容，按已变更处理' };
+          return { path: key, kind: 'modified', reason: '无法读取文件内容，按已变更处理', hash: null };
         }
         if (current === recorded) {
           counts.unchanged += 1;
           return null;
         }
-        return { path: key, kind: 'modified', reason: null };
+        return { path: key, kind: 'modified', reason: null, hash: current };
       }),
     );
     for (const entry of settled) {
@@ -608,6 +672,18 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     notes.unshift(`索引内容已落后：${parts.join('、')}`);
   }
 
+  const changed = entries.filter((entry) => entry.kind !== 'excluded');
+  // The index holds this path only if it recorded a hash for it. `entries` paths are
+  // already in `hashByKey`'s key form, so this is a plain lookup, not a re-normalization.
+  const attribution: SymbolAttribution =
+    changed.length === 0
+      ? entries.length === 0
+        ? 'symbols'
+        : 'unknown'
+      : changed.some((entry) => hashByKey.has(entry.path))
+        ? 'symbols'
+        : 'not-applicable';
+
   const verdict = {
     repoPath: absRepo,
     indexed: true,
@@ -621,6 +697,7 @@ export async function readDelta(repoPath: string, options: DeltaOptions = {}): P
     certain,
     truncated,
     notes,
+    attribution,
     durationMs: now() - startedAt,
     readAt: new Date().toISOString(),
   };
@@ -643,8 +720,11 @@ export function describeDelta(report: DeltaReport): string {
     .map((entry) => `${entry.kind === 'modified' ? 'M' : entry.kind === 'added' ? 'A' : 'D'} ${entry.path}`)
     .join('\n');
   const more = changed.length > 10 ? `\n…还有 ${changed.length - 10} 个` : '';
+  // The notice travels with the verdict, not instead of it: the refresh is still worth
+  // running, but nothing about this change set can be attributed to symbols.
+  const attributionLine = report.attribution === 'not-applicable' ? `\n${SYMBOL_ATTRIBUTION_NOTICE}` : '';
   return (
     `需要刷新：${report.counts.modified} 改 / ${report.counts.added} 增 / ${report.counts.deleted} 删` +
-    `（${report.durationMs}ms）\n${preview}${more}`
+    `（${report.durationMs}ms）\n${preview}${more}${attributionLine}`
   );
 }

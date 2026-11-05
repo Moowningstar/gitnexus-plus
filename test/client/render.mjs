@@ -926,6 +926,23 @@ export function renderSuite(ctx) {
   });
   check('a search error is surfaced', searchFailed.text.includes('图查询失败'), searchFailed.text.slice(0, 400));
 
+  // A 409 from the storage gate must reach the card as the host wrote it: the panel's
+  // own "还没有索引" line would be the wrong claim about a store that exists.
+  const foreignStore = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    search: {
+      ...search,
+      results: null,
+      error: '索引存储不可用（foreign）：归属元数据记录的是另一个检出。按当前检出使用前需要全量重建（--force）。',
+    },
+  });
+  check(
+    'a foreign-store refusal is shown word for word',
+    foreignStore.text.includes('归属元数据记录的是另一个检出') && foreignStore.text.includes('（foreign）'),
+    foreignStore.text.slice(0, 500),
+  );
+
   const textFallback = render(I.CoverageView, {
     report,
     ...viewProps,
@@ -1183,6 +1200,120 @@ export function renderSuite(ctx) {
     'a live change set outranks the scan caveats instead of sitting beside them',
     driftWithDelta.text.includes('相对索引的改动') && !driftWithDelta.text.includes('索引与工作树'),
     driftWithDelta.text.slice(0, 1600),
+  );
+
+  // ---------------------------------------------------------------------------
+  // The session ledger. Its three empty states are the whole contract: a clean tree, a
+  // tracker that could not start, and a host without the route. Writing all three as
+  // 「没有改动」 would let a broken tracker look like a clean tree.
+
+  const ledgerWindow = (patch = {}) => ({
+    repo: 'D:\\demo',
+    tracking: true,
+    degraded: null,
+    ledger: {
+      repoPath: 'D:\\demo',
+      windowId: 'w1',
+      openedAt: '2026-11-04T10:00:00.000Z',
+      closedAt: null,
+      closeReason: null,
+      files: [
+        {
+          path: 'src/dep/kept.ts',
+          kind: 'modified',
+          firstSeenAt: '2026-11-04T10:00:00.000Z',
+          lastSeenAt: '2026-11-04T10:02:00.000Z',
+          changes: 2,
+          inIndex: true,
+        },
+        {
+          path: 'src/new/thing.ts',
+          kind: 'added',
+          firstSeenAt: '2026-11-04T10:01:00.000Z',
+          lastSeenAt: '2026-11-04T10:01:00.000Z',
+          changes: 1,
+          inIndex: false,
+        },
+      ],
+      counts: { modified: 1, added: 1, deleted: 0, unindexed: 1 },
+      excluded: 0,
+      truncated: false,
+      evidence: 'hash',
+    },
+    pending: [],
+    version: 3,
+    ...patch,
+  });
+  const ledgerProps = (payload) => ({ report, ...viewProps, ledger: payload, ledgerError: null, ledgerRoute: 'ready' });
+
+  const openLedger = render(I.CoverageView, ledgerProps(ledgerWindow()));
+  check(
+    'the ledger names the window and what changed in it',
+    openLedger.text.includes('本次会话') &&
+      openLedger.text.includes('本窗进行中') &&
+      openLedger.text.includes('src/dep/kept.ts') &&
+      openLedger.text.includes('×2'),
+    openLedger.text.slice(0, 1600),
+  );
+  check(
+    'an added file that is not indexed says so',
+    openLedger.text.includes('src/new/thing.ts') && openLedger.text.includes('不在索引'),
+    openLedger.text.slice(0, 1600),
+  );
+
+  const stoppedLedger = render(
+    I.CoverageView,
+    ledgerProps({ ...ledgerWindow(), tracking: false, ledger: null, degraded: '索引当前不可用，未监听改动。' }),
+  );
+  check(
+    'a tracker that is not running is not read as a clean tree',
+    stoppedLedger.text.includes('未在监听') &&
+      stoppedLedger.text.includes('没有窗口可以显示') &&
+      !stoppedLedger.text.includes('工作树是干净的'),
+    stoppedLedger.text.slice(0, 1400),
+  );
+
+  const cleanLedger = render(I.CoverageView, ledgerProps({ ...ledgerWindow(), ledger: null }));
+  check(
+    'a clean tree says the window has not opened yet',
+    cleanLedger.text.includes('本窗还没有改动') && cleanLedger.text.includes('工作树是干净的'),
+    cleanLedger.text.slice(0, 1200),
+  );
+
+  const oldHostLedger = render(I.CoverageView, { report, ...viewProps, ledgerRoute: 'missing' });
+  check(
+    'a host without the ledger route says so',
+    oldHostLedger.text.includes('宿主未挂载账本路由') && !oldHostLedger.text.includes('本窗还没有改动'),
+    oldHostLedger.text.slice(0, 1200),
+  );
+
+  const closedLedger = render(
+    I.CoverageView,
+    ledgerProps({
+      ...ledgerWindow(),
+      ledger: { ...ledgerWindow().ledger, closedAt: '2026-11-04T10:30:00.000Z', closeReason: 'clean' },
+    }),
+  );
+  check(
+    'a closed window keeps its files and names the reason',
+    closedLedger.text.includes('本窗已结束（工作树干净）') && closedLedger.text.includes('src/dep/kept.ts'),
+    closedLedger.text.slice(0, 1400),
+  );
+
+  const pendingLedger = render(
+    I.CoverageView,
+    ledgerProps({
+      ...ledgerWindow(),
+      ledger: { ...ledgerWindow().ledger, evidence: 'pending' },
+      pending: ['src/dep/kept.ts'],
+    }),
+  );
+  check(
+    'an unhashed observation is labelled, not presented as proof',
+    pendingLedger.text.includes('尚未核对') &&
+      pendingLedger.text.includes('还没和索引比过哈希') &&
+      pendingLedger.text.includes('刚写入、尚未计入'),
+    pendingLedger.text.slice(0, 1600),
   );
 
   // ---------------------------------------------------------------------------

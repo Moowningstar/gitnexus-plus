@@ -436,6 +436,11 @@ export interface ClientDelta {
   certain?: boolean;
   truncated: boolean;
   notes: string[];
+  /**
+   * Whether symbol-level attribution applies to this change set. Absent on hosts before
+   * 0.1.12; an absent value must not produce a notice the host never sent.
+   */
+  attribution?: 'symbols' | 'not-applicable' | 'unknown';
   /** Absent on hosts before the advice field; the UI falls back to needsRefresh. */
   advice?: {
     tier: 'none' | 'incremental' | 'reanalyze' | 'rebuild' | 'init' | 'unknown';
@@ -509,6 +514,42 @@ export interface ClientRisk {
   version: number;
 }
 
+/** One file the dirty window observed, and how often its content actually changed. */
+export interface ClientLedgerFile {
+  path: string;
+  kind: 'modified' | 'added' | 'deleted';
+  firstSeenAt: string;
+  lastSeenAt: string;
+  changes: number;
+  inIndex: boolean;
+}
+
+/**
+ * What `GET /api/gitnexus/ledger` returns.
+ *
+ * `ledger: null` is the "no window yet" state — a clean tree, not "nothing changed":
+ * a window opens on the first non-empty comparison, so a session that never dirtied
+ * the tree has nothing to report and says so.
+ */
+export interface ClientLedgerPayload {
+  repo: string;
+  tracking: boolean;
+  degraded: string | null;
+  ledger: {
+    repoPath: string;
+    windowId: string;
+    openedAt: string;
+    closedAt: string | null;
+    closeReason: 'clean' | 'head' | 'idle' | null;
+    files: ClientLedgerFile[];
+    counts: { modified: number; added: number; deleted: number; unindexed: number };
+    excluded: number;
+    truncated: boolean;
+    evidence: 'hash' | 'pending';
+  } | null;
+  pending: string[];
+  version: number;
+}
 /** A drawn node: a community in the overview, a symbol in a drill-down. */
 export interface ClientGraphNode {
   id: string;

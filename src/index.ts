@@ -43,6 +43,7 @@ import { mountFileDiffRoute } from './routes/file-diff.js';
 import { mountDeltaRoute } from './routes/delta.js';
 import { mountGraphRoute } from './routes/graph.js';
 import { mountRiskRoute, type RiskRoutePayload } from './routes/risk.js';
+import { mountLedgerRoute } from './routes/ledger.js';
 import { mountWebViewRoute } from './routes/webview.js';
 import { hasGitMarker } from './gitnexus/index-meta.js';
 import { checkoutBranch, readCommitDiff, readFileActivity } from './gitnexus/git-activity.js';
@@ -61,6 +62,7 @@ import {
 } from './gitnexus/precheck.js';
 import { readIndexStamp } from './gitnexus/watch/stamps.js';
 import { RepoTracker, TrackerRegistry } from './gitnexus/watch/registry.js';
+import { describeChangeScope } from './gitnexus/watch/change-scope.js';
 import { projectViaHelper } from './gitnexus/graph.js';
 import { runGraphTool, type GraphToolName } from './gitnexus/graph-query.js';
 import { renderTool } from './gitnexus/graph-query-render.js';
@@ -602,28 +604,26 @@ export function apply(ctx: Context, config: PluginConfig): void {
    * the freshness line: a prompt that repeats "no changes" on every turn trains the model to
    * ignore it.
    */
+  /**
+   * The sentence the system prompt carries about the change set.
+   *
+   * Written as one line and `''` when there is nothing to say, following the same doctrine as
+   * the freshness line: a prompt that repeats "no changes" on every turn trains the model to
+   * ignore it.
+   *
+   * Selection and wording live in `gitnexus/watch/change-scope.ts`, where they are testable
+   * without a filesystem — the previous inline version described whichever tracker was
+   * dirty first, with no subject, so a clean checkout's agent could be told about another
+   * project's change set. What stays here is the part the pure function cannot own: never
+   * throwing while a tracker is mid-teardown.
+   */
   const changeScopeContext = (): string => {
     try {
-      for (const tracker of trackerRegistry.list()) {
-        const snapshot = tracker.snapshot();
-        const delta = snapshot.delta;
-        if (delta === null || delta.comparable !== true) continue;
-        const counts = delta.counts;
-        if (counts.modified + counts.added + counts.deleted === 0) continue;
-        const risk = snapshot.risk;
-        const tail =
-          risk !== null && risk.evaluated
-            ? `；结构上 ${risk.counts.broken} 处确定断裂、${risk.counts.exposed} 处暴露（不是编译结论）`
-            : '；依赖影响还没有评估';
-        return (
-          `改动集：${counts.modified} 改、${counts.added} 增、${counts.deleted} 删${tail}。` +
-          '改被多处引用的文件之前，先用 gitnexus_risk 看辐射范围。'
-        );
-      }
+      return describeChangeScope(trackerRegistry.list().map((tracker) => tracker.snapshot()));
     } catch {
       // Assembling a prompt must not fail because a tracker is mid-teardown.
+      return '';
     }
-    return '';
   };
 
   if (config.precheck) {
@@ -1455,6 +1455,19 @@ export function apply(ctx: Context, config: PluginConfig): void {
         // caller then waits on.
         mountRiskRoute(svcCtx.webServer, {
           read: (repoPath) => riskPayloadFor(repoPath),
+        }),
+        // The dirty window the tracker observed, read-only like `/risk`: the route reports
+        // `pending` paths rather than starting an evaluation the caller then waits on.
+        mountLedgerRoute(svcCtx.webServer, {
+          read: (repoPath) => {
+            const tracker = trackerFor(repoPath);
+            void tracker.ensureStarted();
+            const snapshot = tracker.snapshot();
+            // Kick an evaluation the same way `/risk` does, but answer from the snapshot on
+            // hand: a poller that waited for the result would serialize on the tracker.
+            void tracker.settle();
+            return snapshot;
+          },
         }),
         mountAnalyzeRoute(svcCtx.webServer, {
           start: (repoPath, options) => analyze.start(repoPath, options),

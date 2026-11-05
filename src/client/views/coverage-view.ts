@@ -18,11 +18,12 @@ import { MemoizedLanguageSection } from '../sections/languages';
 import { LargeFileList } from '../sections/large-files';
 import { MaintenanceSection, type MaintenanceStartMode } from '../sections/maintenance';
 import { RiskSection } from '../sections/risk-card';
+import { LedgerSection } from '../sections/ledger-card';
 import { WorkspaceOverview } from '../sections/workspace';
 import { SearchSection } from '../sections/search';
 import { GraphSection } from '../sections/graph';
 import { WebViewSection } from '../sections/webview';
-import { ClientAnalyzeRun, ClientDelta, ClientInstallRun, ClientMaintenance, ClientProject, ClientReport, ClientRisk, ContextDiagnostic, GraphViewState, SearchViewState } from '../types';
+import { ClientAnalyzeRun, ClientDelta, ClientInstallRun, ClientLedgerPayload, ClientMaintenance, ClientProject, ClientReport, ClientRisk, ContextDiagnostic, GraphViewState, SearchViewState } from '../types';
 export interface CoverageViewProps {
   report: ClientReport | null;
   maintenance: ClientMaintenance | null | undefined;
@@ -88,6 +89,11 @@ export interface CoverageViewProps {
   riskError?: string | null;
   /** Whether the host mounted the risk route; `missing` is named, not swallowed. */
   riskRoute?: 'unknown' | 'ready' | 'missing';
+  /** The dirty window the tracker observed: what this session changed, counted. */
+  ledger?: ClientLedgerPayload | null;
+  ledgerError?: string | null;
+  /** Whether the host mounted the ledger route; `missing` is named, not swallowed. */
+  ledgerRoute?: 'unknown' | 'ready' | 'missing';
   onRefresh: () => void;
   onStartRun: (mode?: MaintenanceStartMode) => void;
   onCancelRun: () => void;
@@ -219,6 +225,9 @@ export function CoverageView({
   risk = null,
   riskError = null,
   riskRoute = 'unknown',
+  ledger = null,
+  ledgerError = null,
+  ledgerRoute = 'unknown',
   onRefresh,
   onStartRun,
   onCancelRun,
@@ -1184,6 +1193,35 @@ export function CoverageView({
             ),
           },
           h(RiskSection, { risk, route: riskRoute, error: riskError, drift: driftWarnings }),
+        )
+      : null,
+
+    // Second half of "what did this session do": the alarm says what the change set reaches,
+    // the ledger says what the window actually saw — including the edits that were saved
+    // twice and the ones that never made it into a commit. Same area on purpose: they answer
+    // one question, and splitting them across cards would make the reader reconcile two
+    // windows by eye.
+    indexed && (ledger !== null || ledgerRoute !== 'unknown')
+      ? h(
+          Section,
+          {
+            wide: true,
+            title: '本次会话',
+            meta: h(
+              'span',
+              { style: { ...MUTED, fontSize: '11px' } },
+              ledgerRoute === 'missing'
+                ? '宿主未挂载账本路由'
+                : ledger === null
+                  ? '读取中…'
+                  : ledger.ledger === null
+                    ? '本窗还没有改动'
+                    : ledger.ledger.closedAt === null
+                      ? '进行中'
+                      : '已关窗',
+            ),
+          },
+          h(LedgerSection, { payload: ledger, route: ledgerRoute, error: ledgerError }),
         )
       : null,
 

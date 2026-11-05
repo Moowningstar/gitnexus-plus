@@ -22,6 +22,8 @@
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { readDelta, type DeltaReport } from '../delta.js';
+import { readIndexMeta } from '../index-meta.js';
+import { closeLedger, materialize, tickLedger, type LedgerState, type SessionLedger } from '../ledger.js';
 import { evaluateRisk, riskLine, unknownRisk, type RiskReport } from '../risk.js';
 import type { Runner } from '../../subprocess.js';
 import { readStorageState } from '../storage-state.js';
@@ -94,6 +96,14 @@ export interface TrackerSnapshot {
    * appears here the moment it is written, before any hash has been compared.
    */
   recent: TrackerRecentChange[];
+  /**
+   * The dirty window this tracker observed, or null before the first one.
+   *
+   * `files` counts what changed *during the window*, which the change set cannot show:
+   * a file saved three times and then reverted is one `deleted` entry in `delta` and
+   * one entry with `changes: 3` here.
+   */
+  ledger: SessionLedger | null;
   /** ISO time of the last coalesced change, or null when nothing has moved yet. */
   lastChangeAt: string | null;
   /** True while an evaluation is running. */
@@ -162,6 +172,9 @@ export class RepoTracker {
   private inFlight: Promise<void> | null = null;
   private lastRiskKey: string | null = null;
   private recent: TrackerRecentChange[] = [];
+  private ledger: LedgerState | null = null;
+  /** Window ids only need to be unique inside one tracker. */
+  private ledgerSeq = 0;
   private lastChangeAt: string | null = null;
 
   constructor(options: TrackerOptions) {
@@ -205,7 +218,11 @@ export class RepoTracker {
     this.gitSig.set(this.gitStampValue());
     this.indexSig.set(readIndexStamp(this.repoPath));
 
-    this.deltaSource = derived(() => readDelta(this.repoPath), [this.fsSeq, this.gitSig, this.indexSig]);
+    this.deltaSource = derived(() => readDelta(this.repoPath, { hashAdded: true }), [
+      this.fsSeq,
+      this.gitSig,
+      this.indexSig,
+    ]);
 
     this.idleTimer = setInterval(() => this.checkIdle(), 60_000);
     this.idleTimer.unref?.();
@@ -246,6 +263,9 @@ export class RepoTracker {
 
   /** Drop the watcher but keep what was learned; the next access restarts it. */
   private stopWatching(reason: string): void {
+    // The window is frozen, not dropped: "what did this session change" is usually asked
+    // after the watcher stopped, and a discarded window cannot answer it.
+    if (this.ledger !== null) closeLedger(this.ledger, 'idle', new Date(this.now()));
     this.watch?.close();
     this.watch = null;
     if (this.idleTimer !== null) clearInterval(this.idleTimer);
@@ -269,9 +289,19 @@ export class RepoTracker {
       try {
         // The delta node dedupes on the stamp versions, so two evaluations of an unchanged
         // tree cost one hash pass — and the risk query is then skipped by the change key.
-        const delta = this.deltaSource === null ? await readDelta(this.repoPath) : await this.deltaSource.get();
+        const delta = this.deltaSource === null
+          ? await readDelta(this.repoPath, { hashAdded: true })
+          : await this.deltaSource.get();
         const key = changeKey(delta);
         this.delta = delta;
+        // The ledger needs the manifest's own file list to tell "indexed" from "new", and
+        // `hashAdded` above so a file added and then edited twice is two changes.
+        const meta = await readIndexMeta(this.repoPath);
+        const tick = tickLedger(this.ledger, delta, new Date(), {
+          indexedPaths: new Set(Object.keys(meta?.fileHashes ?? {})),
+          windowId: () => `${Date.now()}-${++this.ledgerSeq}`,
+        });
+        this.ledger = tick.state;
         this.gitSig.set(await this.fullGitStamp());
         this.indexSig.set(readIndexStamp(this.repoPath));
         if (!delta.comparable) {
@@ -342,6 +372,7 @@ export class RepoTracker {
       risk: this.risk,
       evaluatedAt: this.evaluatedAt,
       recent: this.recent,
+      ledger: this.ledger === null ? null : materialize(this.ledger),
       lastChangeAt: this.lastChangeAt,
       busy: this.busy,
       version: this.version,

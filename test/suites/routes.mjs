@@ -407,3 +407,130 @@ export async function fileHistoryRouteTests() {
   dispose();
   check('file history disposer clears the registration', registered.length === 0);
 }
+
+/**
+ * `GET /api/gitnexus/ledger` — the dirty window, and the three "nothing here" cases.
+ *
+ * The tracker itself is stubbed: this route only projects a snapshot, and the transitions
+ * that fill it are covered by the pure ledger suite. What is asserted here is the wire
+ * contract — the payload shape, the pending gap, and the refusals.
+ */
+export async function ledgerRouteTests() {
+  section('route: /api/gitnexus/ledger guards');
+  const http = await import('node:http');
+  const { mountLedgerRoute } = await import('../../lib/routes/ledger.js');
+
+  const registered = [];
+  const shimServer = {
+    register: (route) => {
+      registered.push(route);
+      return () => {
+        registered.splice(registered.indexOf(route), 1);
+      };
+    },
+  };
+
+  const project = fixturePath('ledger-route');
+  await fs.rm(project, { recursive: true, force: true });
+  await fs.mkdir(path.join(project, '.gitnexus'), { recursive: true });
+
+  /** Mutable, so the same route can answer the open-window and the not-tracking case. */
+  let snapshot = {
+    repoPath: project,
+    watching: true,
+    live: true,
+    degraded: null,
+    delta: null,
+    deltaAt: null,
+    risk: null,
+    evaluatedAt: null,
+    recent: [
+      { path: 'src/a.ts', at: '2026-11-04T10:00:10.000Z' },
+      { path: 'src/old.ts', at: '2026-11-04T09:59:00.000Z' },
+    ],
+    ledger: {
+      repoPath: project,
+      windowId: 'w1',
+      openedAt: '2026-11-04T10:00:00.000Z',
+      closedAt: null,
+      closeReason: null,
+      files: [
+        {
+          path: 'src/a.ts',
+          kind: 'modified',
+          firstSeenAt: '2026-11-04T10:00:00.000Z',
+          lastSeenAt: '2026-11-04T10:00:00.000Z',
+          changes: 2,
+          inIndex: true,
+        },
+      ],
+      counts: { modified: 1, added: 0, deleted: 0, unindexed: 0 },
+      excluded: 0,
+      truncated: false,
+      evidence: 'hash',
+    },
+    lastChangeAt: '2026-11-04T10:00:10.000Z',
+    busy: false,
+    version: 7,
+  };
+
+  const reads = [];
+  const dispose = mountLedgerRoute(shimServer, {
+    read: (repoPath) => {
+      reads.push(repoPath);
+      return snapshot;
+    },
+  });
+  check('ledger route registered', registered.length === 1 && registered[0].path === '/api/gitnexus/ledger');
+
+  const server = http.createServer((req, res) => {
+    const match = registered.find((route) => (req.url ?? '').startsWith(route.path));
+    if (match !== undefined) {
+      void match.handler(req, res);
+      return;
+    }
+    res.statusCode = 404;
+    res.end('no route');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const hit = async (suffix, init) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/gitnexus/ledger${suffix}`, init);
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+
+  const ok = await hit(`?repo=${encodeURIComponent(project)}`);
+  check('an open window is answered', ok.status === 200 && ok.body?.ok === true, `status=${ok.status}`);
+  check('the payload names the repository', ok.body?.repo === project, JSON.stringify(ok.body?.repo));
+  check('the window ships whole', ok.body?.ledger?.windowId === 'w1' && ok.body.ledger.files[0].changes === 2);
+  check('the wire carries the version a poller dedupes on', ok.body?.version === 7, String(ok.body?.version));
+  check('the engine was asked once', reads.length === 1, JSON.stringify(reads));
+
+  // The gap is real: a save arrives before any comparison runs. Both paths are newer than
+  // what the window counted — one was counted before the write, one was never counted —
+  // and both are pending, newest first.
+  check(
+    'writes the window has not counted yet are pending, newest first',
+    JSON.stringify(ok.body?.pending) === JSON.stringify(['src/a.ts', 'src/old.ts']),
+    JSON.stringify(ok.body?.pending),
+  );
+
+  // Not tracking is not "clean": the flag and the reason both have to reach the panel.
+  snapshot = { ...snapshot, watching: false, degraded: '索引当前不可用，未监听改动。', ledger: null, recent: [], version: 8 };
+  const stopped = await hit(`?repo=${encodeURIComponent(project)}`);
+  check('a stopped tracker reports tracking:false', stopped.body?.tracking === false, JSON.stringify(stopped.body?.tracking));
+  check('and carries its reason', String(stopped.body?.degraded ?? '').includes('未监听改动'), JSON.stringify(stopped.body?.degraded));
+  check('with no window, not an empty one', stopped.body?.ledger === null, JSON.stringify(stopped.body?.ledger));
+
+  const missing = await hit('');
+  check('a missing repo is a 400', missing.status === 400 && missing.body?.code === 'missing-repo');
+  const absent = await hit(`?repo=${encodeURIComponent(path.join(project, 'nope'))}`);
+  check('a directory that does not exist is refused', absent.status === 404, `status=${absent.status}`);
+
+  const posted = await hit(`?repo=${encodeURIComponent(project)}`, { method: 'POST' });
+  check('the ledger route does not accept POST', posted.status === 405, `status=${posted.status}`);
+
+  dispose();
+  await new Promise((resolve) => server.close(resolve));
+  check('the ledger disposer clears the registration', registered.length === 0);
+}

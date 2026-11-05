@@ -69,6 +69,46 @@ export function graphSuite(ctx) {
       dirtyGate.text.includes('D src/b.ts'),
     dirtyGate.text.slice(-800),
   );
+  check(
+    'a change set that needs no attribution says nothing about symbols',
+    !dirtyGate.text.includes('符号归因不适用'),
+    dirtyGate.text.slice(-800),
+  );
+
+  // Script-shaped files have no symbols; "partial" from detect_changes is not a stale
+  // index. The gate says so on the same verdict line rather than adding a card.
+  const unindexedGate = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    delta: withDelta({
+      needsRefresh: true,
+      attribution: 'not-applicable',
+      counts: { checked: 2, hashed: 1, unchanged: 1, modified: 1, added: 0, deleted: 0, excluded: 0 },
+      entries: [{ path: 'src/bin/cli.ts', kind: 'modified', reason: null }],
+      notes: ['索引内容已落后：1 个修改'],
+    }),
+  });
+  check(
+    'a change set outside the index says symbol attribution does not apply',
+    unindexedGate.text.includes('符号归因不适用') && unindexedGate.text.includes('这不是索引过期'),
+    unindexedGate.text.slice(-800),
+  );
+
+  const oldHostGate = render(I.CoverageView, {
+    report,
+    ...viewProps,
+    delta: withDelta({
+      needsRefresh: true,
+      counts: { checked: 1, hashed: 1, unchanged: 0, modified: 1, added: 0, deleted: 0, excluded: 0 },
+      entries: [{ path: 'src/a.ts', kind: 'modified', reason: null }],
+      notes: ['索引内容已落后：1 个修改'],
+    }),
+  });
+  check(
+    'a host before 0.1.12 sends no attribution and gains no notice',
+    !oldHostGate.text.includes('符号归因不适用'),
+    oldHostGate.text.slice(-800),
+  );
 
   const excludedGate = render(I.CoverageView, {
     report,

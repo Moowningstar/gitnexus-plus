@@ -350,6 +350,34 @@ export async function deltaTests() {
     check('and it does ask for a refresh', report.needsRefresh === true, JSON.stringify(report.counts));
   }
 
+  // --- the ledger's hash opt-in: an added file is hashed only when asked -------------
+  // The refresh verdict does not need the byte hash of a file it has never indexed — it is
+  // new either way. The ledger does: "added, then edited" is two changes, and only the hash
+  // can tell the second save from the first.
+  {
+    const fixture = await build('hash-added', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index();
+    await fs.writeFile(path.join(fixture.root, 'src', 'new.ts'), 'export const n = 1;\n');
+
+    const plain = await readDelta(fixture.root);
+    const added = plain.entries.find((entry) => entry.path === 'src/new.ts');
+    check(
+      'by default an added file carries no hash',
+      added !== undefined && (added.hash ?? null) === null,
+      JSON.stringify(added),
+    );
+    check('and no hash is charged for it', plain.counts.hashed === 0, JSON.stringify(plain.counts));
+
+    const hashed = await readDelta(fixture.root, { hashAdded: true });
+    const withHash = hashed.entries.find((entry) => entry.path === 'src/new.ts');
+    check(
+      'hashAdded records the content hash',
+      typeof withHash?.hash === 'string' && withHash.hash.length === 64,
+      JSON.stringify(withHash),
+    );
+    check('and charges the hash pass', hashed.counts.hashed === 1, JSON.stringify(hashed.counts));
+  }
+
   // --- a gap in a type the index does cover stays actionable ----------------------
   // Same shape as the `.gitignore` case, opposite conclusion: the manifest has hashes
   // for `.ts`, so a modified `.ts` it has never seen is a real gap, not noise.
@@ -370,6 +398,77 @@ export async function deltaTests() {
       'the verdict explains it is a same-type gap',
       (report.entries.find((entry) => entry.path === 'src/b.ts')?.reason ?? '').includes('同类'),
       String(report.entries.find((entry) => entry.path === 'src/b.ts')?.reason),
+    );
+  }
+
+  // --- symbol attribution: is a symbol-level answer even possible here? --------------
+  // A script-shaped file (the bin entry points, the test runners) has no symbols to
+  // attribute, so upstream's mapping comes back partial however fresh the index is. The
+  // report has to say that instead of letting "partial" read as a broken index.
+  {
+    const clean = await build('attribution-clean', { 'src/a.ts': 'export const a = 1;\n' });
+    await clean.index();
+    const cleanReport = await readDelta(clean.root);
+    check(
+      'a clean tree attributes to symbols without a notice',
+      cleanReport.attribution === 'symbols',
+      String(cleanReport.attribution),
+    );
+  }
+
+  {
+    // Every change is a file the index's own policy skips. A file the repository *gained*
+    // would be "added", so the fixture modifies one the index never recorded instead
+    // (same shape as the `.gitignore` case above).
+    const fixture = await build('attribution-excluded', {
+      'src/a.ts': 'export const a = 1;\n',
+      '.gitignore': 'node_modules/\n',
+    });
+    await fixture.index({ 'src/a.ts': 'export const a = 1;\n' });
+    await fs.writeFile(path.join(fixture.root, '.gitignore'), 'node_modules/\n.tmp-probe/\n');
+    const report = await readDelta(fixture.root);
+    check(
+      'a change set of only excluded files is unknown, not not-applicable',
+      report.attribution === 'unknown',
+      JSON.stringify({ attribution: report.attribution, entries: report.entries }),
+    );
+  }
+
+  {
+    // The index hashes only `src/a.ts`. A new `src/script.ts` is a same-type gap (the
+    // index does hash `.ts`), so it is added rather than excluded — and it is not in
+    // `fileHashes`, so no symbol answer can cover it.
+    const fixture = await build('attribution-unindexed', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index({ 'src/a.ts': 'export const a = 1;\n' });
+    await fs.writeFile(path.join(fixture.root, 'src', 'script.ts'), 'console.log("top-level");\n');
+    const report = await readDelta(fixture.root);
+    check(
+      'a change set outside fileHashes is not-applicable',
+      report.attribution === 'not-applicable',
+      JSON.stringify({ attribution: report.attribution, entries: report.entries }),
+    );
+    check(
+      'and the one-line verdict carries the sentence, not just the enum',
+      describeDelta(report).includes('符号归因不适用') && describeDelta(report).includes('这不是索引过期'),
+      describeDelta(report),
+    );
+  }
+
+  {
+    // A modified file the index does hash: symbol attribution is meaningful.
+    const fixture = await build('attribution-symbols', { 'src/a.ts': 'export const a = 1;\n' });
+    await fixture.index();
+    await fs.writeFile(path.join(fixture.root, 'src', 'a.ts'), 'export const a = 2;\n');
+    const report = await readDelta(fixture.root);
+    check(
+      'a modified indexed file keeps symbol attribution',
+      report.attribution === 'symbols',
+      JSON.stringify({ attribution: report.attribution, entries: report.entries }),
+    );
+    check(
+      'and no attribution sentence is added',
+      !describeDelta(report).includes('符号归因不适用'),
+      describeDelta(report),
     );
   }
 

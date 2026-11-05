@@ -382,6 +382,16 @@ export function MaintenanceSection({
                     `${excludedCount} 个改动属索引排除范围（超大文件等），刷新也不会收录，因此不计入刷新依据。`,
                   )
                 : null,
+              // Script-shaped files (the bin entry points, the test runners) carry no
+              // symbols at all, so "partial" is not evidence of a stale index. The wording
+              // matches `SYMBOL_ATTRIBUTION_NOTICE` in `src/gitnexus/delta.ts`.
+              gate?.attribution === 'not-applicable'
+                ? h(
+                    'div',
+                    { style: MUTED },
+                    '本次改动全部落在索引未覆盖的文件（脚本/测试入口/文档），符号归因不适用——这不是索引过期。',
+                  )
+                : null,
             )
         : gate !== null && Array.isArray(gate.notes) && gate.notes.length > 0
           ? // No gate: either the comparison was impossible (legacy manifest, no git) or
