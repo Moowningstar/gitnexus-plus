@@ -4,7 +4,7 @@
 
 [English](README.md) · **简体中文**
 
-**当前版本：[0.1.11](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.11)** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
+**当前版本：[0.1.12](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.12)** · [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [问题反馈](https://github.com/Moowningstar/gitnexus-plus/issues)
 
 [插件做什么](#插件做什么) · [安装](#安装) · [遇到问题怎么解决](#遇到问题怎么解决) ·
@@ -115,6 +115,9 @@ DSH 内暴露：
   有界图投影
 - 路由 `GET /api/gitnexus/risk?repo=<project>`：驻守追踪器当前的裁决；只读快照，
   自己不会起查询
+- 路由 `GET /api/gitnexus/ledger?repo=<project>`：驻守追踪器看到的这一窗改动——
+  每个路径改了几次、哪些刚写入还没比对。只读；`pending` 明说「还没核对」，
+  不把它藏进「没有改动」
 - 路由 `POST/GET/DELETE /api/gitnexus/analyze`（唯一会改动索引的入口；`force=1` 全量重建，
   `mode=repair-fts` 只修搜索索引）
 - 右侧栏 tab `gitnexus`
@@ -142,8 +145,8 @@ npm run check
 npm test
 ```
 
-`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.11 时共 1429 项（引擎 994、插件 90、
-客户端 345；其中三处引擎用例只在本地索引记录了提交时才跑，没有提交的检出报 1426）。三套 runner
+`npm test` 会先构建，再依次跑引擎、插件、客户端三套 —— 0.1.12 时共 1517 项（引擎 1070、插件 91、
+客户端 356；其中三处引擎用例只在本地索引记录了提交时才跑，没有提交的检出报 1514）。三套 runner
 各自拿自己的总数和这句话对账，对不上就失败，所以这个数字不会再漂。其中 7 项是编解码护栏：它把 GBK 能编码的每个字符映回字节，一旦连续一段又能被
 UTF-8 解码成正常文本就失败 —— 这正是双解码字符串的样子，而字符黑名单总是漏掉它。另有 6 项是
 发布卫生：`.npmrc` 与 `package-lock.json` 必须只指向 `registry.npmjs.org`（0.1.7 的 lockfile 全指

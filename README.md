@@ -4,7 +4,7 @@
 
 **English** · [简体中文](README-CN.md)
 
-**Current release: [0.1.11](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.11)** ·
+**Current release: [0.1.12](https://github.com/Moowningstar/gitnexus-plus/releases/tag/v0.1.12)** ·
 [npm](https://www.npmjs.com/package/dsh-gitnexus-plus) ·
 [Issues](https://github.com/Moowningstar/gitnexus-plus/issues)
 
@@ -296,6 +296,9 @@ Inside DSH:
   — a bounded graph projection
 - route `GET /api/gitnexus/risk?repo=<project>` — the resident tracker's current verdict;
   answers from its snapshot and never starts a query on its own
+- route `GET /api/gitnexus/ledger?repo=<project>` — the dirty window the tracker observed:
+  one file per path, how many times it changed, and which paths are written but not yet
+  compared. Read-only; `pending` names "not measured yet" instead of hiding it
 - route `POST/GET/DELETE /api/gitnexus/analyze` (the only entry that changes an index;
   `force=1` for a full rebuild, `mode=repair-fts` for the search indexes only)
 - right-sidebar tab `gitnexus`
@@ -326,9 +329,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.11 that is 1429
-checks (994 engine, 90 plugin, 345 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1426). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1517
+checks (1070 engine, 91 plugin, 356 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1514). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every
