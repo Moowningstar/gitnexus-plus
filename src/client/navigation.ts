@@ -23,6 +23,39 @@ export function fileResourceAddress(sessionId: string, filePath: string): string
     .join('/')}`;
 }
 
+/**
+ * Re-root a repository-relative path onto the indexed project, still relative to the
+ * session workspace.
+ *
+ * `fileResourceAddress` resolves its path through the session's workspace, but the
+ * graph and search APIs report paths relative to the *indexed project*, which is often
+ * a descendant of that workspace. Joining the project's path (relative to the
+ * workspace) makes a click open `workspace/project/src/...` instead of
+ * `workspace/src/...`. When the project is the workspace itself, lies outside it, or
+ * either path is missing, the input is returned unchanged.
+ *
+ * @param {string} filePath repo-relative path from the graph/search answer
+ * @param {string | null | undefined} projectPath absolute path of the indexed project
+ * @param {string | null | undefined} workspacePath absolute path of the session workspace
+ * @returns {string}
+ */
+export function workspaceRelativeFile(
+  filePath: string,
+  projectPath: string | null | undefined,
+  workspacePath: string | null | undefined,
+): string {
+  const file = filePath.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+  if (file === '' || file.startsWith('/') || /^[A-Za-z]:\//.test(file)) return file;
+  if (typeof projectPath !== 'string' || typeof workspacePath !== 'string') return file;
+  const trim = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '');
+  const project = trim(projectPath);
+  const workspace = trim(workspacePath);
+  if (project === '' || workspace === '' || project.toLowerCase() === workspace.toLowerCase()) return file;
+  if (!project.toLowerCase().startsWith(workspace.toLowerCase() + '/')) return file;
+  const prefix = project.slice(workspace.length + 1);
+  return prefix === '' ? file : `${prefix}/${file}`;
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------

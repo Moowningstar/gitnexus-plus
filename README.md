@@ -351,9 +351,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1520
-checks (1072 engine, 92 plugin, 356 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1517). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1524
+checks (1072 engine, 92 plugin, 360 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1521). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every

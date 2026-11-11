@@ -7,7 +7,7 @@
 // state it protects.
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
-import { fileResourceAddress, openResource, openResourceIn, routeUrl } from '../navigation';
+import { fileResourceAddress, openResource, openResourceIn, routeUrl, workspaceRelativeFile } from '../navigation';
 import { ClientSearchHit } from '../types';
 
 export interface KeywordSearchOptions {
@@ -15,6 +15,8 @@ export interface KeywordSearchOptions {
   projectPath: string | null;
   /** Current session, needed to build the `dsh-resource://` address for "open". */
   sessionId: string | null;
+  /** Session workspace, used to re-root repo-relative paths onto the project. */
+  workspacePath?: string | null;
 }
 
 /** The prop bag the view expects under its `search` key. */
@@ -45,7 +47,7 @@ export interface KeywordSearchState {
  * "the last search wins" and a result list that flickers backwards.
  */
 export function useKeywordSearch(options: KeywordSearchOptions): KeywordSearchState {
-  const { projectPath, sessionId } = options;
+  const { projectPath, sessionId, workspacePath } = options;
   const [query, setQuery] = React.useState('');
   const [results, setResults] = React.useState<ClientSearchHit[] | null>(null);
   const [mode, setMode] = React.useState<'graph' | 'text' | null>(null);
@@ -172,7 +174,10 @@ export function useKeywordSearch(options: KeywordSearchOptions): KeywordSearchSt
         copyHit(hit);
         return;
       }
-      const address = fileResourceAddress(sessionId, hit.filePath);
+      const address = fileResourceAddress(
+        sessionId,
+        workspaceRelativeFile(hit.filePath, projectPath, workspacePath),
+      );
       const target = hit.startLine === null ? undefined : { params: { line: hit.startLine } };
       try {
         if (openResourceIn !== null) {
@@ -189,7 +194,7 @@ export function useKeywordSearch(options: KeywordSearchOptions): KeywordSearchSt
       setError('当前宿主没有可用的文件打开能力，已复制路径。');
       copyHit(hit);
     },
-    [sessionId, copyHit],
+    [sessionId, copyHit, projectPath, workspacePath],
   );
 
   const onQueryChange = React.useCallback((value: string): void => {

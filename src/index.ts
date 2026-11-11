@@ -333,7 +333,12 @@ interface RiskToolResult {
   text: string;
   evaluated: boolean;
   verdict: 'broken' | 'exposed' | 'clear' | 'unknown';
-  reason: string | null;
+  /**
+   * Present only when the evaluation could not run. A successful evaluation stores
+   * `null` in the report; the tool omits the key so its output schema (which declares
+   * a string) accepts the result.
+   */
+  reason?: string;
   broken: number;
   exposed: number;
   blind: number;
@@ -1357,7 +1362,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
             text: formatRisk(report),
             evaluated: report.evaluated,
             verdict: report.verdict,
-            reason: report.reason,
+            // A successful evaluation stores null here; the tool's output schema declares
+            // a string, so omit the key instead of failing output validation.
+            ...(report.reason === null ? {} : { reason: report.reason }),
             broken: report.counts.broken,
             exposed: report.counts.exposed,
             blind: report.counts.blind,

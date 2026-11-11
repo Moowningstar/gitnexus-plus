@@ -125,8 +125,13 @@ export function formatReport(report: CoverageReport, withLanguages = true): stri
         .map((n) => {
           const entry = caps[n];
           if (entry === undefined) return `${n}=absent`;
-          return entry.status === 'available'
-            ? `${n}=available`
+          // `vectorSearch` reports `vector-index` when the index exists; only graph/fts
+          // use `available`.
+          const ok =
+            entry.status === 'available' ||
+            (n === 'vectorSearch' && entry.status === 'vector-index');
+          return ok
+            ? `${n}=available${entry.status === 'available' ? '' : ` (${entry.status})`}`
             : `${n}=UNAVAILABLE (${entry.skipReason ?? entry.status})`;
         })
         .join(', ')}`,
