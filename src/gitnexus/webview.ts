@@ -210,6 +210,15 @@ const PORT_ATTEMPTS = 10;
 const OUTPUT_TAIL = 4000;
 
 /**
+ * Characters of a harness refusal kept for the panel's failure sentence.
+ *
+ * Measured text can be long (the sandbox sentence names the provisioning call, the step
+ * and the object it refused), and the card renders the whole message in a `pre-wrap`
+ * paragraph — a cap keeps the layout intact while the identifying tail survives.
+ */
+const SPAWN_FAILURE_LIMIT = 1200;
+
+/**
  * Build the `gitnexus serve` command line, as the shell will read it.
  *
  * The shape is deliberately the same one `analyzeCommandLine` builds, and for the same
@@ -291,6 +300,16 @@ interface ServerRecord {
   exited: boolean;
   exitCode: number | null;
   output: string;
+  /**
+   * Why the harness refused the spawn, when `result()` rejected instead of settling.
+   *
+   * A rejection is not a process exit: there is no exit code and no child output,
+   * because the command never ran (a sandbox that cannot provision its grant, a spawn
+   * the host denied, a broken executor). That sentence is the whole diagnosis — without
+   * it the panel can only repeat "已退出" over empty output, the failure mode this
+   * plugin exists to avoid. Kept verbatim (capped) and rendered into `message`.
+   */
+  spawnFailure: string | null;
   /** What the AI settings injection did when this server was started. */
   ai: WebViewAiStatus;
   /** The generated SPA directory, when one was served; removed with the server. */
@@ -536,6 +555,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
       exited: false,
       exitCode: null,
       output: '',
+      spawnFailure: null,
       ai,
       webDist,
     };
@@ -550,8 +570,16 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
         record.exitCode = result.exitCode ?? null;
         record.output = tailOf(result);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         record.exited = true;
+        // `result()` rejects only when the harness could not run the command at all. The
+        // reason is the one diagnostic available, so it must reach the panel instead of
+        // dying here (measured: a Windows host whose sandbox could not provision the
+        // repository grant, where the panel said only "已退出" with an empty output).
+        record.spawnFailure = tailChars(
+          error instanceof Error ? error.message : String(error),
+          SPAWN_FAILURE_LIMIT,
+        );
       });
 
     const deadline = now() + startTimeoutMs;
@@ -564,10 +592,12 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
           command,
           output: record.output,
           message:
-            record.exitCode === null
-              ? 'GitNexus Web 服务已退出。'
-              : `GitNexus Web 服务启动后立即退出（exit ${record.exitCode}）。` +
-                '端口被占用、索引版本不匹配都会这样，下面的输出里有原因。',
+            record.spawnFailure !== null
+              ? `GitNexus Web 服务没能启动：${record.spawnFailure}`
+              : record.exitCode === null
+                ? 'GitNexus Web 服务已退出。'
+                : `GitNexus Web 服务启动后立即退出（exit ${record.exitCode}）。` +
+                  '端口被占用、索引版本不匹配都会这样，下面的输出里有原因。',
           ai,
         };
         return failedStatus(failure);
@@ -630,6 +660,7 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
             exited: false,
             exitCode: null,
             output: '',
+            spawnFailure: null,
             ai: {
               injected: false,
               provider: null,
@@ -719,9 +750,11 @@ export function createWebViewRunner(options: WebViewRunnerOptions): WebViewRunne
         command: current.command,
         output: current.output,
         message:
-          current.exitCode === null
-            ? 'GitNexus Web 服务已退出。'
-            : `GitNexus Web 服务已退出（exit ${current.exitCode}）。`,
+          current.spawnFailure !== null
+            ? `GitNexus Web 服务没能启动：${current.spawnFailure}`
+            : current.exitCode === null
+              ? 'GitNexus Web 服务已退出。'
+              : `GitNexus Web 服务已退出（exit ${current.exitCode}）。`,
       });
     }
     if (failure !== null) return failedStatus(failure);

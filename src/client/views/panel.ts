@@ -1,6 +1,6 @@
 import * as React from 'react';
 import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';
-import { contextDiagnostic, fileResourceAddress, openResource, openResourceIn, routeUrl, useProjectPath } from '../navigation';
+import { contextDiagnostic, fileResourceAddress, openResource, openResourceIn, routeUrl, useProjectPath, workspaceRelativeFile } from '../navigation';
 import { h } from '../primitives';
 import { type MaintenanceStartMode } from '../sections/maintenance';
 import { ClientAnalyzeRun, ClientDelta, ClientGraphNode, ClientGraphProjection, ClientLedgerPayload, ClientMaintenance, ClientProject, ClientProjectList, ClientReport, ClientRisk, SlotProps } from '../types';
@@ -187,7 +187,7 @@ export function CoveragePanel(props: SlotProps) {
     [projectPath],
   );
 
-  const search = useKeywordSearch({ projectPath, sessionId });
+  const search = useKeywordSearch({ projectPath, sessionId, workspacePath });
 
   // The refresh run, and the tick that makes its elapsed time advance. `run` is null
   // until something is started in this host's lifetime — a state the card renders as
@@ -852,7 +852,10 @@ export function CoveragePanel(props: SlotProps) {
     (node: ClientGraphNode): void => {
       if (node.filePath === null) return;
       setGraphError(null);
-      const address = sessionId === null ? null : fileResourceAddress(sessionId, node.filePath);
+      const address =
+        sessionId === null
+          ? null
+          : fileResourceAddress(sessionId, workspaceRelativeFile(node.filePath, projectPath, workspacePath));
       const options = node.startLine === null ? undefined : { params: { line: node.startLine } };
       try {
         if (sessionId !== null && address !== null && openResourceIn !== null) {
@@ -866,7 +869,10 @@ export function CoveragePanel(props: SlotProps) {
       } catch {
         /* fall through to copying the location */
       }
-      const text = `${node.filePath}${node.startLine === null ? '' : `:${node.startLine}`}`;
+      // Same re-rooted path the address used above: the clipboard fallback has to name a
+      // file the session workspace can resolve, not one relative to the indexed project.
+      const relative = workspaceRelativeFile(node.filePath, projectPath, workspacePath);
+      const text = `${relative}${node.startLine === null ? '' : `:${node.startLine}`}`;
       try {
         const write =
           typeof primitives.writeClipboard === 'function'
@@ -878,7 +884,7 @@ export function CoveragePanel(props: SlotProps) {
         setGraphError(`当前宿主没有可用的文件打开能力；位置：${text}`);
       }
     },
-    [sessionId],
+    [sessionId, projectPath, workspacePath],
   );
 
   const selectProject = React.useCallback(

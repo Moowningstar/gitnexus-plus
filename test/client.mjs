@@ -574,6 +574,45 @@ check(
 );
 check('missing capabilities object does not throw', I.capabilityRows(undefined).length === 3);
 
+// GitNexus reports `vector-index` for a built vector index; only graph/fts use
+// `available`. The row must read as healthy, not as an unavailable capability.
+const capsVectorIndex = I.capabilityRows({
+  vectorSearch: { provider: 'ladybugdb-vector', status: 'vector-index' },
+});
+check(
+  'vector-index reads as available',
+  capsVectorIndex[2].ok === true && capsVectorIndex[2].note === '',
+  JSON.stringify(capsVectorIndex[2]),
+);
+check(
+  'workspaceRelativeFile re-roots a project-relative path',
+  I.workspaceRelativeFile(
+    'src/app/retry-health.ts',
+    'D:\\work\\work\\new_ai\\dsh-superagent-prototype',
+    'D:\\work\\work\\new_ai',
+  ) === 'dsh-superagent-prototype/src/app/retry-health.ts',
+  I.workspaceRelativeFile(
+    'src/app/retry-health.ts',
+    'D:\\work\\work\\new_ai\\dsh-superagent-prototype',
+    'D:\\work\\work\\new_ai',
+  ),
+);
+check(
+  'workspaceRelativeFile leaves project==workspace paths unchanged',
+  I.workspaceRelativeFile('src/app.ts', 'D:\\repo', 'D:\\repo') === 'src/app.ts',
+);
+check(
+  'workspaceRelativeFile leaves absolute paths unchanged',
+  I.workspaceRelativeFile('D:\\repo\\src\\app.ts', 'D:\\repo', 'D:\\parent') === 'D:/repo/src/app.ts',
+);
+check(
+  'workspaceRelativeFile never re-roots a traversal segment',
+  // The index holds project-relative paths; a `..` in one would climb out of the project
+  // once the prefix is added, so it must be left alone rather than joined.
+  I.workspaceRelativeFile('../secret.txt', 'D:\\ws\\proj', 'D:\\ws') === '../secret.txt' &&
+    I.workspaceRelativeFile('src/../../secret.txt', 'D:\\ws\\proj', 'D:\\ws') === 'src/../../secret.txt',
+);
+
 // "vector index not built" is not "semantic search off": the provider still scans chunks
 // exactly, up to a reported ceiling, and that ceiling is the number a reader can act on.
 const capsScan = I.capabilityRows({

@@ -63,6 +63,7 @@ import {
   fileResourceAddress,
   routeUrl,
   useProjectPath,
+  workspaceRelativeFile,
 } from './navigation';
 import {
   Histogram,
@@ -257,6 +258,7 @@ export const __internals = {
     TAB_KIND,
     routeUrl,
     fileResourceAddress,
+    workspaceRelativeFile,
     formatBytes,
     fileSize,
     percent,

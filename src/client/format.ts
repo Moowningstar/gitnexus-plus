@@ -380,7 +380,11 @@ export function capabilityRows(capabilities: Record<string, ClientCapability> | 
   };
   return CAPABILITY_KEYS.map((key) => {
     const entry: ClientCapability = caps[key] ?? {};
-    const ok = entry.status === 'available';
+    // `vectorSearch` reports `vector-index` when the index exists; only the graph and
+    // FTS capabilities use `available`. Treating the vector status as unavailable made
+    // a built vector index look like an unbuilt one.
+    const ok =
+      entry.status === 'available' || (key === 'vectorSearch' && entry.status === 'vector-index');
     const raw = String(entry.skipReason ?? entry.status ?? 'unavailable');
     const reason = CAPABILITY_REASONS[raw] ?? raw;
     // The consequence matters more than the cause: an unavailable keyword index means

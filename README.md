@@ -64,7 +64,10 @@ It does not fork GitNexus, rewrite its parser, or bundle/redistribute it. `gitne
   analyzer uses, against the `GITNEXUS_HOME` registry that actually holds this
   repository, so the URL opens *this* project rather than another indexed one. A failed
   start surfaces the process's own output — a version-mismatched index shows
-  `Trying to read a database file with a different version` instead of a blank frame. An
+  `Trying to read a database file with a different version` instead of a blank frame — and
+  a command the host refused to run at all (a sandbox that cannot provision its grant, a
+  denied spawn) carries the host's own refusal message, since that sentence is the only
+  diagnosis a rejected spawn has. An
   existing server on the port is adopted (and never killed) when it can see the
   repository. The dialog opens at 86% of the usable viewport, has **紧凑 / 标准 / 铺满**
   presets, and can be dragged to any size from the bottom-right corner; the size is
@@ -351,9 +354,9 @@ npm run check
 npm test
 ```
 
-`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1520
-checks (1072 engine, 92 plugin, 356 client; three of the engine checks only run when the
-local index records a commit, so a checkout without one reports 1517). Each runner also
+`npm test` builds and runs the engine, plugin and client suites — at 0.1.12 that is 1531
+checks (1076 engine, 94 plugin, 361 client; three of the engine checks only run when the
+local index records a commit, so a checkout without one reports 1528). Each runner also
 compares its own total against this sentence and fails when the two disagree, so the number
 cannot drift again. Seven of those are an
 encoding guard: it maps every
@@ -487,7 +490,7 @@ GitNexus path owns the rest.
 | The panel shows a blocked store — `BLOCKED (foreign)`, `BLOCKED (invalid_storage)` — and offers only **全量重建** | GitNexus distinguishes six storage states, not two: `foreign` means the manifest names a different repository or storage directory (the checkout moved, or the directory was copied together with its `.gitnexus`); `invalid_storage` means a manifest exists but does not parse; `unknown` is this plugin's own state for "the bytes could not be read", kept separate so an unreadable store is not called malformed. `analyze` (the initialize command) is refused in all three, so `--force` — **全量重建** — is the only operation that works, and it rebuilds the index for this checkout. Until 0.1.11 the panel collapsed these into "还没有索引" and offered 初始化索引, the one command upstream rejects; the text output said `NOT FOUND` for the same reason. Both now name the state (`GitNexus index: BLOCKED (<state>)`) and the remedy. | Upstream's storage resolver (1.6.13+); this plugin's `readStorageState` and the blocked screen. |
 | The graph card is empty, or fails with 404 | A 404 means the host predates `/api/gitnexus/graph` — restart DSH, not just the page. An empty canvas with a message means the index has no communities yet (an old index), or the store is busy: refresh the index. Nodes are capped by design; the card states how much it left out. | This plugin's host route; graph data itself comes from the GitNexus index. |
 | The graph loads for some projects but spins or returns 504 for others | On Windows the ACL sandbox's first workspace grant propagates an inheritable ACE across the whole repository, which can exceed the 25 s helper timeout on a large tree; a project whose grant is already cached is fast. Since 0.1.5 the search/graph helpers root the policy at `<repo>/.gitnexus`, so the grant covers only the index; restart DSH. If it still fails, confirm `.gitnexus/lbug` exists and that no analyze is holding the index. | This plugin's sandbox policy root; graph data itself comes from the GitNexus index. |
-| The 3D view will not open, or its overlay stays blank | Read the card first: `unavailable` means the host has no shell executor or the machine has no `gitnexus` CLI (the card prints the install command); `failed` carries the child process's own output, where a busy port (`EADDRINUSE`) and an index written by another CLI version (`database file version`) are the two common cases. `服务在跑，但索引对不上` means the server on that port does not list this repository in its registry: refresh this repository's index, or stop the server you started yourself. A missing card or a 404 means the host never mounted the route — restart DSH. | This plugin's web-view lifecycle; the SPA is the `web/` directory inside the GitNexus package. |
+| The 3D view will not open, or its overlay stays blank | Read the card first: `unavailable` means the host has no shell executor or the machine has no `gitnexus` CLI (the card prints the install command); `failed` carries the child process's own output, where a busy port (`EADDRINUSE`) and an index written by another CLI version (`database file version`) are the two common cases. A command the host refused to run at all (a sandbox that cannot provision its grant, a denied spawn) carries the host's own reason instead of a bare "exited" with empty output. `服务在跑，但索引对不上` means the server on that port does not list this repository in its registry: refresh this repository's index, or stop the server you started yourself. A missing card or a 404 means the host never mounted the route — restart DSH. | This plugin's web-view lifecycle; the SPA is the `web/` directory inside the GitNexus package. |
 | The AI settings inside the 3D view are still empty | The **AI 设置** line on the card names the reason: no `GITNEXUS_PLUS_AI_*` variables set (export them and restart DSH or press **重新启动**), a partial set (`缺少 GITNEXUS_PLUS_AI_MODEL` / `缺少 GITNEXUS_PLUS_AI_API_KEY`), or `外部启动的服务` — that server was not started by the plugin, so its page cannot be seeded and the dialog has to be filled once by hand. The variables are read from the DSH process environment, so a restart is required after changing them. | This plugin's generated page (`GITNEXUS_WEB_DIST`); the SPA keeps its own settings in `sessionStorage`. |
 | Clicking a search hit does not open a file | The click uses `ctx.sidebarRight.openResourceIn`; a profile without that service falls back to copying `path:line`. Restart DSH; if it persists, use the Copy button. | This panel/DSH boundary; no upstream GitNexus path. |
 | The file timeline fails with 404/401 | The client hot-reloaded before the host did, so `/api/gitnexus/file-history` is not mounted yet. Restart DSH (not just refresh the page). | This plugin's host route; no upstream GitNexus path. |

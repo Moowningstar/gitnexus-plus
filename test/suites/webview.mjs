@@ -456,6 +456,49 @@ export async function webViewTests() {
     died.output,
   );
 
+  // `result()` can reject instead of settling: the harness refused to run the command at
+  // all (a sandbox that cannot provision its grant, a spawn the host denied). There is no
+  // exit code and no child output then, so the rejection's own sentence is the whole
+  // diagnosis. Measured on a Windows host whose sandbox refused the repository grant:
+  // the panel said only "GitNexus Web 服务已退出" over an empty output.
+  const refusedResult = Promise.reject(
+    new Error(
+      'sandbox mode "workspace-write" is requested but no sandbox backend is usable on this host; ' +
+        'Runner failure: windows-acl-run: SetNamedSecurityInfoW failed (Win32 5): grantWrite(D:/repo)',
+    ),
+  );
+  // The runner only reads the handle after its registry probes settle, and an unhandled
+  // rejection would take the whole process down before that. This keeps the rejection
+  // classified; the runner attaches its own handler when it gets the handle.
+  refusedResult.catch(() => {});
+  const refusedShell = makeShell(refusedResult);
+  const refused = createWebViewRunner({
+    shell: refusedShell.shell,
+    port: 4747,
+    toolchain,
+    registryHomes: () => [homeDir],
+    fetchLike: makeFetch(new Map()),
+    sleep: async () => {},
+    startTimeoutMs: 500,
+  });
+  const refusedView = await refused.start(repoDir);
+  check(
+    'a refused spawn reports the harness reason instead of a bare exit',
+    refusedView.state === 'failed' && refusedView.message.includes('no sandbox backend is usable'),
+    refusedView.message,
+  );
+  check(
+    'the refused spawn keeps the object it could not provision',
+    refusedView.message.includes('grantWrite'),
+    refusedView.message,
+  );
+  const refusedAgain = await refused.status(repoDir);
+  check(
+    'the refusal survives the status poll that follows the start',
+    refusedAgain.state === 'failed' && refusedAgain.message.includes('no sandbox backend is usable'),
+    refusedAgain.message,
+  );
+
   const wrongServers = new Map();
   const wrongShell = makeShell(neverStops, {
     onStart: () => wrongServers.set(4747, { up: true, repos: ['/other/repo'] }),
