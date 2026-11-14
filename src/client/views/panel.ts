@@ -869,7 +869,10 @@ export function CoveragePanel(props: SlotProps) {
       } catch {
         /* fall through to copying the location */
       }
-      const text = `${node.filePath}${node.startLine === null ? '' : `:${node.startLine}`}`;
+      // Same re-rooted path the address used above: the clipboard fallback has to name a
+      // file the session workspace can resolve, not one relative to the indexed project.
+      const relative = workspaceRelativeFile(node.filePath, projectPath, workspacePath);
+      const text = `${relative}${node.startLine === null ? '' : `:${node.startLine}`}`;
       try {
         const write =
           typeof primitives.writeClipboard === 'function'

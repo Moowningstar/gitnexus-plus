@@ -133,7 +133,11 @@ export function useKeywordSearch(options: KeywordSearchOptions): KeywordSearchSt
   }, []);
 
   const copyHit = React.useCallback((hit: ClientSearchHit): void => {
-    const text = `${hit.filePath}${hit.startLine !== null ? `:${hit.startLine}` : ''}`;
+    // The same re-rooted path the open handler builds: what is copied has to resolve
+    // from the session workspace, or the fallback this plugin offers when a profile has
+    // no column copies a path that does not exist there.
+    const relative = workspaceRelativeFile(hit.filePath, projectPath, workspacePath);
+    const text = `${relative}${hit.startLine !== null ? `:${hit.startLine}` : ''}`;
     const key = `${hit.kind}:${hit.filePath}:${hit.startLine ?? ''}:${hit.name}`;
     const write =
       typeof primitives.writeClipboard === 'function'
@@ -155,7 +159,7 @@ export function useKeywordSearch(options: KeywordSearchOptions): KeywordSearchSt
     } catch {
       setCopied(null);
     }
-  }, []);
+  }, [projectPath, workspacePath]);
 
   /**
    * Open a hit in the platform's file viewer at its line.

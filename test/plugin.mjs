@@ -279,6 +279,38 @@ check(
   JSON.stringify(riskTool?.parameters?.properties),
 );
 
+// The tool's value, not just its schema: a successful evaluation stores `reason: null`,
+// and DSH rejects a null where the schema declares a string (`"value.reason" must be a
+// string`). Omitting the key is the fix, so the shape is asserted directly.
+{
+  const { riskReportFromQuery, unknownRisk } = await import('../lib/gitnexus/risk.js');
+  const success = plugin.riskToolResult(
+    riskReportFromQuery(
+      {
+        counts: { broken: 0, exposed: 0, blind: 0, crossCommunity: 0 },
+        broken: [],
+        exposed: [],
+        blind: [],
+        truncated: false,
+        filesTruncated: false,
+        notes: [],
+      },
+      'delta-key',
+    ),
+  );
+  check(
+    'a successful evaluation omits the null reason',
+    success.evaluated === true && !('reason' in success),
+    JSON.stringify(success),
+  );
+  const unevaluated = plugin.riskToolResult(unknownRisk('索引无法读取', null));
+  check(
+    'an unevaluated report keeps its reason',
+    unevaluated.evaluated === false && unevaluated.reason === '索引无法读取',
+    JSON.stringify(unevaluated),
+  );
+}
+
 // `kind` and `include_content` describe *how* to answer, not *what* is being asked. A call
 // carrying only those must be refused with the way out, before any subprocess is started.
 {

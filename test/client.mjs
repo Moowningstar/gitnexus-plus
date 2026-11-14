@@ -605,6 +605,13 @@ check(
   'workspaceRelativeFile leaves absolute paths unchanged',
   I.workspaceRelativeFile('D:\\repo\\src\\app.ts', 'D:\\repo', 'D:\\parent') === 'D:/repo/src/app.ts',
 );
+check(
+  'workspaceRelativeFile never re-roots a traversal segment',
+  // The index holds project-relative paths; a `..` in one would climb out of the project
+  // once the prefix is added, so it must be left alone rather than joined.
+  I.workspaceRelativeFile('../secret.txt', 'D:\\ws\\proj', 'D:\\ws') === '../secret.txt' &&
+    I.workspaceRelativeFile('src/../../secret.txt', 'D:\\ws\\proj', 'D:\\ws') === 'src/../../secret.txt',
+);
 
 // "vector index not built" is not "semantic search off": the provider still scans chunks
 // exactly, up to a reported ceiling, and that ceiling is the number a reader can act on.

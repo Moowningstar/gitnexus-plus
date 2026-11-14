@@ -798,7 +798,17 @@ export async function formatTests() {
   await fs.writeFile(path.join(repo, 'index.ts'), 'export const answer = 42;\n');
   await fs.writeFile(
     path.join(repo, '.gitnexus', 'gitnexus.json'),
-    JSON.stringify({ stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0 }, branch: 'main' }),
+    JSON.stringify({
+      stats: { files: 1, nodes: 1, edges: 0, communities: 0, processes: 0 },
+      branch: 'main',
+      // GitNexus reports `vector-index` for a built vector index; only graph/fts use
+      // `available`. The text form must not call a built index UNAVAILABLE.
+      capabilities: {
+        graph: { provider: 'ladybugdb', status: 'available' },
+        fts: { provider: 'ladybugdb-fts', status: 'available' },
+        vectorSearch: { provider: 'ladybugdb-vector', status: 'vector-index' },
+      },
+    }),
   );
   try {
     const report = await analyzeCoverage(repo, {});
@@ -806,6 +816,10 @@ export async function formatTests() {
     check('renders the repository name', text.includes('data-screen'));
     check('renders totals line', text.includes('scanned'));
     check('renders language rows', text.includes('Languages'));
+    check(
+      'a built vector index reads as available, with its status',
+      text.includes('vectorSearch=available (vector-index)'),
+    );
     check('contains no ANSI escapes', !/\u001b\[/.test(text), JSON.stringify(text.slice(0, 60)));
     check('withLanguages=false drops the breakdown', !formatReport(report, false).includes('Languages'));
   } finally {

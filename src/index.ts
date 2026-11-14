@@ -347,6 +347,31 @@ interface RiskToolResult {
 }
 
 /**
+ * Build the `gitnexus_risk` tool value from one report.
+ *
+ * The one invariant worth a regression test lives here: a successful evaluation stores
+ * `null` in `reason` (`riskReportFromQuery`), while the tool's output schema declares a
+ * string, so the key is omitted rather than carried as `null` — DSH rejects the whole
+ * result otherwise (`"value.reason" must be a string`). The failure path keeps its
+ * explanation, because that sentence is the only diagnosis an unevaluated report has.
+ * @param report - the tracker's current report
+ * @returns the tool value, with `reason` present only when the evaluation failed
+ */
+export function riskToolResult(report: RiskReport): RiskToolResult {
+  return {
+    text: formatRisk(report),
+    evaluated: report.evaluated,
+    verdict: report.verdict,
+    ...(report.reason === null ? {} : { reason: report.reason }),
+    broken: report.counts.broken,
+    exposed: report.counts.exposed,
+    blind: report.counts.blind,
+    crossCommunity: report.counts.crossCommunity,
+    truncated: report.truncated || report.filesTruncated,
+  };
+}
+
+/**
  * What all three graph tools return.
  *
  * `ok` is spare but load-bearing: a model that only reads `text` should still be able
@@ -1358,19 +1383,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           if (args.refresh === true) await tracker.refreshRisk();
           else await tracker.settle();
           const report: RiskReport = tracker.snapshot().risk ?? unknownRisk('尚未评估。', null);
-          return {
-            text: formatRisk(report),
-            evaluated: report.evaluated,
-            verdict: report.verdict,
-            // A successful evaluation stores null here; the tool's output schema declares
-            // a string, so omit the key instead of failing output validation.
-            ...(report.reason === null ? {} : { reason: report.reason }),
-            broken: report.counts.broken,
-            exposed: report.counts.exposed,
-            blind: report.counts.blind,
-            crossCommunity: report.counts.crossCommunity,
-            truncated: report.truncated || report.filesTruncated,
-          };
+          return riskToolResult(report);
         },
         presentCall: (args) => ({
           card: 'generic',

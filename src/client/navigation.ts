@@ -46,6 +46,10 @@ export function workspaceRelativeFile(
 ): string {
   const file = filePath.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
   if (file === '' || file.startsWith('/') || /^[A-Za-z]:\//.test(file)) return file;
+  // A `..` segment would climb out of the project once the prefix is added, turning a
+  // click into a read of a path the index does not describe. The index only ever holds
+  // project-relative file paths, so a traversal segment is not a path to re-root.
+  if (file.split('/').includes('..')) return file;
   if (typeof projectPath !== 'string' || typeof workspacePath !== 'string') return file;
   const trim = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '');
   const project = trim(projectPath);
